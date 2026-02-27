@@ -1,17 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-粘弹性边界条件脚本 (适用于Abaqus 2021)
-
-功能：
-1. 自动创建粘弹性边界条件，包括弹簧-阻尼器系统的参数定义与配置
-2. 将地震输入数据等效转换为模型边界节点力
-3. 完整的模型初始化、边界条件施加、荷载转换及分析步设置流程
-4. 参数化设计，允许用户通过变量调整相关参数
-5. 输出必要的计算结果信息，包括边界节点力时程数据及相关状态报告
-
-作者：Abaqus Scripting Team
-日期：2026-02-10
-"""
 
 import numpy as np
 from abaqus import *
@@ -52,26 +39,26 @@ class ViscousSpringBoundary:
             # 获取或创建模型
             if self.model_name in mdb.models:
                 self.model = mdb.models[self.model_name]
-                print(f"使用现有模型: {self.model_name}")
+                print("Using existing model: {}".format(self.model_name))
             else:
                 self.model = mdb.Model(name=self.model_name)
-                print(f"创建新模型: {self.model_name}")
+                print("Creating new model: {}".format(self.model_name))
             
             # 获取或创建零件
             if self.part_name in self.model.parts:
                 self.part = self.model.parts[self.part_name]
-                print(f"使用现有零件: {self.part_name}")
+                print("Using existing part: {}".format(self.part_name))
             else:
                 # 创建默认零件（用户可根据需要修改）
                 self.part = self.model.Part(name=self.part_name, dimensionality=THREE_D, type=DEFORMABLE_BODY)
-                print(f"创建新零件: {self.part_name}")
+                print("Creating new part: {}".format(self.part_name))
             
             # 创建分析步
             self.create_analysis_steps(params)
             
             return True
         except Exception as e:
-            print(f"初始化模型失败: {str(e)}")
+            print("Failed to initialize model: {}".format(str(e)))
             return False
     
     def create_analysis_steps(self, params):
@@ -95,7 +82,7 @@ class ViscousSpringBoundary:
             minInc=params["min_time_increment"],
             maxInc=params["max_time_increment"]
         )
-        print("创建分析步完成")
+        print("Analysis steps created successfully")
     
     def load_earthquake_data(self, filepath, dt=None):
         """
@@ -128,14 +115,14 @@ class ViscousSpringBoundary:
                 "duration": time[-1] if len(time) > 0 else 0
             }
             
-            print(f"加载地震波数据成功: {filepath}")
-            print(f"地震波时长: {self.earthquake_data['duration']}秒")
-            print(f"时间步长: {self.earthquake_data['dt']}秒")
-            print(f"数据点数量: {len(time)}")
+            print("Earthquake data loaded successfully: {}".format(filepath))
+            print("Earthquake duration: {} seconds".format(self.earthquake_data['duration']))
+            print("Time step: {} seconds".format(self.earthquake_data['dt']))
+            print("Number of data points: {}".format(len(time)))
             
             return True
         except Exception as e:
-            print(f"加载地震波数据失败: {str(e)}")
+            print("Failed to load earthquake data: {}".format(str(e)))
             return False
     
     def calculate_node_influence(self, node_set_name, sort_axis='x', ascending=True):
@@ -188,10 +175,10 @@ class ViscousSpringBoundary:
                 data[i, 4] = length
             
             self.node_data[node_set_name] = data
-            print(f"计算节点影响长度完成: {node_set_name}")
+            print("Node influence length calculation completed: {}".format(node_set_name))
             return data
         except Exception as e:
-            print(f"计算节点影响长度失败: {str(e)}")
+            print("Failed to calculate node influence length: {}".format(str(e)))
             return None
     
     def add_viscous_spring_boundary(self, node_set_name, params):
@@ -236,7 +223,7 @@ class ViscousSpringBoundary:
                 
                 # 添加阻尼器（法向）
                 self.model.DasDamper(
-                    name=f"Damper_Normal_{node_label}",
+                    name="Damper_Normal_{}".format(node_label),
                     region=region,
                     u1=0.0, u2=0.0, u3=0.0,
                     ur1=0.0, ur2=0.0, ur3=0.0,
@@ -245,7 +232,7 @@ class ViscousSpringBoundary:
                 
                 # 添加阻尼器（切向）
                 self.model.DasDamper(
-                    name=f"Damper_Tangent_{node_label}",
+                    name="Damper_Tangent_{}".format(node_label),
                     region=region,
                     u1=0.0, u2=0.0, u3=0.0,
                     ur1=0.0, ur2=0.0, ur3=0.0,
@@ -255,7 +242,7 @@ class ViscousSpringBoundary:
                 # 添加弹簧（如果需要）
                 if k_normal > 0:
                     self.model.Spring(
-                        name=f"Spring_Normal_{node_label}",
+                        name="Spring_Normal_{}".format(node_label),
                         region=region,
                         u1=0.0, u2=0.0, u3=0.0,
                         ur1=0.0, ur2=0.0, ur3=0.0,
@@ -264,17 +251,17 @@ class ViscousSpringBoundary:
                 
                 if k_tangent > 0:
                     self.model.Spring(
-                        name=f"Spring_Tangent_{node_label}",
+                        name="Spring_Tangent_{}".format(node_label),
                         region=region,
                         u1=0.0, u2=0.0, u3=0.0,
                         ur1=0.0, ur2=0.0, ur3=0.0,
                         amplitude=UNSET
                     )
             
-            print(f"添加粘弹性边界条件完成: {node_set_name}")
+            print("Viscous spring boundary added successfully: {}".format(node_set_name))
             return True
         except Exception as e:
-            print(f"添加粘弹性边界条件失败: {str(e)}")
+            print("Failed to add viscous spring boundary: {}".format(str(e)))
             return False
     
     def convert_earthquake_to_forces(self, node_set_name, params):
@@ -314,10 +301,10 @@ class ViscousSpringBoundary:
                 })
             
             self.results["boundary_forces"] = forces
-            print(f"地震波转换为边界节点力完成: {node_set_name}")
+            print("Earthquake converted to boundary node forces successfully: {}".format(node_set_name))
             return forces
         except Exception as e:
-            print(f"地震波转换为边界节点力失败: {str(e)}")
+            print("Failed to convert earthquake to boundary node forces: {}".format(str(e)))
             return None
     
     def create_analysis_steps(self, params):
@@ -341,7 +328,7 @@ class ViscousSpringBoundary:
             minInc=params["min_time_increment"],
             maxInc=params["max_time_increment"]
         )
-        print("创建分析步完成")
+        print("Analysis steps created successfully")
     
     def export_results(self, output_dir):
         """
@@ -363,33 +350,33 @@ class ViscousSpringBoundary:
                     node_forces = force_data["forces"]
                     
                     # 创建输出文件
-                    output_file = os.path.join(output_dir, f"node_{node_label}_forces.txt")
+                    output_file = os.path.join(output_dir, "node_{}_forces.txt".format(node_label))
                     
                     # 准备数据
                     data = np.column_stack((self.earthquake_data["time"], node_forces))
                     
                     # 写入文件
                     np.savetxt(output_file, data, header="Time (s)    Force (N)", fmt="%.6f %.6f")
-                    print(f"导出节点力时程数据: {output_file}")
+                    print("Exported node force time history data: {}".format(output_file))
             
             # 导出状态报告
             report_file = os.path.join(output_dir, "status_report.txt")
             with open(report_file, "w") as f:
-                f.write("粘弹性边界条件分析报告\n")
+                f.write("Viscous Spring Boundary Analysis Report\n")
                 f.write("=" * 50 + "\n")
-                f.write(f"模型名称: {self.model_name}\n")
-                f.write(f"零件名称: {self.part_name}\n")
+                f.write("Model Name: {}\n".format(self.model_name))
+                f.write("Part Name: {}\n".format(self.part_name))
                 if self.earthquake_data:
-                    f.write(f"地震波时长: {self.earthquake_data['duration']}秒\n")
-                    f.write(f"时间步长: {self.earthquake_data['dt']}秒\n")
-                f.write(f"节点集数量: {len(self.node_data)}\n")
-                f.write(f"边界节点力文件数量: {len(self.results.get('boundary_forces', []))}\n")
-                f.write("\n分析完成！\n")
+                    f.write("Earthquake Duration: {} seconds\n".format(self.earthquake_data['duration']))
+                    f.write("Time Step: {} seconds\n".format(self.earthquake_data['dt']))
+                f.write("Number of Node Sets: {}\n".format(len(self.node_data)))
+                f.write("Number of Boundary Node Force Files: {}\n".format(len(self.results.get('boundary_forces', []))))
+                f.write("\nAnalysis Completed!\n")
             
-            print(f"导出状态报告: {report_file}")
+            print("Exported status report: {}".format(report_file))
             return True
         except Exception as e:
-            print(f"导出结果失败: {str(e)}")
+            print("Failed to export results: {}".format(str(e)))
             return False
 
 def main():
@@ -399,8 +386,8 @@ def main():
     # 参数配置
     params = {
         # 模型参数
-        "model_name": "ViscousSpringModel",
-        "part_name": "ViscousSpringPart",
+        "model_name": "Model-1",
+        "part_name": "Part-1",
         
         # 材料参数
         "material_density": 2500.0,  # kg/m^3
@@ -440,17 +427,17 @@ def main():
     
     # 初始化模型
     if not vab.initialize_model(params):
-        print("初始化模型失败，退出程序")
+        print("Failed to initialize model, exiting program")
         return
     
     # 加载地震波数据
     if not vab.load_earthquake_data(earthquake_file):
-        print("加载地震波数据失败，退出程序")
+        print("Failed to load earthquake data, exiting program")
         return
     
     # 处理每个边界节点集
     for node_set in boundary_node_sets:
-        print(f"\n处理边界节点集: {node_set}")
+        print("\nProcessing boundary node set: {}".format(node_set))
         
         # 计算节点影响长度
         vab.calculate_node_influence(node_set)
@@ -463,10 +450,10 @@ def main():
     
     # 导出结果
     if not vab.export_results(output_dir):
-        print("导出结果失败，退出程序")
+        print("Failed to export results, exiting program")
         return
     
-    print("\n粘弹性边界条件分析完成！")
+    print("\nViscous spring boundary analysis completed!")
 
 if __name__ == "__main__":
     main()
