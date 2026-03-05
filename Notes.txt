@@ -1,2 +1,0 @@
-当需要批量安装软件包时可以创建一个txt并运行：
-pip install -r requirements.txt
