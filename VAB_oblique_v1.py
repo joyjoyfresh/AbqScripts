@@ -5,6 +5,7 @@ VAB_oblique - Virtual Abaqus Bow / Oblique loading analysis
 """
 from abaqus import *
 import abaqusConstants as C
+from abaqusConstants import ON
 from caeModules import *
 
 

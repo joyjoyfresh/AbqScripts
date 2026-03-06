@@ -543,3 +543,6 @@ def VAB_oblique(angle, cs, vv, density):
     batch_add_node_force(node_data_l, 'l', step_name)
     batch_add_node_force(node_data_r, 'r', step_name)
     batch_add_node_force(node_data_b, 'b', step_name)
+
+if __name__ == '__main__':
+    VAB_oblique(angle=15, cs=1754, vv=0.3, density=2500)
