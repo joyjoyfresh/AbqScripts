@@ -14,9 +14,6 @@ import logging
 import traceback
 
 
-# 获取脚本名（不含扩展名）
-SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
-
 LOGGER = None
 STEP_COUNTER = 0
 RUN_START_TIME = None
@@ -24,14 +21,13 @@ LAST_STEP_TIME = None
 
 
 def setup_logger(log_file=None):
-    """初始化日志器，同时输出到屏幕和文件。"""
+    """初始化日志器，输出到文件。"""
     global LOGGER, STEP_COUNTER, RUN_START_TIME, LAST_STEP_TIME
     if LOGGER is not None:
         return LOGGER
 
-    # 默认日志文件名为脚本名.log
     if log_file is None:
-        log_file = SCRIPT_NAME + '.log'
+        log_file = 'VAB-oblique.log'
 
     logging.addLevelName(logging.DEBUG, '调试')
     logging.addLevelName(logging.INFO, '信息')
@@ -39,7 +35,7 @@ def setup_logger(log_file=None):
     logging.addLevelName(logging.ERROR, '错误')
     logging.addLevelName(logging.CRITICAL, '严重')
 
-    logger = logging.getLogger(SCRIPT_NAME)
+    logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
@@ -48,10 +44,6 @@ def setup_logger(log_file=None):
             '%(asctime)s [%(levelname)s] %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        logger.addHandler(stream_handler)
 
         file_handler = logging.FileHandler(log_file, mode='w')
         file_handler.setFormatter(formatter)
@@ -79,6 +71,42 @@ def log_step(logger, message, *args):
     logger.info('[步骤 %04d][用时%.3fs][总用时%.3fs] ' + message,
                 STEP_COUNTER, delta_last, delta_total, *args)
     LAST_STEP_TIME = now
+
+
+def get_time_params_from_vel(logger=None):
+    """
+    从 VEL.txt 文件读取分析步总时长和固定增量步大小。
+
+    参数:
+        logger: 日志对象
+    返回:
+        (time_period, initial_inc): 分析步总时长和初始增量步
+    """
+    time_period = 2.0   # 默认分析步总时长 (s)
+    initial_inc = 0.001  # 默认初始增量步 (s)
+
+    VELtxt = 'VEL.txt'
+    if os.path.exists(VELtxt):
+        try:
+            vel_data = np.loadtxt(VELtxt)
+            if vel_data.ndim == 2 and vel_data.shape[0] >= 2 and vel_data.shape[1] >= 2:
+                time_arr = vel_data[:, 0]
+                dt = time_arr[1] - time_arr[0]
+                if dt > 0:
+                    time_period = time_arr[-1]
+                    initial_inc = dt
+                    log_step(logger, '已从 VEL.txt 自动设置分析步: 时长=%.6f, 初始增量=%.6f',
+                             time_period, initial_inc)
+                else:
+                    log_step(logger, 'VEL.txt 中 dt <= 0，将使用默认值')
+            else:
+                log_step(logger, 'VEL.txt 格式无效，将使用默认值')
+        except Exception as e:
+            log_step(logger, '读取 VEL.txt 失败: %s，将使用默认值', str(e))
+    else:
+        log_step(logger, '未找到 VEL.txt，将使用默认值')
+
+    return time_period, initial_inc
 
 
 def create_model(width, height, cs, vv, density, mesh_size,
@@ -158,8 +186,7 @@ def create_model(width, height, cs, vv, density, mesh_size,
     log_step(logger, '动力分析步已创建: 时长=%.6f, 初始增量=%.6f',
              time_period, initial_inc)
 
-    # 修改：设置场输出请求，确保每一帧数据都能输出到 odb 文件中
-    # 默认情况下，Abaqus 只有几个关键帧。我们这里强制每个增量步都输出。
+    # 修改：设置场输出请求，每10帧数据都能输出到 odb 文件中
     model.fieldOutputRequests['F-Output-1'].setValues(
         variables=('S', 'E', 'U', 'V', 'A', 'RF'),
         frequency=10)
@@ -780,64 +807,42 @@ def submit_job(job_name='Job-VAB', num_cpus=7, memory_percent=90, logger=None):
 
 
 if __name__ == '__main__':
-    logger = setup_logger()
+    log_file = 'VAB-oblique.log'  #* 日志文件名（可修改）
+    logger = setup_logger(log_file)
     total_start = time.time()
     try:
         log_step(logger, '脚本入口')
-        # ===== 参数设置 =====
-        angle = 15        # SV波入射角度（度）
-        E = 20e9          # 杨氏模量 (Pa) (相当于之前的剪切波速 1754 m/s)
-        vv = 0.3          # 泊松比
-        density = 2500    # 密度 (kg/m³)
+        # ===== 土体参数设置 =====
+        angle = 15        # *SV波入射角度（度）
+        E = 20e9          # *杨氏模量 (Pa)
+        vv = 0.3          # *泊松比
+        density = 2500    # *密度 (kg/m³)
 
         # 由杨氏模量自动计算剪切波速 (m/s)
         cs = math.sqrt((E / (2 * (1 + vv))) / density)
 
-        width = 2000.0     # 模型宽度 (m)
-        height = 1000.0    # 模型高度 (m)
-        mesh_size = 5.0   # 网格尺寸 (m)
-        log_step(logger, '输入参数已准备: 入射角=%.3f, 杨氏模量E=%.6e, 泊松比=%.3f, 密度=%.3f, 宽度=%.3f, 高度=%.3f, 网格=%.3f',
-                 angle, E, vv, density, width, height, mesh_size)
-
-        # ============ 自动读取VEL.txt文件里的分析步总时长和固定增量步大小 ============
-        time_period = 2.0     # 默认分析步总时长 (s) (找不到文件时的备用值)
-        initial_inc = 0.001   # 默认初始增量步 (s) (找不到文件时的备用值)
-
-        VELtxt = 'VEL.txt'
-        if os.path.exists(VELtxt):
-            vel_data = np.loadtxt(VELtxt)
-            if vel_data.ndim == 2 and vel_data.shape[0] >= 2 and vel_data.shape[1] >= 2:
-                time_arr = vel_data[:, 0]
-                dt = time_arr[1] - time_arr[0]
-                if dt > 0:
-                    time_period = time_arr[-1]   # 分析步总时长 (s)
-                    initial_inc = dt             # 初始增量步 (s)
-                    log_step(logger, '已从 VEL.txt 自动设置分析步: 时长=%.6f, 初始增量=%.6f',
-                             time_period, initial_inc)
-                else:
-                    log_step(logger, 'VEL.txt 中 dt <= 0，分析步设置回退默认值')
-            else:
-                log_step(logger, 'VEL.txt 格式无效，分析步设置回退默认值')
-        else:
-            log_step(logger, '未找到 VEL.txt，分析步设置回退默认值')
-
-        job_name = 'Job-VAB'  # 作业名称
-        num_cpus = 7         # CPU数量
-        cae_name = 'VAB_oblique.cae'  # CAE文件名（可修改）
-        log_step(logger, '作业参数已准备: 作业名=%s, CPU 数量=%d', job_name, num_cpus)
-
+        # ====== 模型参数设置 =======
+        width = 2000.0                  # *模型宽度 (m)
+        height = 1000.0                 # *模型高度 (m)
+        mesh_size = 5.0                 # *网格尺寸 (m)
+        job_name = 'Job-VAB'            # *作业名称
+        num_cpus = 7                    # *CPU数量
+        cae_name = 'VAB_oblique.cae'    # *CAE文件名（可修改）
+        log_step(logger, '输入参数已准备: 入射角=%.3f, 杨氏模量E=%.6e, 泊松比=%.3f, 密度=%.3f, 宽度=%.3f, 高度=%.3f, 网格=%.3f, 作业名称=%s',
+                 angle, E, vv, density, width, height, mesh_size, job_name)
+        
+        # 自动读取VEL.txt文件里的分析步总时长和固定增量步大小
+        time_period, initial_inc = get_time_params_from_vel(logger=logger)
+        
         # ===== 执行流程 =====
         # 1. 创建模型（几何、材料、网格、装配、分析步）
         create_model(width, height, cs, vv, density, mesh_size,
                      time_period, initial_inc, logger=logger)
-
-        # 第1步完成后保存CAE文件以便检查模型基础信息
         mdb.saveAs(pathName=cae_name)
         log_step(logger, '已保存 CAE 快照: %s', cae_name)
 
         # 2. 施加粘弹性人工边界和等效节点力
         VAB_oblique(angle, cs, vv, density, logger=logger)
-        # 步骤2：在同一个CAE文件上保存添加了边界和载荷后的状态
         mdb.save()
         log_step(logger, '已在人工边界设置后保存 CAE')
 
