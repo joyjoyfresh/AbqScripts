@@ -14,17 +14,24 @@ import logging
 import traceback
 
 
+# 获取脚本名（不含扩展名）
+SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
+
 LOGGER = None
 STEP_COUNTER = 0
 RUN_START_TIME = None
 LAST_STEP_TIME = None
 
 
-def setup_logger(log_file='VAB_oblique_noGUI_v4.log'):
+def setup_logger(log_file=None):
     """初始化日志器，同时输出到屏幕和文件。"""
     global LOGGER, STEP_COUNTER, RUN_START_TIME, LAST_STEP_TIME
     if LOGGER is not None:
         return LOGGER
+
+    # 默认日志文件名为脚本名.log
+    if log_file is None:
+        log_file = SCRIPT_NAME + '.log'
 
     logging.addLevelName(logging.DEBUG, '调试')
     logging.addLevelName(logging.INFO, '信息')
@@ -32,7 +39,7 @@ def setup_logger(log_file='VAB_oblique_noGUI_v4.log'):
     logging.addLevelName(logging.ERROR, '错误')
     logging.addLevelName(logging.CRITICAL, '严重')
 
-    logger = logging.getLogger('VAB_oblique_v4')
+    logger = logging.getLogger(SCRIPT_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
@@ -69,7 +76,7 @@ def log_step(logger, message, *args):
     delta_last = now - LAST_STEP_TIME
     delta_total = now - RUN_START_TIME
     STEP_COUNTER += 1
-    logger.info('[步骤 %04d][+%.3fs|T+%.3fs] ' + message,
+    logger.info('[步骤 %04d][用时%.3fs][总用时%.3fs] ' + message,
                 STEP_COUNTER, delta_last, delta_total, *args)
     LAST_STEP_TIME = now
 
@@ -200,12 +207,13 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
              angle, cs, vv, density)
 
     # ============ 获取装配体和Part ============
-    model = mdb.models['Model-1']
-    a = model.rootAssembly
+    a = mdb.models['Model-1'].rootAssembly
     a.regenerate()
-    part = model.parts['Part-1']
+    log_step(logger, '已加载装配并重新生成')
+
+    part = mdb.models['Model-1'].parts['Part-1']
     nodes = part.nodes
-    log_step(logger, '已加载模型/装配/零件并重新生成装配')
+    log_step(logger, '已加载零件并获取节点')
 
     # ============ 提取边界节点 ============
     x_list = [node.coordinates[0] for node in nodes]
@@ -225,10 +233,6 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
     r_nodes = part.nodes.sequenceFromLabels([node.label for node in r_nodes_list])
     b_nodes = part.nodes.sequenceFromLabels([node.label for node in b_nodes_list])
 
-    for set_name in ('l_nodes', 'r_nodes', 'b_nodes'):
-        if set_name in part.sets.keys():
-            del part.sets[set_name]
-            log_step(logger, '已删除已有集合: %s', set_name)
     part.Set(name='l_nodes', nodes=l_nodes)
     part.Set(name='r_nodes', nodes=r_nodes)
     part.Set(name='b_nodes', nodes=b_nodes)
@@ -243,7 +247,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
     log_step(logger, '波速/材料参数已计算: G=%.6e, E=%.6e, lam=%.6e, cp=%.3f', GG, EE, lam, cp)
 
     # ============ 获取模型尺寸 ============
-    part = model.parts['Part-1']
+    part = mdb.models['Model-1'].parts['Part-1']
     l_nodes = part.sets['l_nodes'].nodes
     l_ymax_node = max(l_nodes, key=lambda node: node.coordinates[1])
     xmin = l_ymax_node.coordinates[0]
@@ -290,7 +294,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
         node_data = np.hstack((node_data, influence.reshape(-1, 1)))
         return node_data
 
-    part = model.parts['Part-1']
+    part = mdb.models['Model-1'].parts['Part-1']
     node_data_l = get_node_influence(part, 'l_nodes', sort_axis='y', ascending=False)
     node_data_r = get_node_influence(part, 'r_nodes', sort_axis='y', ascending=False)
     node_data_b = get_node_influence(part, 'b_nodes', sort_axis='x', ascending=True)
@@ -322,6 +326,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
     log_step(logger, '弹簧-阻尼系数已分配到所有边界节点')
 
     # ============ 在Abaqus中添加弹簧-阻尼器到地面 ============
+    model = mdb.models['Model-1']
     assembly = model.rootAssembly
     instance = assembly.instances['Part-1-1']
 
@@ -366,7 +371,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
     alpha = np.radians(angle)                    # SV波入射角(弧度)
     alpha_critical = np.arcsin(cs / cp)          # 临界角
     if alpha >= alpha_critical:
-        raise ValueError('入射角大于或等于临界角。')
+        raise ValueError('The incident angle is greater than or equal to the critical angle.')
 
     beta_p = np.arcsin(cp * np.sin(alpha) / cs)  # 反射P波角度
 
@@ -447,7 +452,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
                 det[i, 3] = t6
 
             else:
-                raise ValueError("boundary 必须是 'l'、'r' 或 'b'")
+                raise ValueError("boundary must be 'l', 'r', or 'b'")
 
         return det
 
@@ -600,7 +605,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
                 sigmay = (GG / cs * sin2a * (-v0_tA[:, 1] + A1 * v0_tB[:, 1])
                           + A2 * (lam + 2 * GG * cosbp2) / cp * v0_tC[:, 1])
             else:
-                raise ValueError("prefix 必须是 'l'、'r' 或 'b'")
+                raise ValueError("prefix must be 'l', 'r' or 'b'")
 
             sigmax_arr = np.zeros((max_len, 2))
             sigmay_arr = np.zeros((max_len, 2))
@@ -648,7 +653,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
             uy = uy_arr[:min_len, 1]
             dotuy = dotuy_arr[:min_len, 1]
             sigmay = sigmay_arr[:min_len, 1]
-            time_arr = ux_arr[:min_len, 0]
+            time = ux_arr[:min_len, 0]
 
             # 等效节点力 = 弹簧力 + 阻尼力 + 应力贡献
             if prefix in ('l', 'r'):
@@ -658,12 +663,12 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
                 fx = kt * ux + ct * dotux + A * sigmax
                 fy = kn * uy + cn * dotuy + A * sigmay
             else:
-                raise ValueError("prefix 必须是 'l'、'r' 或 'b'")
+                raise ValueError("prefix must be 'l', 'r' or 'b'")
 
             fx_arr = np.zeros((min_len, 2))
             fy_arr = np.zeros((min_len, 2))
-            fx_arr[:, 0] = time_arr
-            fy_arr[:, 0] = time_arr
+            fx_arr[:, 0] = time
+            fy_arr[:, 0] = time
             fx_arr[:, 1] = fx
             fy_arr[:, 1] = fy
 
@@ -688,20 +693,10 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
             name_amp_fx = 'AMP-{}-{}-fx'.format(node_id, prefix)
             name_amp_fy = 'AMP-{}-{}-fy'.format(node_id, prefix)
 
-            if name_amp_fx in model.amplitudes.keys():
-                del model.amplitudes[name_amp_fx]
-            if name_amp_fy in model.amplitudes.keys():
-                del model.amplitudes[name_amp_fy]
-
-            if name_amp_fx in model.amplitudes.keys():
-                del model.amplitudes[name_amp_fx]
-            if name_amp_fy in model.amplitudes.keys():
-                del model.amplitudes[name_amp_fy]
-
-            model.TabularAmplitude(
+            mdb.models['Model-1'].TabularAmplitude(
                 data=ampli_fx, name=name_amp_fx,
                 smooth=SOLVER_DEFAULT, timeSpan=STEP)
-            model.TabularAmplitude(
+            mdb.models['Model-1'].TabularAmplitude(
                 data=ampli_fy, name=name_amp_fy,
                 smooth=SOLVER_DEFAULT, timeSpan=STEP)
 
@@ -712,7 +707,7 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
 
     # ============ 施加集中力载荷 ============
     def batch_add_node_force(node_data, prefix, step_name):
-        a = model.rootAssembly
+        a = mdb.models['Model-1'].rootAssembly
         instance_name = 'Part-1-1'
         n = a.instances[instance_name].nodes
 
@@ -729,21 +724,11 @@ def VAB_oblique(angle, cs, vv, density, logger=None):
                 continue
 
             region = [node_array]
-            if name_load_fx in model.loads.keys():
-                del model.loads[name_load_fx]
-            if name_load_fy in model.loads.keys():
-                del model.loads[name_load_fy]
-
-            if name_load_fx in model.loads.keys():
-                del model.loads[name_load_fx]
-            if name_load_fy in model.loads.keys():
-                del model.loads[name_load_fy]
-
-            model.ConcentratedForce(
+            mdb.models['Model-1'].ConcentratedForce(
                 name=name_load_fx, createStepName=step_name,
                 region=region, cf1=1.0, amplitude=name_amp_fx,
                 distributionType=UNIFORM, field='', localCsys=None)
-            model.ConcentratedForce(
+            mdb.models['Model-1'].ConcentratedForce(
                 name=name_load_fy, createStepName=step_name,
                 region=region, cf2=1.0, amplitude=name_amp_fy,
                 distributionType=UNIFORM, field='', localCsys=None)
@@ -837,7 +822,8 @@ if __name__ == '__main__':
             log_step(logger, '未找到 VEL.txt，分析步设置回退默认值')
 
         job_name = 'Job-VAB'  # 作业名称
-        num_cpus = 7          # CPU数量
+        num_cpus = 7         # CPU数量
+        cae_name = 'VAB_oblique.cae'  # CAE文件名（可修改）
         log_step(logger, '作业参数已准备: 作业名=%s, CPU 数量=%d', job_name, num_cpus)
 
         # ===== 执行流程 =====
@@ -846,8 +832,8 @@ if __name__ == '__main__':
                      time_period, initial_inc, logger=logger)
 
         # 第1步完成后保存CAE文件以便检查模型基础信息
-        mdb.saveAs(pathName='VAB_oblique_v4.cae')
-        log_step(logger, '已保存 CAE 快照: VAB_oblique_v4.cae')
+        mdb.saveAs(pathName=cae_name)
+        log_step(logger, '已保存 CAE 快照: %s', cae_name)
 
         # 2. 施加粘弹性人工边界和等效节点力
         VAB_oblique(angle, cs, vv, density, logger=logger)
