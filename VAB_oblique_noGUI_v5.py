@@ -36,19 +36,19 @@ def find_vel_txt(logger=None):
     if len(txt_files) == 1:
         path = txt_files[0]
         if logger:
-            logger.info('自动识别速度时程文件: %s', path)
+            log_step(logger, '自动识别速度时程文件: %s', path)
         return path
 
     vel_files = [f for f in txt_files if 'vel' in f.lower()]
     if len(vel_files) == 1:
         path = vel_files[0]
         if logger:
-            logger.info('自动识别速度时程文件 (多文件中匹配 vel): %s', path)
+            log_step(logger, '自动识别速度时程文件 (多文件中匹配 vel): %s', path)
         return path
 
     path = sorted(txt_files)[0]
     if logger:
-        logger.warning('当前目录存在多个 .txt 文件，自动选用: %s（共 %d 个）', path, len(txt_files))
+        log_step(logger, '当前目录存在多个 .txt 文件，自动选用: %s（共 %d 个）', path, len(txt_files))
     return path
 
 
@@ -89,20 +89,14 @@ def setup_logger(log_file=None):
 
 
 def log_step(logger, message, *args):
-    """输出带步骤编号的详细日志，便于定位异常位置。"""
-    global STEP_COUNTER, RUN_START_TIME, LAST_STEP_TIME
+    """输出带总用时的详细日志，便于定位异常位置。"""
+    global RUN_START_TIME
     now = time.time()
     if RUN_START_TIME is None:
         RUN_START_TIME = now
-    if LAST_STEP_TIME is None:
-        LAST_STEP_TIME = RUN_START_TIME
 
-    delta_last = now - LAST_STEP_TIME
     delta_total = now - RUN_START_TIME
-    STEP_COUNTER += 1
-    logger.info('[步骤 %04d][用时%.3fs][总用时%.3fs] ' + message,
-                STEP_COUNTER, delta_last, delta_total, *args)
-    LAST_STEP_TIME = now
+    logger.info('[总用时%.3fs] ' + message, delta_total, *args)
 
 
 def get_time_params_from_vel(logger=None):
@@ -171,8 +165,6 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
         raise ValueError('h 必须 > 0')
     if i <= 0 or i >= 90:
         raise ValueError('倾角 i 必须在 (0, 90) 范围内')
-    if H_lower is None:
-        H_lower = 2.0 * h
     if H_lower <= 0:
         raise ValueError('H_lower 必须 > 0')
 
@@ -884,13 +876,13 @@ if __name__ == '__main__':
         cs = math.sqrt((E / (2 * (1 + vv))) / density)  # 由杨氏模量自动计算剪切波速 (m/s)
 
         # ====== 模型参数设置 =======
-        total_L = 2000.0          # *模型总水平长度 (m)
         h = 200.0                 # *斜坡高度 (m)
         i = 30.0                  # *斜坡倾角 (°)
-        H_lower = 1000            # *下垫面高度 (m)，None 时自动取 2*h
+        mesh_size_manual = 5      # *手动设置网格尺寸 (m)
         f_max = 3.33              # *目标最高频率 (Hz)，用于自动计算网格尺寸
         n_per_wave = 10           # *每波长最少单元数（建议 8~10）
-        mesh_size_manual = 5      # *手动设置网格尺寸 (m)
+        H_lower = 2.0 * h   # 下垫面高度 = 2h
+        total_L = 6.0 * h + h / math.tan(math.radians(i))  # 总长 = 左平台3h + 坡宽 + 右平台3h
         mesh_size_auto = cs / (f_max * n_per_wave)   # 自动计算网格尺寸 = Vs / (f_max * n)
         mesh_size = min(mesh_size_auto, mesh_size_manual)  # 取自动与手动中的较小值
 
@@ -899,10 +891,10 @@ if __name__ == '__main__':
         num_cpus = 7                          # *CPU数量
         cae_name = 'VAB_oblique_slope.cae'    # *CAE文件名（可修改）
         log_step(logger, '输入参数已准备')
-        
-        # 自动读取VEL.txt文件里的分析步总时长和固定增量步大小
-        time_period, initial_inc = get_time_params_from_vel(logger=logger)
-        
+        time_period, initial_inc = get_time_params_from_vel(logger=logger)   # 自动读取VEL.txt文件里的分析步总时长和固定增量步大小
+        log_step(logger, '参数设置完成: angle=%.2f°, E=%.2e Pa, vv=%.2f, density=%d kg/m³, cs=%.2f m/s, h=%.2f m, i=%.2f°, mesh_size=%.2f m, time_period=%.2f s, initial_inc=%.4f s',
+                 angle, E, vv, density, cs, h, i, mesh_size, time_period, initial_inc)
+
         # ===== 执行流程 =====
         # 1. 创建模型（几何、材料、网格、装配、分析步）
         create_model(total_L, h, i, cs, vv, density, mesh_size,
