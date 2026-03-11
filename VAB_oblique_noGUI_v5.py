@@ -884,19 +884,20 @@ if __name__ == '__main__':
         cs = math.sqrt((E / (2 * (1 + vv))) / density)  # 由杨氏模量自动计算剪切波速 (m/s)
 
         # ====== 模型参数设置 =======
-        total_L = 4000.0   # *模型总水平长度 (m)
-        h = 200.0          # *斜坡高度 (m)
-        i = 30.0           # *斜坡倾角 (°)
-        H_lower = None     # *下垫面高度 (m)，None 时自动取 2*h
-        f_max = 3.33       # *目标最高频率 (Hz)，用于自动计算网格尺寸
-        n_per_wave = 8     # *每波长最少单元数（建议 8~10）
-        mesh_size = cs / (f_max * n_per_wave)   # 自动计算网格尺寸 = Vs / (f_max * n)
+        total_L = 2000.0          # *模型总水平长度 (m)
+        h = 200.0                 # *斜坡高度 (m)
+        i = 30.0                  # *斜坡倾角 (°)
+        H_lower = 1000            # *下垫面高度 (m)，None 时自动取 2*h
+        f_max = 3.33              # *目标最高频率 (Hz)，用于自动计算网格尺寸
+        n_per_wave = 10           # *每波长最少单元数（建议 8~10）
+        mesh_size_manual = 5      # *手动设置网格尺寸 (m)
+        mesh_size_auto = cs / (f_max * n_per_wave)   # 自动计算网格尺寸 = Vs / (f_max * n)
+        mesh_size = min(mesh_size_auto, mesh_size_manual)  # 取自动与手动中的较小值
 
         # ====== 作业参数设置 ======
         job_name = 'Job-VAB'                  # *作业名称
         num_cpus = 7                          # *CPU数量
         cae_name = 'VAB_oblique_slope.cae'    # *CAE文件名（可修改）
-
         log_step(logger, '输入参数已准备')
         
         # 自动读取VEL.txt文件里的分析步总时长和固定增量步大小
