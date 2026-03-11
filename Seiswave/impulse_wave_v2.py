@@ -17,9 +17,10 @@ import matplotlib.pyplot as plt
 P0 = 0.1   # 位移振幅 (m)
 T  = 0.3   # 脉冲持续时间 (s)
 total_duration = 1.5  # 总时长 (s)
-num_points     = 1500
+dt             = 0.001  # 时间步长 (s)
 
-# 时间轴
+# 时间轴：0, 0.001, 0.002, ..., 1.5（共 1501 点）
+num_points = int(total_duration / dt) + 1
 t   = np.linspace(0, total_duration, num_points)
 tau = t / T  # 归一化时间
 
