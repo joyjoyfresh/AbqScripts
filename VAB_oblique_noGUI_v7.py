@@ -80,7 +80,7 @@ def find_vel_txt(logger=None):
                     time_period = time_arr[-1]
                     initial_inc = dt
                     if logger:
-                        log_step(logger, '已从 %s 读取分析步参数: 时长=%.6f, 初始增量=%.6f',
+                        log_step(logger, '已从 %s 读取分析步参数: 时长=%.2f, 初始增量=%.3f',
                                  f, time_period, initial_inc)
                 else:
                     if logger:
@@ -202,7 +202,7 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
 
     # 近似全局尺寸设为 mesh_size
     part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)
-    log_step(logger, '已播种网格: 尺寸=%.3f', mesh_size)
+    log_step(logger, '已播种网格: 尺寸=%.0f', mesh_size)
 
     # 指定单元类型：平面应变四节点，取消缩减积分
     elemType1 = mesh.ElemType(elemCode=CPE4, elemLibrary=STANDARD)
@@ -216,7 +216,7 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     log_step(logger, '创建基础模型完成: 节点=%d, 单元=%d', len(part.nodes), len(part.elements))
     if cae_name:
         mdb.saveAs(pathName=cae_name)
-        log_step(logger, '已保存 CAE : %s，准备施加人工边界', cae_name)
+        log_step(logger, '已保存 CAE : %s', cae_name)
     return model_name, part_name, inst_name
 
 
@@ -490,7 +490,7 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
         new_vel[:, 0] = new_times
         VEL = np.vstack([VEL, new_vel])
         DIS = np.vstack([DIS, new_vel])
-        log_step(logger, 'VEL/DIS 已用零延长: 增加行数=%d, 新总时长=%.6f',
+        log_step(logger, 'VEL/DIS 已用零延长: 增加行数=%d, 新总时长=%.3f',
                  n_add, VEL[-1, 0])
     else:
         log_step(logger, 'VEL/DIS 无需延长')
@@ -756,11 +756,10 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     batch_add_node_force(node_data_r, 'r', step_name)
     batch_add_node_force(node_data_b, 'b', step_name)
     log_step(logger, '所有边界节点已施加集中力')
+    mdb.save()
     log_step(logger, '粘弹性人工边界完成: 总节点数=%d, 耗时=%.2fs',
              node_data_l.shape[0] + node_data_r.shape[0] + node_data_b.shape[0],
              time.time() - t0)
-    mdb.save()
-    log_step(logger, '已保存 CAE，')
 
 
 def build_models(vel_info, base_model, part_name, inst_name, angle, cs, vv, density, 
@@ -802,7 +801,7 @@ def build_models(vel_info, base_model, part_name, inst_name, angle, cs, vv, dens
         model.fieldOutputRequests['F-Output-1'].setValues(
             variables=variables, frequency=frequency)
         mdb.save()
-        log_step(logger, '分析步已创建: %s, 时长=%.6f, 增量=%.6f，并保存 CAE',
+        log_step(logger, '分析步已创建: %s, 时长=%.2f, 增量=%.3f',
                  new_model_name, tp, inc)
 
         # 施加粘弹性人工边界和等效节点力
@@ -827,7 +826,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     """
     logger = logger or log_step()
     t0 = time.time()
-    job_name = model_name
+    job_name = 'job-' + model_name
     if job_name in mdb.jobs:
         del mdb.jobs[job_name]
         log_step(logger, '检测到同名旧作业，已删除: %s', job_name)
@@ -845,7 +844,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
             multiprocessingMode=DEFAULT, numGPUs=0)
 
     mdb.save()
-    log_step(logger, '%s作业已创建并保存 CAE', job_name)
+    log_step(logger, '%s作业已创建', job_name)
     mdb.jobs[job_name].submit(consistencyChecking=OFF)
     log_step(logger, '%s作业已提交，正在等待完成...', job_name)
     mdb.jobs[job_name].waitForCompletion()
@@ -865,8 +864,8 @@ if __name__ == '__main__':
         cs = math.sqrt((E / (2 * (1 + vv))) / density)  # 由杨氏模量自动计算剪切波速 (m/s)
 
         # ====== 模型参数设置 =======
-        h = 200.0                 # *斜坡高度 (m)
-        i = 30.0                  # *斜坡倾角 (°)
+        h = 200                   # *斜坡高度 (m)
+        i = 30                    # *斜坡倾角 (°)
         mesh_size_manual = 10     # *手动设置网格尺寸 (m)
         f_max = 3.33              # *目标最高频率 (Hz)，用于自动计算网格尺寸
         n_per_wave = 10           # *每波长最少单元数（建议 8~10）
@@ -876,11 +875,11 @@ if __name__ == '__main__':
         mesh_size = min(mesh_size_auto, mesh_size_manual)  # 取自动与手动中的较小值
 
         # ====== 作业参数设置 ======
-        cae_name = 'VAB_oblique_slope.cae'            # *CAE文件名（可修改）
-        num_cpus = 7                                  # *CPU数量
-        memory_percent = 90                           # *内存百分比
-        variables = ('U',)                            # *输出变量
-        frequency = 10                                # *输出频率 (Hz)
+        cae_name = 'h'+str(h)+'_i'+str(i)+'.cae'     # *CAE文件名（可修改）
+        num_cpus = 7                                 # *CPU数量
+        memory_percent = 90                          # *内存百分比
+        variables = ('U',)                           # *输出变量
+        frequency = 1                                # *输出频率 (Hz)
 
         # 1. 查找速度时程文件
         vel_info = find_vel_txt(logger)
