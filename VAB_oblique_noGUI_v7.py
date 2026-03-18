@@ -96,8 +96,190 @@ def find_vel_txt(logger=None):
     return result
 
 
+def create_node_sets(model_name, target_coords_map=None, tol=1e-3, logger=None,
+                     total_L=None, h=None, i=None, H_lower=None,
+                     slope_obs_count=None,
+                     upper_obs_count=0, upper_obs_spacing=0.0,
+                     lower_obs_count=0, lower_obs_spacing=0.0):
+    """
+    参考 NodeSet_create_v3 的思路：按坐标在根装配体中创建节点集。
+    支持两种模式：
+    1) 直接传入 target_coords_map: {set_name: (x, y, z)}
+    2) 不传 target_coords_map，由几何参数自动生成 M/U/D 观察点
+       - M: 斜坡上从顶到底均匀分布
+       - U: 从坡顶向左按间距分布
+       - D: 从坡脚向右按间距分布
+    若容差内未找到节点，则自动回退到最近节点。
+    """
+    logger = logger or log_step()
+
+    # 自动生成观察点坐标（M/U/D）
+    if target_coords_map is None:
+        if h is None or i is None or slope_obs_count is None:
+            raise ValueError('自动创建观察点时，h/i/slope_obs_count 不能为空')
+        if H_lower is None:
+            H_lower = 2.0 * h
+        if total_L is None:
+            total_L = 6.0 * h + h / math.tan(math.radians(i))
+
+        if slope_obs_count < 1:
+            raise ValueError('slope_obs_count 必须 >= 1')
+        if upper_obs_count < 0 or lower_obs_count < 0:
+            raise ValueError('upper_obs_count/lower_obs_count 不能为负数')
+        if upper_obs_spacing < 0 or lower_obs_spacing < 0:
+            raise ValueError('upper_obs_spacing/lower_obs_spacing 不能为负数')
+
+        w_slope = h / math.tan(math.radians(i))
+        L_rem = total_L - w_slope
+        if L_rem <= 0:
+            raise ValueError('斜坡水平投影 w_slope=%.3f 超过总长 total_L=%.3f' % (w_slope, total_L))
+        L_flat = L_rem / 2.0
+        H_upper = H_lower + h
+
+        slope_upper = (L_flat, H_upper, 0.0)
+        slope_lower = (L_flat + w_slope, H_lower, 0.0)
+        target_coords_map = {}
+        coord_used = []
+
+        def is_dup(pt, eps=1e-10):
+            for q in coord_used:
+                if abs(pt[0] - q[0]) < eps and abs(pt[1] - q[1]) < eps and abs(pt[2] - q[2]) < eps:
+                    return True
+            return False
+
+        def add_obs(name, pt):
+            if not is_dup(pt):
+                target_coords_map[name] = pt
+                coord_used.append(pt)
+            else:
+                log_step(logger, '观察点 %s 与已有点重合，已跳过: (%.6f, %.6f, %.6f)',
+                         name, pt[0], pt[1], pt[2])
+
+        # M 点：斜坡上从上到下均匀分布（含顶点与坡脚）
+        if slope_obs_count == 1:
+            add_obs('M1', slope_upper)
+        else:
+            for k in range(slope_obs_count):
+                t = float(k) / float(slope_obs_count - 1)
+                x = slope_upper[0] + t * (slope_lower[0] - slope_upper[0])
+                y = slope_upper[1] + t * (slope_lower[1] - slope_upper[1])
+                add_obs('M{}'.format(k + 1), (x, y, 0.0))
+
+        # U 点：从坡顶向左（不含坡顶）
+        if upper_obs_count > 0:
+            if upper_obs_spacing <= 0.0:
+                log_step(logger, 'upper_obs_spacing=%.6f 非法（需>0），U点已全部跳过', upper_obs_spacing)
+            else:
+                max_u = int(math.floor((slope_upper[0] - 0.0) / upper_obs_spacing + 1e-12))
+                eff_u = min(upper_obs_count, max_u)
+                if eff_u < upper_obs_count:
+                    log_step(logger,
+                             'U点请求数量=%d 超出上平台范围，已截断为 %d（spacing=%.3f, 平台长度=%.3f）',
+                             upper_obs_count, eff_u, upper_obs_spacing, slope_upper[0])
+                for k in range(eff_u):
+                    x = slope_upper[0] - (k + 1) * upper_obs_spacing
+                    y = H_upper
+                    add_obs('U{}'.format(k + 1), (x, y, 0.0))
+
+        # D 点：从坡脚向右（不含坡脚）
+        if lower_obs_count > 0:
+            if lower_obs_spacing <= 0.0:
+                log_step(logger, 'lower_obs_spacing=%.6f 非法（需>0），D点已全部跳过', lower_obs_spacing)
+            else:
+                right_len = total_L - slope_lower[0]
+                max_d = int(math.floor(right_len / lower_obs_spacing + 1e-12))
+                eff_d = min(lower_obs_count, max_d)
+                if eff_d < lower_obs_count:
+                    log_step(logger,
+                             'D点请求数量=%d 超出下平台范围，已截断为 %d（spacing=%.3f, 平台长度=%.3f）',
+                             lower_obs_count, eff_d, lower_obs_spacing, right_len)
+                for k in range(eff_d):
+                    x = slope_lower[0] + (k + 1) * lower_obs_spacing
+                    y = H_lower
+                    add_obs('D{}'.format(k + 1), (x, y, 0.0))
+
+        log_step(logger, '自动生成观察点坐标完成: %s', ', '.join(sorted(target_coords_map.keys())))
+
+    model = mdb.models[model_name]
+    root_asm = model.rootAssembly
+    instances = root_asm.instances
+
+    def normalize_set_name(raw_name):
+        """将任意输入名转换为 Abaqus 可接受的集合名。"""
+        s = str(raw_name).strip()
+        if not s:
+            s = 'OBS_SET'
+        cleaned = []
+        for ch in s:
+            if ch.isalnum() or ch == '_':
+                cleaned.append(ch)
+            else:
+                cleaned.append('_')
+        name = ''.join(cleaned)
+        if not name:
+            name = 'OBS_SET'
+        if name[0].isdigit():
+            name = '#' + name
+        if len(name) > 80:
+            name = name[:80]
+        return name
+
+    created_sets = []
+    used_names = set(root_asm.sets.keys())
+    for raw_set_name, target in target_coords_map.items():
+        set_name = normalize_set_name(raw_set_name)
+        if set_name in used_names:
+            idx = 1
+            base_name = set_name
+            while True:
+                candidate = '{}_{}'.format(base_name, idx)
+                if candidate not in used_names:
+                    set_name = candidate
+                    break
+                idx += 1
+        used_names.add(set_name)
+        tx, ty, tz = target
+        node_label_dict = {}
+        best_match = None  # (inst_name, node_label, dist)
+
+        for inst_name in list(instances.keys()):
+            matched_labels = []
+            for node in instances[inst_name].nodes:
+                x = node.coordinates[0]
+                y = node.coordinates[1]
+                z = node.coordinates[2] if len(node.coordinates) > 2 else 0.0
+                dist = ((x - tx) ** 2 + (y - ty) ** 2 + (z - tz) ** 2) ** 0.5
+
+                if best_match is None or dist < best_match[2]:
+                    best_match = (inst_name, node.label, dist)
+
+                if dist < tol:
+                    matched_labels.append(node.label)
+
+            if matched_labels:
+                node_label_dict[inst_name] = tuple(matched_labels)
+
+        if not node_label_dict:
+            if best_match is None:
+                log_step(logger, '观察点集合 %s 创建失败：装配中无节点可用', set_name)
+                continue
+            node_label_dict = {best_match[0]: (best_match[1],)}
+            log_step(logger,
+                     '观察点集合 %s 未找到容差内节点，已回退到最近节点: %s.%d (dist=%.6f)',
+                     set_name, best_match[0], best_match[1], best_match[2])
+
+        node_labels = tuple((k, v) for k, v in node_label_dict.items())
+        root_asm.SetFromNodeLabels(nodeLabels=node_labels, name=set_name)
+        created_sets.append(set_name)
+
+    if created_sets:
+        log_step(logger, '观察点集合已创建: %s', ', '.join(created_sets))
+    return created_sets
+
+
 def create_model(total_L, h, i, cs, vv, density, mesh_size,
-                 H_lower=None, cae_name=None, logger=None):
+                 H_lower=None, cae_name=None,
+                 logger=None):
     """
     创建二维平面应变模型：几何、材料、截面、装配、网格（不含分析步）
     参数:
@@ -118,7 +300,7 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
         P5=(L_flat, H_lower+h), P6=(0, H_lower+h)
     """
     logger = logger or log_step()
-    model_name = 'Model-1'
+    model_name = 'Model-base'
 
     if h <= 0:
         raise ValueError('h 必须 > 0')
@@ -135,7 +317,7 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     H_upper = H_lower + h   # 左侧（上覆）地表高度
 
     model = mdb.Model(name=model_name)
-    log_step(logger, '已创建基础模型: %s', model_name)
+    log_step(logger, '%s 已创建', model_name)
 
     # ============ 创建二维坡地 Part（6节点多边形） ============
     pn = 1
@@ -212,10 +394,33 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     # 重新生成装配体以同步网格
     assembly.regenerate()
     log_step(logger, '装配已重新生成')
-    log_step(logger, '创建基础模型完成: 节点=%d, 单元=%d', len(part.nodes), len(part.elements))
+
+    # ============ 创建边界节点集（左/右/底） ============
+    x_list = [node.coordinates[0] for node in part.nodes]
+    y_list = [node.coordinates[1] for node in part.nodes]
+    xmin = min(x_list)
+    xmax = max(x_list)
+    ymin = min(y_list)
+    tol = 1e-6
+
+    l_nodes_list = [node for node in part.nodes if abs(node.coordinates[0] - xmin) < tol]
+    r_nodes_list = [node for node in part.nodes if abs(node.coordinates[0] - xmax) < tol]
+    b_nodes_list = [node for node in part.nodes if abs(node.coordinates[1] - ymin) < tol]
+
+    l_labels = tuple(node.label for node in l_nodes_list)
+    r_labels = tuple(node.label for node in r_nodes_list)
+    b_labels = tuple(node.label for node in b_nodes_list)
+
+    assembly.SetFromNodeLabels(nodeLabels=((inst_name, l_labels),), name='l')
+    assembly.SetFromNodeLabels(nodeLabels=((inst_name, r_labels),), name='r')
+    assembly.SetFromNodeLabels(nodeLabels=((inst_name, b_labels),), name='b')
+    log_step(logger, '%s Assembly边界节点集已创建: 左=%d, 右=%d, 底=%d',
+             model_name, len(l_labels), len(r_labels), len(b_labels))
+
+    log_step(logger, '%s 模型网格创建完成: 节点=%d, 单元=%d', model_name, len(part.nodes), len(part.elements))
     if cae_name:
         mdb.saveAs(pathName=cae_name)
-        log_step(logger, '已保存 CAE : %s', cae_name)
+        log_step(logger, '%s 已保存', cae_name)
     return model_name, part_name, inst_name
 
 
@@ -237,33 +442,14 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     step_name = step_name or 'Step-earthquake'
     log_step(logger, '%s 模型开始创建人工边界', model_name)
 
-    # ============ 获取装配体和Part ============
+    # ============ 获取装配体 ============
     a = mdb.models[model_name].rootAssembly
     a.regenerate()
-    part = mdb.models[model_name].parts[part_name]
-    nodes = part.nodes
 
-    # ============ 提取边界节点 ============
-    x_list = [node.coordinates[0] for node in nodes]
-    y_list = [node.coordinates[1] for node in nodes]
-    xmin = min(x_list)
-    xmax = max(x_list)
-    ymin = min(y_list)
-    tol = 1e-6
-
-    # ====创建左边界、右边界、底边界节点集====
-    l_nodes_list = [node for node in nodes if abs(node.coordinates[0] - xmin) < tol]
-    r_nodes_list = [node for node in nodes if abs(node.coordinates[0] - xmax) < tol]
-    b_nodes_list = [node for node in nodes if abs(node.coordinates[1] - ymin) < tol]
-
-    l_nodes = part.nodes.sequenceFromLabels([node.label for node in l_nodes_list])
-    r_nodes = part.nodes.sequenceFromLabels([node.label for node in r_nodes_list])
-    b_nodes = part.nodes.sequenceFromLabels([node.label for node in b_nodes_list])
-
-    part.Set(name='l', nodes=l_nodes)
-    part.Set(name='r', nodes=r_nodes)
-    part.Set(name='b', nodes=b_nodes)
-    log_step(logger, '%s 边界节点集已创建: 左=%d, 右=%d, 底=%d', model_name, len(l_nodes), len(r_nodes), len(b_nodes))
+    # ============ 复用基础模型中的边界节点集（Assembly层） ============
+    if 'l' not in a.sets or 'r' not in a.sets or 'b' not in a.sets:
+        raise KeyError('%s 缺少Assembly边界节点集 l/r/b，请先在 create_model 中创建' % model_name)
+    log_step(logger, '%s 复用已有Assembly边界节点集: l/r/b', model_name)
 
     # ============ 材料参数计算 ============
     GG = density * cs ** 2                    # 剪切模量
@@ -272,16 +458,15 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     cp = math.sqrt((lam + 2 * GG) / density)  # 纵波波速
 
     # ============ 获取模型尺寸 ============
-    part = mdb.models[model_name].parts[part_name]
-    l_nodes = part.sets['l'].nodes
+    l_nodes = a.sets['l'].nodes
     l_ymax_node = max(l_nodes, key=lambda node: node.coordinates[1])
     xmin = l_ymax_node.coordinates[0]
     ymax_l = l_ymax_node.coordinates[1]
 
-    b_nodes = part.sets['b'].nodes
+    b_nodes = a.sets['b'].nodes
     ymin = b_nodes[0].coordinates[1]
 
-    r_nodes = part.sets['r'].nodes
+    r_nodes = a.sets['r'].nodes
     r_ymax_node = max(r_nodes, key=lambda node: node.coordinates[1])
     xmax = r_ymax_node.coordinates[0]
     ymax_r = r_ymax_node.coordinates[1]
@@ -290,11 +475,11 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     log_step(logger, '%s 由边界节点得到模型尺寸: Lx=%.3f, Ly=%.3f', model_name, xmax - xmin, ymax - ymin)
 
     # ============ 计算节点影响长度 ============
-    def get_node_influence(part, set_name, sort_axis='y', ascending=False):
+    def get_node_influence(assembly, set_name, sort_axis='y', ascending=False):
         """
         获取边界节点的影响长度（半距离），返回 [n, 4] 数组：节点号、x、y、影响长度
         """
-        nodes = part.sets[set_name].nodes
+        nodes = assembly.sets[set_name].nodes
         node_data = []
         for node in nodes:
             node_data.append([node.label, node.coordinates[0], node.coordinates[1]])
@@ -318,10 +503,9 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
         node_data = np.hstack((node_data, influence.reshape(-1, 1)))
         return node_data
 
-    part = mdb.models[model_name].parts[part_name]
-    node_data_l = get_node_influence(part, 'l', sort_axis='y', ascending=False)
-    node_data_r = get_node_influence(part, 'r', sort_axis='y', ascending=False)
-    node_data_b = get_node_influence(part, 'b', sort_axis='x', ascending=True)
+    node_data_l = get_node_influence(a, 'l', sort_axis='y', ascending=False)
+    node_data_r = get_node_influence(a, 'r', sort_axis='y', ascending=False)
+    node_data_b = get_node_influence(a, 'b', sort_axis='x', ascending=True)
     log_step(logger, '%s 节点影响长度已计算', model_name)
 
     # ============ 粘弹性人工边界参数（刘晶波公式） ============
@@ -868,6 +1052,13 @@ if __name__ == '__main__':
         mesh_size_auto = cs / (f_max * n_per_wave)   # 自动计算网格尺寸 = Vs / (f_max * n)
         mesh_size = min(mesh_size_auto, mesh_size_manual)  # 取自动与手动中的较小值
 
+        # ====== 观察点参数设置 ======
+        slope_obs_count = 3         # *斜坡观察点数量（M1..，从上到下均匀分布，含顶点与坡脚）
+        upper_obs_count = 2         # *上层平台观察点数量（U1..，从坡顶向左）
+        upper_obs_spacing = 50.0    # *上层平台观察点间距 (m)
+        lower_obs_count = 2         # *下层平台观察点数量（D1..，从坡脚向右）
+        lower_obs_spacing = 50.0    # *下层平台观察点间距 (m)
+
         # ====== 作业参数设置 ======
         cae_name = 'h'+str(h)+'_i'+str(i)+'.cae'     # *CAE文件名（可修改）
         num_cpus = 7                                 # *CPU数量
@@ -880,14 +1071,24 @@ if __name__ == '__main__':
         
         # 2. 创建基础模型（几何、材料、网格、装配，不含分析步）
         base_model, part_name, inst_name = create_model(
-            total_L, h, i, cs, vv, density, mesh_size, H_lower=H_lower, cae_name=cae_name, logger=logger)
+            total_L, h, i, cs, vv, density, mesh_size,
+            H_lower=H_lower, cae_name=cae_name,
+            logger=logger)
 
-        # 3. 为每个txt文件复制模型、创建分析步、施加人工边界、并删除基础模型
+        # 3. 在基础模型上创建观察点集合（M/U/D）
+        create_node_sets(
+            model_name=base_model, target_coords_map=None, tol=1e-3, logger=logger,
+            total_L=total_L, h=h, i=i, H_lower=H_lower,
+            slope_obs_count=slope_obs_count,
+            upper_obs_count=upper_obs_count, upper_obs_spacing=upper_obs_spacing,
+            lower_obs_count=lower_obs_count, lower_obs_spacing=lower_obs_spacing)
+
+        # 4. 为每个txt文件复制模型、创建分析步、施加人工边界
         model_names = build_models(
             vel_info=vel_info, base_model=base_model, part_name=part_name, inst_name=inst_name, angle=angle, cs=cs, 
             vv=vv, density=density, step_name='Step-earthquake',variables=variables, frequency=frequency, logger=logger)
 
-        # 4. 依次提交作业
+        # 5. 依次提交作业
         for mn in model_names:
             submit_job(num_cpus=num_cpus, memory_percent=memory_percent, model_name=mn, logger=logger)
 
