@@ -1043,6 +1043,157 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
 
 
+def postprocess_pga(model_name, h, H_lower, total_L, i_deg, logger=None):
+    """
+    ODB 后处理：提取顶部表面节点（上表面、斜坡表面、下表面）的 PGA 数据。
+    对每个节点的加速度 Field Output（变量 'A'）：
+      - 水平 PGA = max|A.data[0]|  (即 A1 分量)
+      - 竖向 PGA = max|A.data[1]|  (即 A2 分量)
+    计算无量纲坐标 x/h = 节点初始 X 坐标 / h
+    结果按 x/h 排序后保存为 CSV 文件。
+
+    参数:
+        model_name (str):  模型名称（ODB 文件名为 'job-<model_name>.odb'）
+        h          (float): 斜坡高度
+        H_lower    (float): 下垫面高度
+        total_L    (float): 模型总长
+        i_deg      (float): 斜坡倾角 (°)
+    """
+    from odbAccess import openOdb
+    import csv
+
+    logger = logger or log_step()
+    t0 = time.time()
+    g = 9.81  # 重力加速度
+
+    odb_name = 'job-' + model_name + '.odb'
+    if not os.path.exists(odb_name):
+        log_step(logger, '跳过后处理: ODB 文件不存在 %s', odb_name)
+        return
+
+    log_step(logger, '%s 开始 PGA 后处理...', model_name)
+    odb = openOdb(path=odb_name, readOnly=True)
+
+    try:
+        # ---------- 几何参数 ----------
+        w_slope = h / math.tan(math.radians(i_deg))
+        left_flat = 3.0 * h
+        H_upper = H_lower + h
+        slope_foot_x = left_flat + w_slope  # 坡脚 x 坐标
+        tol = 1e-3  # 表面判定容差
+
+        # ---------- 获取装配体实例 ----------
+        assembly = odb.rootAssembly
+        inst_key = list(assembly.instances.keys())[0]
+        instance = assembly.instances[inst_key]
+
+        # ---------- 筛选顶部表面节点 ----------
+        # 上表面:     y ≈ H_upper, 0 <= x <= left_flat
+        # 斜坡表面:   left_flat <= x <= slope_foot_x, 节点在斜坡线上
+        # 下表面:     y ≈ H_lower, slope_foot_x <= x <= total_L
+        top_node_labels = set()
+
+        for node in instance.nodes:
+            x = node.coordinates[0]
+            y = node.coordinates[1]
+
+            # 上表面
+            if x >= -tol and x <= left_flat + tol and abs(y - H_upper) < tol:
+                top_node_labels.add(node.label)
+                continue
+
+            # 斜坡表面：斜坡直线从 (left_flat, H_upper) 到 (slope_foot_x, H_lower)
+            if x >= left_flat - tol and x <= slope_foot_x + tol:
+                if w_slope > 1e-12:
+                    y_expected = H_upper - (x - left_flat) / w_slope * h
+                    if abs(y - y_expected) < tol:
+                        top_node_labels.add(node.label)
+                        continue
+
+            # 下表面
+            if x >= slope_foot_x - tol and x <= total_L + tol and abs(y - H_lower) < tol:
+                top_node_labels.add(node.label)
+                continue
+
+        log_step(logger, '%s 顶部表面节点数: %d', model_name, len(top_node_labels))
+        if len(top_node_labels) == 0:
+            log_step(logger, '%s 未找到顶部表面节点，后处理终止', model_name)
+            odb.close()
+            return
+
+        # ---------- 构建节点坐标字典 ----------
+        node_coords = {}  # label -> (x, y)
+        for node in instance.nodes:
+            if node.label in top_node_labels:
+                node_coords[node.label] = (node.coordinates[0], node.coordinates[1])
+
+        # ---------- 获取分析步和帧 ----------
+        step_keys = list(odb.steps.keys())
+        if not step_keys:
+            log_step(logger, '%s ODB 中无分析步', model_name)
+            odb.close()
+            return
+
+        step = odb.steps[step_keys[-1]]  # 取最后一个分析步
+        frames = step.frames
+        if len(frames) == 0:
+            log_step(logger, '%s 分析步 %s 无帧数据', model_name, step_keys[-1])
+            odb.close()
+            return
+
+        log_step(logger, '%s 分析步 "%s" 帧数: %d', model_name, step_keys[-1], len(frames))
+
+        # ---------- 初始化 PGA 字典 ----------
+        pga_h = {}  # label -> max |A1|
+        pga_v = {}  # label -> max |A2|
+        for label in top_node_labels:
+            pga_h[label] = 0.0
+            pga_v[label] = 0.0
+
+        # ---------- 遍历所有帧提取加速度 ----------
+        for frame_idx, frame in enumerate(frames):
+            if 'A' not in frame.fieldOutputs:
+                continue
+            acc_field = frame.fieldOutputs['A']
+            for value in acc_field.values:
+                if value.nodeLabel in top_node_labels:
+                    a1 = abs(value.data[0])  # 水平加速度
+                    a2 = abs(value.data[1])  # 竖向加速度
+                    if a1 > pga_h[value.nodeLabel]:
+                        pga_h[value.nodeLabel] = a1
+                    if a2 > pga_v[value.nodeLabel]:
+                        pga_v[value.nodeLabel] = a2
+
+        # ---------- 整理结果 ----------
+        results = []
+        for label in top_node_labels:
+            x_coord = node_coords[label][0]
+            x_over_h = x_coord / h
+            pga_h_g = pga_h[label] / g
+            pga_v_g = pga_v[label] / g
+            results.append((x_over_h, pga_h_g, pga_v_g))
+
+        # 按 x/h 排序
+        results.sort(key=lambda row: row[0])
+
+        # ---------- 保存为 CSV ----------
+        csv_name = 'PGA_results_{}.csv'.format(model_name)
+        with open(csv_name, 'w') as f:
+            writer = csv.writer(f, lineterminator='\n')
+            writer.writerow(['x/h', 'PGA_h', 'PGA_v'])
+            for row in results:
+                writer.writerow(['{:.6f}'.format(row[0]),
+                                 '{:.6f}'.format(row[1]),
+                                 '{:.6f}'.format(row[2])])
+
+        log_step(logger, '%s PGA 结果已保存: %s (共 %d 个节点)', model_name, csv_name, len(results))
+
+    finally:
+        odb.close()
+
+    log_step(logger, '%s PGA 后处理完成: 耗时=%.2fs', model_name, time.time() - t0)
+
+
 if __name__ == '__main__':
     logger = log_step('VAB_oblique_noGUI_v8.log') # *日志文件名
     total_start = time.time()
@@ -1058,7 +1209,7 @@ if __name__ == '__main__':
         # ====== 模型参数设置 =======
         h = 100                     # *斜坡高度 (m)
         i = 45                      # *斜坡倾角 (°)
-        mesh_size_manual = 2        # *手动设置网格尺寸 (m)
+        mesh_size_manual = 10       # *手动设置网格尺寸 (m)
         f_max = 15                  # *目标最高频率 (Hz)，用于自动计算网格尺寸
         n_per_wave = 10             # *每波长最少单元数（建议 8~10）
         H_lower = 2.0 * h   # 下垫面高度 = 2h
@@ -1076,7 +1227,7 @@ if __name__ == '__main__':
         # ====== 作业参数设置 ======
         cae_name = 'h'+str(h)+'_i'+str(i)+'_a'+str(angle)+'.cae' # *CAE文件名（可修改）
         variables = ('U', 'V', 'A',)                             # *输出变量
-        frequency = 10              # *输出频率 (Hz)
+        frequency = 1               # *输出频率 (Hz)
         num_cpus = 7                # *CPU数量
         memory_percent = 90         # *内存百分比
 
@@ -1107,7 +1258,14 @@ if __name__ == '__main__':
             submit_job(num_cpus=num_cpus, memory_percent=memory_percent, model_name=mn, logger=logger)
         log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
 
-        
+        # 6. ODB 后处理：提取顶部表面节点的 PGA 数据
+        for mn in model_names:
+            postprocess_pga(
+                model_name=mn, h=h, H_lower=H_lower,
+                total_L=total_L, i_deg=i,
+                logger=logger)
+        log_step(logger, '所有后处理已完成')
+
     except Exception as exc:
         log_step(logger, '脚本失败: %s', str(exc))
         logger.error('异常堆栈:\n%s', traceback.format_exc())

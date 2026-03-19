@@ -23,7 +23,7 @@ AUTO_SCAN_TXT = True
 TARGET_PGA = 0.30  # 目标峰值加速度，单位：g
 
 # 颜色序列：不同 txt 文件按顺序轮换颜色，同一文件三张图颜色一致
-COLOR_CYCLE = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange']
+COLOR_CYCLE = ['red', 'blue', 'green', 'yellow', 'magenta', 'cyan', 'orange']
 
 # 图1：加速度时程图边界
 ACCEL_XLIM = (0, 30)
