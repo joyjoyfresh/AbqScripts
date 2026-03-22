@@ -14,7 +14,7 @@ import os
 #     r'C:\Users\12462\Documents\Master\Abaqus\Scripts\Seiswave\Kobe.txt',
 # ]
 FILE_PATHS = [
-    r'C:\Users\12462\Documents\Master\Abaqus\Scripts\Seiswave\El_Centro.txt'
+    r'C:\Users\12462\Documents\Master\Abaqus\Scripts\Seiswave\El_Centro.txt',
 ]
 
 # True: 自动扫描当前脚本目录下所有 txt（自动排除 *_scaled.txt）
