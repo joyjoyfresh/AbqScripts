@@ -17,33 +17,49 @@ if !count! EQU 0 (
     exit /b
 )
 
-echo  请选择要执行的 Python 脚本：
+:menu
+echo.
+echo  请选择要执行的 Python 脚本（输入 0 退出）：
 for /l %%i in (1,1,!count!) do (
     echo   %%i. !name[%%i]!
 )
 
 echo.
-set /p choice=请输入编号（1-!count!）：
+set /p choice=请输入编号（可多个，用空格或逗号分隔）：
 
 if not defined choice goto invalid
+set "choice=!choice:,= !"
+if "!choice!"=="0" goto end
 
-echo(!choice!| findstr /r "^[0-9][0-9]*$" >nul
-if errorlevel 1 goto invalid
+set "allValid=1"
+for %%t in (!choice!) do (
+    echo(%%t| findstr /r "^[0-9][0-9]*$" >nul
+    if errorlevel 1 set "allValid=0"
+)
+if !allValid! NEQ 1 goto invalid
 
-if !choice! LSS 1 goto invalid
-if !choice! GTR !count! goto invalid
+for %%t in (!choice!) do (
+    if %%t LSS 1 set "allValid=0"
+    if %%t GTR !count! set "allValid=0"
+)
+if !allValid! NEQ 1 goto invalid
 
 echo ================================================
-echo  正在执行: !name[%choice%]!
+echo  开始按输入顺序执行脚本...
 echo ================================================
-python "!file[%choice%]!"
-echo.
+for %%t in (!choice!) do (
+    echo  正在执行: !name[%%t]!
+    python "!file[%%t]!"
+    echo.
+)
 
-echo  执行完毕，按任意键退出...
-pause >nul
-exit /b
+echo  本轮执行完毕。
+goto menu
 
 :invalid
-echo  输入无效，请输入 1 到 !count! 之间的数字。
-pause
-exit /b 1
+echo  输入无效，请输入 1 到 !count! 之间的数字（可多个，空格或逗号分隔）。
+goto menu
+
+:end
+echo  已退出。
+exit /b
