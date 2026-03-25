@@ -162,6 +162,18 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     del model.sketches['__profile__']
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)
 
+    # ============ 按坡顶/坡底向下切分面（左矩形 + 中梯形 + 右矩形） ============
+    # 两条竖线位置：x = left_flat（坡顶x），x = left_flat + w_slope（坡底x）
+    part_faces = part.faces
+    partition_sketch = model.ConstrainedSketch(
+        name='__partition__', sheetSize=max(total_L, H_upper) * 2
+    )
+    partition_sketch.Line(point1=(left_flat, H_upper), point2=(left_flat, 0.0))
+    partition_sketch.Line(point1=(left_flat + w_slope, H_lower), point2=(left_flat + w_slope, 0.0))
+    part.PartitionFaceBySketch(faces=part_faces, sketch=partition_sketch)
+    del model.sketches['__partition__']
+    log_step(logger, '%s 面切分完成: 左矩形/中梯形/右矩形', model_name)
+
     # ============ 材料与截面 ============
     GG = density * cs ** 2
     EE = 2 * GG * (1 + vv)
@@ -234,28 +246,38 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     r_labels = tuple(node.label for node in r_nodes_list)
     b_labels = tuple(node.label for node in b_nodes_list)
 
-    part.SetFromNodeLabels(nodeLabels=l_labels, name='l')
-    part.SetFromNodeLabels(nodeLabels=r_labels, name='r')
-    part.SetFromNodeLabels(nodeLabels=b_labels, name='b')
+    part.SetFromNodeLabels(nodeLabels=l_labels, name='Left_boundary')
+    part.SetFromNodeLabels(nodeLabels=r_labels, name='Right_boundary')
+    part.SetFromNodeLabels(nodeLabels=b_labels, name='Bottom_boundary')
     log_step(logger, '%s 边界节点集已在Part中创建: 左=%d, 右=%d, 底=%d', model_name, len(l_labels), len(r_labels), len(b_labels))
 
     # ============ 创建顶面节点集（用于后处理 PGA） ============
-    top_surface_labels = []
-    for node in part.nodes:
-        x = node.coordinates[0]
-        y = node.coordinates[1]
-        # 左平台顶面: x <= left_flat, y == H_upper
-        if x <= left_flat + tol and abs(y - H_upper) < tol:
-            top_surface_labels.append(node.label)
-        # 斜坡面: left_flat < x < left_flat + w_slope, y == 线性插值
-        elif left_flat - tol < x < left_flat + w_slope + tol:
-            y_expected = H_upper - (x - left_flat) * h / w_slope
-            if abs(y - y_expected) < tol:
-                top_surface_labels.append(node.label)
-        # 右平台顶面: x >= left_flat + w_slope, y == H_lower
-        elif x >= left_flat + w_slope - tol and abs(y - H_lower) < tol:
-            top_surface_labels.append(node.label)
-    top_surface_labels = tuple(top_surface_labels)
+    # 通用方法：由网格单元连通关系提取外边界节点，再排除左/右/底边界节点，剩余即顶部边界节点。
+    edge_count = {}
+    for elem in part.elements:
+        conn = elem.connectivity
+        n_conn = len(conn)
+        for k in range(n_conn):
+            n1 = conn[k]
+            n2 = conn[(k + 1) % n_conn]
+            if n1 < n2:
+                edge_key = (n1, n2)
+            else:
+                edge_key = (n2, n1)
+            edge_count[edge_key] = edge_count.get(edge_key, 0) + 1
+
+    boundary_node_labels = set()
+    for edge_key, cnt in edge_count.items():
+        if cnt == 1:
+            boundary_node_labels.add(edge_key[0])
+            boundary_node_labels.add(edge_key[1])
+
+    excluded_labels = set(l_labels) | set(r_labels) | set(b_labels)
+    top_surface_labels = tuple(sorted(boundary_node_labels - excluded_labels))
+
+    if len(top_surface_labels) == 0:
+        raise ValueError('%s 未识别到顶部边界节点，请检查网格与边界节点集定义' % model_name)
+
     part.SetFromNodeLabels(nodeLabels=top_surface_labels, name='TOP_SURFACE')
     log_step(logger, '%s 顶面节点集已创建: TOP_SURFACE 节点数=%d', model_name, len(top_surface_labels))
 
@@ -294,9 +316,9 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     instance = a.instances[inst_name]
 
     # ============ 复用基础模型中的边界节点集（Part层） ============
-    if 'l' not in part.sets or 'r' not in part.sets or 'b' not in part.sets:
-        raise KeyError('%s 缺少Part边界节点集 l/r/b，请先在 create_model 中创建' % model_name)
-    log_step(logger, '%s 复用已有Part边界节点集: l/r/b', model_name)
+    if 'Left_boundary' not in part.sets or 'Right_boundary' not in part.sets or 'Bottom_boundary' not in part.sets:
+        raise KeyError('%s 缺少Part边界节点集 Left_boundary/Right_boundary/Bottom_boundary，请先在 create_model 中创建' % model_name)
+    log_step(logger, '%s 复用已有Part边界节点集: Left_boundary/Right_boundary/Bottom_boundary', model_name)
 
     def get_instance_nodes_from_part_set(set_name):
         labels = tuple(node.label for node in part.sets[set_name].nodes)
@@ -311,15 +333,15 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     cp = math.sqrt((lam + 2 * GG) / density)  # 纵波波速
 
     # ============ 获取模型尺寸 ============
-    l_nodes = get_instance_nodes_from_part_set('l')
+    l_nodes = get_instance_nodes_from_part_set('Left_boundary')
     l_ymax_node = max(l_nodes, key=lambda node: node.coordinates[1])
     xmin = l_ymax_node.coordinates[0]
     ymax_l = l_ymax_node.coordinates[1]
 
-    b_nodes = get_instance_nodes_from_part_set('b')
+    b_nodes = get_instance_nodes_from_part_set('Bottom_boundary')
     ymin = b_nodes[0].coordinates[1]
 
-    r_nodes = get_instance_nodes_from_part_set('r')
+    r_nodes = get_instance_nodes_from_part_set('Right_boundary')
     r_ymax_node = max(r_nodes, key=lambda node: node.coordinates[1])
     xmax = r_ymax_node.coordinates[0]
     ymax_r = r_ymax_node.coordinates[1]

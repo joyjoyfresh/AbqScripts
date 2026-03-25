@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-PGA 后处理脚本 v3 —— 独立运行于 Abaqus Python 环境
+PGA 后处理脚本 —— 独立运行于 Abaqus Python 环境
 改进点:
-1) 顶面节点按 X 分桶时，桶宽直接使用 bucket_width，不再二次缩小。
-2) 每个桶仅保留 1 个顶部代表节点，避免同桶多点带来的局部交替锯齿。
+1) 顶面节点直接读取实例中的 TOP_SURFACE 节点集（全部节点）。
+2) h 自动由模型总长度 L 计算：h = L / 8，无需手动输入。
 3) 输出诊断列：node_label、x、y、PGA 峰值对应帧号与时刻。
-4) 可选输出空间平滑列（仅用于展示，不替代原始 PGA）。
 """
 
 from odbAccess import openOdb
@@ -59,61 +58,31 @@ def log_step(logger=None, message=None, *args):
 
 
 # ==============================================================================
-#  核心：找到顶部表面节点（每桶仅保留 1 个代表节点）
+#  核心：从 TOP_SURFACE 节点集读取顶部表面节点（全部保留）
 # ==============================================================================
-def find_top_surface_nodes(instance, bucket_width, y_tol=1e-6):
+def find_top_surface_nodes(instance):
     """
-    将节点按 X 分桶（桶宽 = bucket_width），每桶取 Y 最大层中的 1 个代表节点。
-
-    代表节点选择规则:
-    1) 先筛选 Y==max_y 的候选点
-    2) 选 x 最靠近桶中心的候选
-    3) 若仍并列，选 label 最小者
+    直接读取实例中的 TOP_SURFACE 节点集，返回全部节点。
 
     返回:
         top_nodes: dict, {node_label: (x, y)}
         diagnostics: dict, 诊断信息
     """
-    all_nodes = {}  # label -> (x, y)
-    for node in instance.nodes:
+    try:
+        top_nset = instance.nodeSets['TOP_SURFACE']
+    except KeyError:
+        return {}, {'total_nodes': 0, 'selected_top_nodes': 0, 'source': 'TOP_SURFACE missing'}
+
+    top_nodes = {}  # label -> (x, y)
+    for node in top_nset.nodes:
         x = node.coordinates[0]
         y = node.coordinates[1]
-        all_nodes[node.label] = (x, y)
-
-    if not all_nodes:
-        return {}, {'total_nodes': 0, 'bucket_count': 0, 'multi_top_buckets': 0}
-
-    if bucket_width <= 0.0:
-        raise ValueError('bucket_width 必须大于 0。')
-
-    buckets = {}  # bucket_index -> [(label, x, y), ...]
-    for label, (x, y) in all_nodes.items():
-        bkt = int(round(x / bucket_width))
-        if bkt not in buckets:
-            buckets[bkt] = []
-        buckets[bkt].append((label, x, y))
-
-    top_nodes = {}
-    multi_top_buckets = 0
-
-    for bkt, nodes_in_bkt in buckets.items():
-        max_y = max(n[2] for n in nodes_in_bkt)
-        candidates = [n for n in nodes_in_bkt if abs(n[2] - max_y) <= y_tol]
-
-        if len(candidates) > 1:
-            multi_top_buckets += 1
-
-        center_x = bkt * bucket_width
-        # (距离桶中心, label) 最小优先
-        candidates.sort(key=lambda n: (abs(n[1] - center_x), n[0]))
-        chosen_label, chosen_x, chosen_y = candidates[0]
-        top_nodes[chosen_label] = (chosen_x, chosen_y)
+        top_nodes[node.label] = (x, y)
 
     diagnostics = {
-        'total_nodes': len(all_nodes),
-        'bucket_count': len(buckets),
-        'multi_top_buckets': multi_top_buckets,
+        'total_nodes': len(top_nodes),
         'selected_top_nodes': len(top_nodes),
+        'source': 'TOP_SURFACE',
     }
     return top_nodes, diagnostics
 
@@ -121,7 +90,7 @@ def find_top_surface_nodes(instance, bucket_width, y_tol=1e-6):
 # ==============================================================================
 #  处理单个 ODB 文件
 # ==============================================================================
-def process_one_odb(odb_path, h, bucket_width, logger=None):
+def process_one_odb(odb_path, logger=None):
     logger = logger or log_step()
     odb_basename = os.path.basename(odb_path)
     odb_stem = os.path.splitext(odb_basename)[0]
@@ -138,7 +107,18 @@ def process_one_odb(odb_path, h, bucket_width, logger=None):
             return
         instance = assembly.instances[inst_keys[0]]
 
-        top_nodes, _ = find_top_surface_nodes(instance, bucket_width)
+        x_coords = [node.coordinates[0] for node in instance.nodes]
+        if not x_coords:
+            log_step(logger, '%s 实例无节点，跳过', odb_basename)
+            return
+        total_L = max(x_coords) - min(x_coords)
+        if total_L <= 0.0:
+            log_step(logger, '%s 模型总长度无效 (L=%.6f)，跳过', odb_basename, total_L)
+            return
+        h = total_L / 8.0
+        log_step(logger, '%s 自动计算尺度: L=%.6f, h=L/8=%.6f', odb_basename, total_L, h)
+
+        top_nodes, _ = find_top_surface_nodes(instance)
         if not top_nodes:
             log_step(logger, '%s 未找到顶部表面节点，跳过', odb_basename)
             return
@@ -171,13 +151,8 @@ def process_one_odb(odb_path, h, bucket_width, logger=None):
         peak_h_time = [0.0] * n_top
         peak_v_time = [0.0] * n_top
 
-        # 尝试获取 TOP_SURFACE 节点集，用于 getSubset 加速
-        top_nset = None
-        try:
-            top_nset = instance.nodeSets['TOP_SURFACE']
-            log_step(logger, '%s 检测到 TOP_SURFACE 节点集，使用 getSubset 加速模式', odb_basename)
-        except KeyError:
-            log_step(logger, '%s 未检测到 TOP_SURFACE 节点集，使用全场遍历模式（较慢）', odb_basename)
+        top_nset = instance.nodeSets['TOP_SURFACE']
+        log_step(logger, '%s 使用 TOP_SURFACE 节点集的全部节点进行后处理', odb_basename)
 
         for fi, frame in enumerate(frames):
             if 'A' not in frame.fieldOutputs:
@@ -186,11 +161,7 @@ def process_one_odb(odb_path, h, bucket_width, logger=None):
             acc_field = frame.fieldOutputs['A']
             t_cur = getattr(frame, 'frameValue', 0.0)
 
-            # 如果有节点集，用 getSubset 在 C++ 层过滤；否则遍历全场
-            if top_nset is not None:
-                acc_values = acc_field.getSubset(region=top_nset).values
-            else:
-                acc_values = acc_field.values
+            acc_values = acc_field.getSubset(region=top_nset).values
 
             for val in acc_values:
                 idx = label_to_idx.get(val.nodeLabel)
@@ -269,15 +240,6 @@ if __name__ == '__main__':
     try:
         log_step(logger, '脚本开始执行')
 
-        # ===================== 用户参数（按需修改） =====================
-        h = 100.0
-        mesh_size = 10.0
-
-        # v3: 分桶宽度直接取网格尺度（不再额外 /2）
-        bucket_width = mesh_size
-
-        # ===============================================================
-
         cwd = os.getcwd()
         odb_files = sorted([f for f in os.listdir(cwd) if f.lower().endswith('.odb')])
         if not odb_files:
@@ -289,8 +251,6 @@ if __name__ == '__main__':
             odb_path = os.path.join(cwd, odb_file)
             process_one_odb(
                 odb_path=odb_path,
-                h=h,
-                bucket_width=bucket_width,
                 logger=logger
             )
 
