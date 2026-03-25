@@ -920,7 +920,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
 
 
 if __name__ == '__main__':
-    logger = log_step('VAB_oblique_noGUI_v11.log') # *日志文件名
+    logger = log_step('VAB_oblique_noGUI_v12.log') # *日志文件名
     total_start = time.time()
     try:
         log_step(logger, '脚本开始执行')

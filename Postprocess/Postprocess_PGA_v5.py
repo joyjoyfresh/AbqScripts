@@ -2,7 +2,7 @@
 """
 PGA 后处理脚本 —— 独立运行于 Abaqus Python 环境
 改进点:
-1) 顶面节点按 VAB_oblique_noGUI_v11.py 的几何规则自动识别（左平台+斜坡+右平台）。
+1) 顶面节点直接读取实例中的 TOP_SURFACE 节点集（全部节点）。
 2) h 自动由模型总长度 L 计算：h = L / 8，无需手动输入。
 3) 输出诊断列：node_label、x、y、PGA 峰值对应帧号与时刻。
 """
@@ -58,139 +58,32 @@ def log_step(logger=None, message=None, *args):
 
 
 # ==============================================================================
-#  核心：按 v11 几何规则识别顶部表面节点
+#  核心：从 TOP_SURFACE 节点集读取顶部表面节点（全部保留）
 # ==============================================================================
-def find_top_surface_nodes(instance, h, logger=None):
+def find_top_surface_nodes(instance):
     """
-    参考 VAB_oblique_noGUI_v11.py 的规则识别顶面节点：
-      1) 左平台: y = H_upper, x <= left_flat
-      2) 斜坡:   y = H_upper - (x-left_flat) * h / w_slope
-      3) 右平台: y = H_lower, x >= left_flat + w_slope
-    并排除与左/右/底边界重叠节点。
-
-    参数:
-        instance: ODB 实例
-        h (float): 斜坡高度（此处取 L/8）
+    直接读取实例中的 TOP_SURFACE 节点集，返回全部节点。
 
     返回:
         top_nodes: dict, {node_label: (x, y)}
         diagnostics: dict, 诊断信息
     """
-    nodes = list(instance.nodes)
-    if not nodes:
-        return {}, {'total_nodes': 0, 'selected_top_nodes': 0, 'source': 'instance has no nodes'}
+    try:
+        top_nset = instance.nodeSets['TOP_SURFACE']
+    except KeyError:
+        return {}, {'total_nodes': 0, 'selected_top_nodes': 0, 'source': 'TOP_SURFACE missing'}
 
-    x_vals = [n.coordinates[0] for n in nodes]
-    y_vals = [n.coordinates[1] for n in nodes]
-    xmin, xmax = min(x_vals), max(x_vals)
-    ymin = min(y_vals)
-
-    span = max(xmax - xmin, max(y_vals) - ymin)
-    tol = max(1e-6, span * 1e-6)
-
-    left_nodes = [n for n in nodes if abs(n.coordinates[0] - xmin) < tol]
-    right_nodes = [n for n in nodes if abs(n.coordinates[0] - xmax) < tol]
-    bottom_nodes = [n for n in nodes if abs(n.coordinates[1] - ymin) < tol]
-
-    if not left_nodes or not right_nodes:
-        return {}, {
-            'total_nodes': len(nodes),
-            'selected_top_nodes': 0,
-            'source': 'cannot identify left/right boundaries'
-        }
-
-    H_upper = max(n.coordinates[1] for n in left_nodes)
-    H_lower = max(n.coordinates[1] for n in right_nodes)
-    left_flat = 3.0 * h
-
-    slope_candidates = []
-    for n in nodes:
-        x, y = n.coordinates[0], n.coordinates[1]
-        if x > xmin + tol and (H_lower + tol) < y < (H_upper - tol):
-            slope_candidates.append((x, y))
-
-    if len(slope_candidates) < 2:
-        return {}, {
-            'total_nodes': len(nodes),
-            'selected_top_nodes': 0,
-            'source': 'insufficient slope nodes'
-        }
-
-    x_mean = sum(p[0] for p in slope_candidates) / float(len(slope_candidates))
-    y_mean = sum(p[1] for p in slope_candidates) / float(len(slope_candidates))
-    sxx = sum((p[0] - x_mean) ** 2 for p in slope_candidates)
-    sxy = sum((p[0] - x_mean) * (p[1] - y_mean) for p in slope_candidates)
-    if sxx <= 0.0:
-        return {}, {
-            'total_nodes': len(nodes),
-            'selected_top_nodes': 0,
-            'source': 'invalid slope regression'
-        }
-
-    slope_k = sxy / sxx
-    slope_b = y_mean - slope_k * x_mean
-    if abs(slope_k) < 1e-12:
-        return {}, {
-            'total_nodes': len(nodes),
-            'selected_top_nodes': 0,
-            'source': 'near-zero slope line'
-        }
-
-    x_toe = (H_lower - slope_b) / slope_k
-    w_slope = x_toe - left_flat
-    if w_slope <= 0.0:
-        return {}, {
-            'total_nodes': len(nodes),
-            'selected_top_nodes': 0,
-            'source': 'computed non-positive w_slope'
-        }
-
-    left_labels = set(n.label for n in left_nodes)
-    right_labels = set(n.label for n in right_nodes)
-    bottom_labels = set(n.label for n in bottom_nodes)
-    excluded_labels = left_labels | right_labels | bottom_labels
-
-    top_surface_labels = set()
-    for n in nodes:
-        x = n.coordinates[0]
-        y = n.coordinates[1]
-
-        if x <= left_flat + tol and abs(y - H_upper) < tol:
-            top_surface_labels.add(n.label)
-            continue
-
-        if left_flat - tol < x < left_flat + w_slope + tol:
-            y_expected = H_upper - (x - left_flat) * h / w_slope
-            if abs(y - y_expected) < tol:
-                top_surface_labels.add(n.label)
-                continue
-
-        if x >= left_flat + w_slope - tol and abs(y - H_lower) < tol:
-            top_surface_labels.add(n.label)
-
-    top_surface_labels = sorted(top_surface_labels - excluded_labels)
-
-    top_nodes = {}
-    for n in nodes:
-        if n.label in top_surface_labels:
-            top_nodes[n.label] = (n.coordinates[0], n.coordinates[1])
+    top_nodes = {}  # label -> (x, y)
+    for node in top_nset.nodes:
+        x = node.coordinates[0]
+        y = node.coordinates[1]
+        top_nodes[node.label] = (x, y)
 
     diagnostics = {
-        'total_nodes': len(nodes),
+        'total_nodes': len(top_nodes),
         'selected_top_nodes': len(top_nodes),
-        'source': 'geometry rule from v11',
-        'tol': tol,
-        'H_upper': H_upper,
-        'H_lower': H_lower,
-        'left_flat': left_flat,
-        'w_slope': w_slope,
+        'source': 'TOP_SURFACE',
     }
-
-    if logger is not None:
-        log_step(logger,
-                 '顶面识别参数: tol=%.3e, H_upper=%.6f, H_lower=%.6f, left_flat=%.6f, w_slope=%.6f, 节点数=%d',
-                 tol, H_upper, H_lower, left_flat, w_slope, len(top_nodes))
-
     return top_nodes, diagnostics
 
 
@@ -225,9 +118,9 @@ def process_one_odb(odb_path, logger=None):
         h = total_L / 8.0
         log_step(logger, '%s 自动计算尺度: L=%.6f, h=L/8=%.6f', odb_basename, total_L, h)
 
-        top_nodes, diag = find_top_surface_nodes(instance, h, logger=logger)
+        top_nodes, _ = find_top_surface_nodes(instance)
         if not top_nodes:
-            log_step(logger, '%s 未找到顶部表面节点，跳过。诊断=%s', odb_basename, str(diag))
+            log_step(logger, '%s 未找到顶部表面节点，跳过', odb_basename)
             return
 
         top_labels = list(top_nodes.keys())
@@ -258,13 +151,17 @@ def process_one_odb(odb_path, logger=None):
         peak_h_time = [0.0] * n_top
         peak_v_time = [0.0] * n_top
 
+        top_nset = instance.nodeSets['TOP_SURFACE']
+        log_step(logger, '%s 使用 TOP_SURFACE 节点集的全部节点进行后处理', odb_basename)
+
         for fi, frame in enumerate(frames):
             if 'A' not in frame.fieldOutputs:
                 continue
 
             acc_field = frame.fieldOutputs['A']
             t_cur = getattr(frame, 'frameValue', 0.0)
-            acc_values = acc_field.values
+
+            acc_values = acc_field.getSubset(region=top_nset).values
 
             for val in acc_values:
                 idx = label_to_idx.get(val.nodeLabel)
