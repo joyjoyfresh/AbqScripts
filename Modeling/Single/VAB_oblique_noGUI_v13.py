@@ -344,28 +344,25 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
         """
         获取边界节点的影响长度（半距离），返回 [n, 4] 数组：节点号、x、y、影响长度
         """
-        node_data = []
-        for node in nodes:
-            node_data.append([node.label, node.coordinates[0], node.coordinates[1]])
+        node_data = np.array([[node.label, node.coordinates[0], node.coordinates[1]] for node in nodes], dtype=float)  # 一次性构造节点数组
+        axis = 1 if sort_axis == 'x' else 2  # 指定排序轴索引
+        node_data = node_data[node_data[:, axis].argsort()]  # 按目标轴升序排序
+        if not ascending:  # 若需要降序则翻转
+            node_data = node_data[::-1]  # 执行降序翻转
 
-        node_data = np.array(node_data)
-        axis = 1 if sort_axis == 'x' else 2
-        node_data = node_data[node_data[:, axis].argsort()]
-        if not ascending:
-            node_data = node_data[::-1]
+        n = node_data.shape[0]  # 获取节点数量
+        if n == 1:  # 若仅有一个节点
+            influence = np.array([0.0])  # 影响长度记为0
+        else:  # 若节点数量大于1
+            coord = node_data[:, axis]  # 提取排序轴坐标
+            influence = np.empty(n)  # 预分配影响长度数组
+            influence[0] = abs(coord[0] - coord[1]) / 2.0  # 首节点取与次节点半距
+            influence[-1] = abs(coord[-1] - coord[-2]) / 2.0  # 末节点取与前节点半距
+            if n > 2:  # 若存在中间节点
+                influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0  # 中间节点用前后跨一节点半距
 
-        n = node_data.shape[0]
-        influence = np.zeros(n)
-        for i in range(n):
-            if i == 0:
-                influence[i] = abs(node_data[i, axis] - node_data[i + 1, axis]) / 2
-            elif i == n - 1:
-                influence[i] = abs(node_data[i, axis] - node_data[i - 1, axis]) / 2
-            else:
-                influence[i] = abs(node_data[i - 1, axis] - node_data[i + 1, axis]) / 2
-
-        node_data = np.hstack((node_data, influence.reshape(-1, 1)))
-        return node_data
+        node_data = np.hstack((node_data, influence.reshape(-1, 1)))  # 拼接影响长度列
+        return node_data  # 返回节点数据与影响长度
 
     node_data_l = get_node_influence(l_nodes, sort_axis='y', ascending=False)
     node_data_r = get_node_influence(r_nodes, sort_axis='y', ascending=False)
@@ -556,6 +553,14 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     det_b = round_delay(det_b, dt)
     log_step(logger, '%s 延迟时间已对齐到 dt 网格', model_name)
 
+    def build_det_map(det):
+        """将 det 数组转换为 {node_id: (tA, tB, tC)} 字典，避免循环内重复检索"""
+        return {int(row[0]): (row[1], row[2], row[3]) for row in det}  # 建立节点到三种到时的映射
+
+    det_map_l = build_det_map(det_l)  # 左边界延迟映射
+    det_map_r = build_det_map(det_r)  # 右边界延迟映射
+    det_map_b = build_det_map(det_b)  # 底边界延迟映射
+
     # ============ 信号延迟工具函数 ============
     def delay_signal(u0, delay_t, dt):
         """将信号延迟 delay_t 时间"""
@@ -566,6 +571,18 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
         delayed[:, 0] = np.arange(new_len) * dt
         delayed[n_delay:, 1] = u0[:, 1]
         return delayed
+
+    def make_delay_cache(timeseries, dt):
+        """按离散步数缓存延迟信号，避免相同延迟重复构造数组"""
+        cache = {}  # 定义延迟缓存字典
+
+        def get_delayed(delay_t):
+            n_delay = int(np.round(delay_t / dt))  # 计算离散延迟步数
+            if n_delay not in cache:  # 若缓存中不存在该延迟
+                cache[n_delay] = delay_signal(timeseries, n_delay * dt, dt)  # 构造并缓存延迟信号
+            return cache[n_delay]  # 返回缓存的延迟信号
+
+        return get_delayed  # 返回闭包函数供后续调用
 
     def pad_to(arr, length, dt):
         """将数组补零到指定长度"""
@@ -578,22 +595,20 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     # ============ 计算自由场位移和速度 ============
     field_data = {}  # 用字典存储中间结果
 
-    def calc_freefield_u_and_dotu_general(node_data, det, timeseries, dt,
+    def calc_freefield_u_and_dotu_general(node_data, det_map, timeseries, dt,
                                            alpha, beta_p, A1, A2,
                                            suffix1, suffix2, prefix):
         """
         对各边界（左、右、底）计算自由场 ux/uy 或 dotux/dotuy 时程
         """
+        get_delayed = make_delay_cache(timeseries, dt)  # 为当前时程创建延迟缓存访问器
         for i in range(node_data.shape[0]):
             node_id = int(node_data[i, 0])
-            idx = np.where(det[:, 0] == node_id)[0][0]
-            tA = det[idx, 1]
-            tB = det[idx, 2]
-            tC = det[idx, 3]
+            tA, tB, tC = det_map[node_id]  # 通过字典O(1)获取三种到时
 
-            u0_tA = delay_signal(timeseries, tA, dt)
-            u0_tB = delay_signal(timeseries, tB, dt)
-            u0_tC = delay_signal(timeseries, tC, dt)
+            u0_tA = get_delayed(tA)  # 获取A波延迟信号
+            u0_tB = get_delayed(tB)  # 获取B波延迟信号
+            u0_tC = get_delayed(tC)  # 获取C波延迟信号
 
             max_len = max(u0_tA.shape[0], u0_tB.shape[0], u0_tC.shape[0])
             u0_tA = pad_to(u0_tA, max_len, dt)
@@ -619,33 +634,31 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
             field_data['{}-{}-{}'.format(node_id, prefix, suffix2)] = uy_arr
 
     # 计算位移自由场
-    calc_freefield_u_and_dotu_general(node_data_l, det_l, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'l')
-    calc_freefield_u_and_dotu_general(node_data_r, det_r, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'r')
-    calc_freefield_u_and_dotu_general(node_data_b, det_b, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'b')
+    calc_freefield_u_and_dotu_general(node_data_l, det_map_l, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'l')
+    calc_freefield_u_and_dotu_general(node_data_r, det_map_r, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'r')
+    calc_freefield_u_and_dotu_general(node_data_b, det_map_b, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'b')
     log_step(logger, '%s 左/右/底 自由场位移已计算', model_name)
     # 计算速度自由场
-    calc_freefield_u_and_dotu_general(node_data_l, det_l, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'l')
-    calc_freefield_u_and_dotu_general(node_data_r, det_r, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'r')
-    calc_freefield_u_and_dotu_general(node_data_b, det_b, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'b')
+    calc_freefield_u_and_dotu_general(node_data_l, det_map_l, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'l')
+    calc_freefield_u_and_dotu_general(node_data_r, det_map_r, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'r')
+    calc_freefield_u_and_dotu_general(node_data_b, det_map_b, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'b')
     log_step(logger, '%s 左/右/底 自由场速度已计算', model_name)
 
     # ============ 计算自由场应力 ============
-    def calc_freefield_sigma_general(node_data, det, VEL, dt,
+    def calc_freefield_sigma_general(node_data, det_map, VEL, dt,
                                       alpha, beta_p, A1, A2,
                                       GG, cs, lam, cp, prefix):
         """
         对各边界（左、右、底）计算自由场应力 sigmax/sigmay 时程
         """
+        get_delayed = make_delay_cache(VEL, dt)  # 为速度时程创建延迟缓存访问器
         for i in range(node_data.shape[0]):
             node_id = int(node_data[i, 0])
-            idx = np.where(det[:, 0] == node_id)[0][0]
-            tA = det[idx, 1]
-            tB = det[idx, 2]
-            tC = det[idx, 3]
+            tA, tB, tC = det_map[node_id]  # 通过字典O(1)获取三种到时
 
-            v0_tA = delay_signal(VEL, tA, dt)
-            v0_tB = delay_signal(VEL, tB, dt)
-            v0_tC = delay_signal(VEL, tC, dt)
+            v0_tA = get_delayed(tA)  # 获取A波延迟速度
+            v0_tB = get_delayed(tB)  # 获取B波延迟速度
+            v0_tC = get_delayed(tC)  # 获取C波延迟速度
 
             max_len = max(v0_tA.shape[0], v0_tB.shape[0], v0_tC.shape[0])
             v0_tA = pad_to(v0_tA, max_len, dt)
@@ -687,9 +700,9 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
             field_data['{}-{}-sigmax'.format(node_id, prefix)] = sigmax_arr
             field_data['{}-{}-sigmay'.format(node_id, prefix)] = sigmay_arr
 
-    calc_freefield_sigma_general(node_data_l, det_l, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'l')
-    calc_freefield_sigma_general(node_data_r, det_r, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'r')
-    calc_freefield_sigma_general(node_data_b, det_b, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'b')
+    calc_freefield_sigma_general(node_data_l, det_map_l, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'l')
+    calc_freefield_sigma_general(node_data_r, det_map_r, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'r')
+    calc_freefield_sigma_general(node_data_b, det_map_b, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'b')
     log_step(logger, '%s 左/右/底 自由场应力已计算', model_name)
 
     # ============ 计算等效节点力 ============
@@ -832,14 +845,6 @@ def build_models(acc_info, base_model, part_name, inst_name, angle, cs, vv, dens
         variables = (variables,)
     elif isinstance(variables, list):
         variables = tuple(variables)
-
-    def is_obs_set_name(name):
-        if not name:
-            return False
-        prefix = name[0].upper()
-        if prefix not in ('M', 'U', 'D'):
-            return False
-        return name[1:].isdigit()
 
     model_names = []
     for acc_file, tp, inc in acc_info:
