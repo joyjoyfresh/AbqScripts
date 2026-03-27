@@ -969,7 +969,7 @@ def main():
     geometry_cfg = {
         'h': 100,  # 设置斜坡高度（m）
         'i': 45,  # 设置斜坡倾角（度）
-        'mesh_size_manual': 8,  # 设置手动网格尺寸上限（m）
+        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
         'f_max': 15,  # 设置目标最高频率（Hz）
         'n_per_wave': 10,  # 设置每波长单元数
     }
