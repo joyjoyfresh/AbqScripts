@@ -268,21 +268,30 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
     log_step(logger, '%s 边界节点集已在Part中创建: 左=%d, 右=%d, 底=%d', model_name, len(l_labels), len(r_labels), len(b_labels))
 
     # ============ 创建顶面节点集（用于后处理 PGA） ============
-    # 使用“x分箱 + 每箱取最高y”算法，单次遍历完成识别，复杂度由 O(M*N) 降为 O(N)。
-    x_scan_step = 0.1  # 定义x方向目标采样步长（m）
-    x_bin_top_node = {}  # 定义分箱字典：键为箱编号，值为该箱当前最高节点对象
+    # 按几何边界精确筛选：左平台 + 斜坡 + 右平台，避免把内部节点误判为顶面节点。
+    top_tol = max(1e-6, mesh_size * 1e-3)  # 定义顶面识别容差，兼顾数值误差与网格尺度
+    top_surface_labels = []  # 初始化顶面节点编号列表
 
-    for node in part.nodes:  # 单次遍历所有节点
+    for node in part.nodes:  # 遍历全部节点并按几何方程判断是否位于顶面
         x = node.coordinates[0]  # 读取节点x坐标
         y = node.coordinates[1]  # 读取节点y坐标
-        bin_idx = int(round((x - xmin) / x_scan_step))  # 将节点映射到最近的0.1步长分箱
-        if bin_idx not in x_bin_top_node:  # 若该分箱尚无节点记录
-            x_bin_top_node[bin_idx] = node  # 直接记录当前节点为分箱最高节点
-            continue  # 进入下一节点
-        if y > x_bin_top_node[bin_idx].coordinates[1]:  # 若当前节点y高于该分箱已记录节点
-            x_bin_top_node[bin_idx] = node  # 更新该分箱最高节点
+        is_on_top = False  # 初始化“位于顶面”标记
 
-    top_surface_labels = tuple(sorted(node.label for node in x_bin_top_node.values()))  # 汇总各分箱最高节点编号并排序
+        if (0.0 - top_tol) <= x <= (left_flat + top_tol):  # 判断是否位于左平台x范围
+            if abs(y - H_upper) <= top_tol:  # 左平台顶面满足 y = H_upper
+                is_on_top = True  # 标记为顶面节点
+        elif (left_flat - top_tol) <= x <= (left_flat + w_slope + top_tol):  # 判断是否位于斜坡x范围
+            y_slope = H_upper - (x - left_flat) * h / w_slope  # 计算当前x对应的斜坡理论y坐标
+            if abs(y - y_slope) <= top_tol:  # 斜坡顶面满足线性方程
+                is_on_top = True  # 标记为顶面节点
+        elif (left_flat + w_slope - top_tol) <= x <= (total_L + top_tol):  # 判断是否位于右平台x范围
+            if abs(y - H_lower) <= top_tol:  # 右平台顶面满足 y = H_lower
+                is_on_top = True  # 标记为顶面节点
+
+        if is_on_top:  # 若当前节点位于顶面
+            top_surface_labels.append(node.label)  # 记录顶面节点编号
+
+    top_surface_labels = tuple(sorted(set(top_surface_labels)))  # 去重并排序，生成Abaqus需要的节点标签元组
     if len(top_surface_labels) == 0:
         raise ValueError('%s 未识别到顶部边界节点，请检查几何参数与容差设置' % model_name)
 
