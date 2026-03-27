@@ -146,15 +146,13 @@ def process_one_odb(odb_path, logger=None):
 
         pga_h = [0.0] * n_top
         pga_v = [0.0] * n_top
-        peak_h_frame = [-1] * n_top
-        peak_v_frame = [-1] * n_top
         peak_h_time = [0.0] * n_top
         peak_v_time = [0.0] * n_top
 
         top_nset = instance.nodeSets['TOP_SURFACE']
         log_step(logger, '%s 使用 TOP_SURFACE 节点集的全部节点进行后处理', odb_basename)
 
-        for fi, frame in enumerate(frames):
+        for frame in frames:
             if 'A' not in frame.fieldOutputs:
                 continue
 
@@ -173,12 +171,10 @@ def process_one_odb(odb_path, logger=None):
 
                 if a1 > pga_h[idx]:
                     pga_h[idx] = a1
-                    peak_h_frame[idx] = fi
                     peak_h_time[idx] = t_cur
 
                 if a2 > pga_v[idx]:
                     pga_v[idx] = a2
-                    peak_v_frame[idx] = fi
                     peak_v_time[idx] = t_cur
 
         results = []
@@ -192,9 +188,7 @@ def process_one_odb(odb_path, logger=None):
                 'y': y_coord,
                 'PGA_h': pga_h[i],
                 'PGA_v': pga_v[i],
-                'peak_h_frame': peak_h_frame[i],
                 'peak_h_time': peak_h_time[i],
-                'peak_v_frame': peak_v_frame[i],
                 'peak_v_time': peak_v_time[i],
             })
 
@@ -206,8 +200,8 @@ def process_one_odb(odb_path, logger=None):
             writer.writerow([
                 'x/h', 'node_label', 'x', 'y',
                 'PGA_h', 'PGA_v',
-                'peak_h_frame', 'peak_h_time',
-                'peak_v_frame', 'peak_v_time'
+                'peak_h_time',
+                'peak_v_time'
             ])
             for r in results:
                 writer.writerow([
@@ -217,9 +211,7 @@ def process_one_odb(odb_path, logger=None):
                     '%.6f' % r['y'],
                     '%.6f' % r['PGA_h'],
                     '%.6f' % r['PGA_v'],
-                    '%d' % r['peak_h_frame'],
                     '%.6f' % r['peak_h_time'],
-                    '%d' % r['peak_v_frame'],
                     '%.6f' % r['peak_v_time'],
                 ])
         log_step(logger, '%s 处理完成，输出文件=%s，节点数=%d', odb_basename, csv_name, len(results))

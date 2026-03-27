@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import matplotlib  # 导入 matplotlib 主模块以设置无界面后端
+matplotlib.use('Agg')  # 使用 Agg 后端防止运行时弹出图形窗口
 import matplotlib.pyplot as plt
 import os
 import glob
@@ -148,6 +150,22 @@ for ax, component in zip(axes, TARGET_COLUMNS):
     plot_component(ax, x_ref, pga_series, component, csv_labels)
 
 plt.tight_layout()
-# 也可以取消注释下面这行直接保存图片
-# plt.savefig(f'Fig12_both_angle{INCIDENT_ANGLE}.png', dpi=300)
-plt.show()
+
+# 使用脚本当前目录作为输出目录
+output_path = SCRIPT_DIR  # 将图片直接输出到脚本所在目录
+
+# 保存合并图
+angle_text = str(int(INCIDENT_ANGLE)) if float(INCIDENT_ANGLE).is_integer() else str(INCIDENT_ANGLE)  # 将角度格式化为便于命名的字符串
+combined_file = os.path.join(output_path, f'both_angle{angle_text}.png')  # 生成合并图输出文件完整路径（不含 Fig12 前缀）
+fig.savefig(combined_file, dpi=300, bbox_inches='tight')  # 以 300dpi 保存合并图并紧凑裁边
+
+# 保存每个分量的单图（从合并图中裁剪对应子图区域）
+fig.canvas.draw()  # 先渲染画布以确保可获取准确的子图边界
+renderer = fig.canvas.get_renderer()  # 获取当前画布渲染器用于计算子图包围盒
+for ax, component in zip(axes, TARGET_COLUMNS):
+    bbox = ax.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted())  # 计算当前子图在英寸坐标下的紧边界
+    single_file = os.path.join(output_path, f'{component}_angle{angle_text}.png')  # 生成当前分量单图输出文件完整路径（不含 Fig12 前缀）
+    fig.savefig(single_file, dpi=300, bbox_inches=bbox)  # 按子图边界裁剪并保存单图 PNG
+
+# 不弹出窗口，直接关闭图形
+plt.close(fig)  # 主动关闭图形对象以避免界面弹窗并释放内存
