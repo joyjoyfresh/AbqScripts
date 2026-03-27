@@ -8,7 +8,7 @@ import subprocess  # 导入子进程执行模块
 import sys  # 导入系统模块用于获取 Python 解释器
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根目录
-FOLDER_PREFIX = "fuke-10-"  # 设置目标文件夹前缀
+FOLDER_PREFIX = "fuke-30-"  # 设置目标文件夹前缀
 FOLDER_START = 1  # 设置起始文件夹编号
 FOLDER_END = 12  # 设置结束文件夹编号
 STOP_ON_ERROR = True  # 设置出现脚本错误时是否立即停止

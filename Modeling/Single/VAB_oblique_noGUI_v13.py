@@ -961,7 +961,7 @@ def main():
 
     # 统一集中配置参数，便于维护和批量改动。
     material_cfg = {
-        'angle': 10,  # 设置 SV 波入射角度（度）
+        'angle': 30,  # 设置 SV 波入射角度（度）
         'elastic_modulus': 32e9,  # 设置杨氏模量（Pa）
         'poisson_ratio': 0.25,  # 设置泊松比
         'density': 2650,  # 设置密度（kg/m^3）
