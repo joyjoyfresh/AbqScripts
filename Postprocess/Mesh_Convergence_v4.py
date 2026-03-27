@@ -45,7 +45,7 @@ def style_axis(ax):
 # ============================================================
 #  配置
 # ============================================================
-ROOT_DIR = r'D:\Abaqus'                       # 模型根目录
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))     # 设置根目录为当前脚本所在目录
 FOLDER_PATTERN = re.compile(r'^fuke-10-(\d+)$')  # 文件夹名匹配
 WAVE_NAMES = [                                  # 3 个地震波对应的 CSV 文件名
     'PGA_job-El_Centro_scaled.csv',

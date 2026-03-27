@@ -15,17 +15,20 @@ import os
 # ]
 FILE_PATHS = [
     r'C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Original\El_Centro.txt',
-    r'C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Original\Loma_Prieta.txt',
     r'C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Original\Northridge.txt',
+    r'C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Original\Loma_Prieta.txt',
 ]
+
+# 统一输出目录：调幅后的 txt 与图表均保存到该目录
+OUTPUT_DIR = r'C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled'
 
 # True: 自动扫描当前脚本目录下所有 txt（自动排除 *_scaled.txt）
 # False: 使用 FILE_PATHS 中手动给出的路径
-AUTO_SCAN_TXT = True
+AUTO_SCAN_TXT = False
 TARGET_PGA = 0.30  # 目标峰值加速度，单位：g
 
 # 颜色序列：不同 txt 文件按顺序轮换颜色，同一文件三张图颜色一致
-COLOR_CYCLE = ['red', 'blue', 'green', 'yellow', 'magenta', 'cyan', 'orange']
+COLOR_CYCLE = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange']
 
 # 图1：加速度时程图边界
 ACCEL_XLIM = (0, 30)
@@ -218,15 +221,13 @@ def calc_response_spectrum(accel_detrended, dt, damping=0.05):
     return periods, sa
 
 
-def plot_all(t, accel, label_name, freqs, amps, periods, sa, line_color):
-    """每个地震波在同一窗口横向绘制三张图。"""
+def save_plots(t, accel, label_name, freqs, amps, periods, sa, line_color, output_dir):
+    """分别保存三张图，并额外保存一张三联图，不弹出窗口。"""
     plt.rcParams['font.family'] = 'serif'
     plt.rcParams['font.serif'] = ['Times New Roman'] + plt.rcParams['font.serif']
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 4.5))
-    ax1, ax2, ax3 = axes
-
-    # 图1：加速度时程
+    # 图1：加速度时程（单独成图）
+    fig1, ax1 = plt.subplots(figsize=(6.0, 4.5))
     ax1.plot(t, accel, color=line_color, linewidth=1.0, label=label_name)
     ax1.set_title('Acceleration, g', fontweight='bold', fontsize=14)
     ax1.set_xlabel('Time (s)', fontsize=12)
@@ -239,8 +240,13 @@ def plot_all(t, accel, label_name, freqs, amps, periods, sa, line_color):
     legend1 = ax1.legend(loc='upper right', frameon=True, fontsize=11)
     legend1.get_frame().set_edgecolor('black')
     ax1.tick_params(direction='in', top=True, right=True, labelsize=11)
+    fig1.tight_layout()
+    accel_fig_path = os.path.join(output_dir, f'{label_name}_acceleration.png')
+    fig1.savefig(accel_fig_path, dpi=300, bbox_inches='tight')
+    plt.close(fig1)
 
-    # 图2：傅里叶振幅谱
+    # 图2：傅里叶振幅谱（单独成图）
+    fig2, ax2 = plt.subplots(figsize=(6.0, 4.5))
     ax2.plot(freqs, amps, color=line_color, linewidth=1.0, label=label_name)
     ax2.set_title('Fourier Amplitude Spectrum', fontweight='bold', fontsize=14)
     ax2.set_xlabel('Frequency (Hz)', fontsize=12)
@@ -260,8 +266,13 @@ def plot_all(t, accel, label_name, freqs, amps, periods, sa, line_color):
     legend2 = ax2.legend(loc='upper right', frameon=True, fontsize=11)
     legend2.get_frame().set_edgecolor('black')
     ax2.tick_params(direction='in', top=True, right=True, labelsize=11)
+    fig2.tight_layout()
+    fft_fig_path = os.path.join(output_dir, f'{label_name}_fft.png')
+    fig2.savefig(fft_fig_path, dpi=300, bbox_inches='tight')
+    plt.close(fig2)
 
-    # 图3：弹性加速度反应谱
+    # 图3：弹性加速度反应谱（单独成图）
+    fig3, ax3 = plt.subplots(figsize=(6.0, 4.5))
     ax3.plot(periods, sa, color=line_color, linewidth=1.2, label=label_name)
     ax3.set_title('Elastic Acceleration Response Spectrum', fontweight='bold', fontsize=14)
     ax3.set_xlabel('Spectral Period T (s)', fontsize=12)
@@ -280,12 +291,81 @@ def plot_all(t, accel, label_name, freqs, amps, periods, sa, line_color):
     legend3 = ax3.legend(loc='upper right', frameon=True, fontsize=11)
     legend3.get_frame().set_edgecolor('black')
     ax3.tick_params(direction='in', which='both', top=True, right=True, labelsize=11)
+    fig3.tight_layout()
+    psa_fig_path = os.path.join(output_dir, f'{label_name}_response_spectrum.png')
+    fig3.savefig(psa_fig_path, dpi=300, bbox_inches='tight')
+    plt.close(fig3)
 
-    fig.suptitle(label_name, fontsize=14, fontweight='bold')
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    # 三联图：将三个子图放在同一张图中输出
+    fig_all, axes = plt.subplots(1, 3, figsize=(18, 4.5))  # 创建 1x3 组合图画布
+    ax1_all, ax2_all, ax3_all = axes  # 解包三个子图坐标轴
+
+    ax1_all.plot(t, accel, color=line_color, linewidth=1.0, label=label_name)  # 绘制加速度时程曲线
+    ax1_all.set_title('Acceleration, g', fontweight='bold', fontsize=14)  # 设置子图1标题
+    ax1_all.set_xlabel('Time (s)', fontsize=12)  # 设置子图1横坐标标题
+    ax1_all.set_xlim(*ACCEL_XLIM)  # 设置子图1横坐标范围
+    ax1_all.set_xticks(np.arange(0, 35, 5))  # 设置子图1横坐标刻度
+    ax1_all.set_ylim(*ACCEL_YLIM)  # 设置子图1纵坐标范围
+    ax1_all.set_yticks([-0.30, -0.15, 0.00, 0.15, 0.30])  # 设置子图1纵坐标刻度
+    ax1_all.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))  # 设置子图1纵坐标显示格式
+    ax1_all.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.5)  # 设置子图1网格样式
+    legend1_all = ax1_all.legend(loc='upper right', frameon=True, fontsize=11)  # 添加子图1图例
+    legend1_all.get_frame().set_edgecolor('black')  # 设置子图1图例边框颜色
+    ax1_all.tick_params(direction='in', top=True, right=True, labelsize=11)  # 设置子图1刻度样式
+
+    ax2_all.plot(freqs, amps, color=line_color, linewidth=1.0, label=label_name)  # 绘制傅里叶振幅谱曲线
+    ax2_all.set_title('Fourier Amplitude Spectrum', fontweight='bold', fontsize=14)  # 设置子图2标题
+    ax2_all.set_xlabel('Frequency (Hz)', fontsize=12)  # 设置子图2横坐标标题
+    ax2_all.set_ylabel('Fourier Amplitude (g$\\cdot$s)', fontsize=12)  # 设置子图2纵坐标标题
+    ax2_all.set_xlim(*FFT_XLIM)  # 设置子图2横坐标范围
+    ax2_all.set_xticks(np.arange(0, FFT_XLIM[1] + 1, 5))  # 设置子图2横坐标刻度
+    max_amp_all = np.max(amps[freqs <= FFT_XLIM[1]])  # 计算 15Hz 以内的最大振幅
+    if max_amp_all <= 0.20:  # 判断是否采用较小纵坐标范围
+        ax2_all.set_ylim(0.00, 0.20)  # 设置子图2纵坐标范围为 0~0.20
+        ax2_all.set_yticks([0.00, 0.05, 0.10, 0.15, 0.20])  # 设置子图2纵坐标刻度为 0.05 间隔
+    else:  # 否则采用较大纵坐标范围
+        ax2_all.set_ylim(0.00, 0.30)  # 设置子图2纵坐标范围为 0~0.30
+        ax2_all.set_yticks([0.00, 0.10, 0.20, 0.30])  # 设置子图2纵坐标刻度为 0.10 间隔
+    ax2_all.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))  # 设置子图2纵坐标显示格式
+    ax2_all.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.5)  # 设置子图2网格样式
+    legend2_all = ax2_all.legend(loc='upper right', frameon=True, fontsize=11)  # 添加子图2图例
+    legend2_all.get_frame().set_edgecolor('black')  # 设置子图2图例边框颜色
+    ax2_all.tick_params(direction='in', top=True, right=True, labelsize=11)  # 设置子图2刻度样式
+
+    ax3_all.plot(periods, sa, color=line_color, linewidth=1.2, label=label_name)  # 绘制反应谱曲线
+    ax3_all.set_title('Elastic Acceleration Response Spectrum', fontweight='bold', fontsize=14)  # 设置子图3标题
+    ax3_all.set_xlabel('Spectral Period T (s)', fontsize=12)  # 设置子图3横坐标标题
+    ax3_all.set_ylabel('Spectral Acceleration Sa (g)', fontsize=12)  # 设置子图3纵坐标标题
+    ax3_all.set_xscale('log')  # 将子图3横坐标设置为对数坐标
+    ax3_all.set_xlim(*PSA_XLIM)  # 设置子图3横坐标范围
+    sa_max_all = np.max(sa)  # 计算反应谱最大值
+    if sa_max_all > 1.0:  # 判断是否需要扩大纵坐标范围
+        ax3_all.set_ylim(0.00, 1.25)  # 设置子图3纵坐标范围为 0~1.25
+        ax3_all.set_yticks([0, 0.25, 0.50, 0.75, 1.00, 1.25])  # 设置子图3纵坐标刻度
+    else:  # 若最大值不超过 1.0
+        ax3_all.set_ylim(*PSA_YLIM)  # 使用默认反应谱纵坐标范围
+    ax3_all.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))  # 设置子图3纵坐标显示格式
+    ax3_all.grid(True, which='major', linestyle='-', linewidth=0.5, color='gray', alpha=0.8)  # 设置子图3主网格样式
+    ax3_all.grid(True, which='minor', linestyle=':', linewidth=0.5, color='gray', alpha=0.5)  # 设置子图3次网格样式
+    legend3_all = ax3_all.legend(loc='upper right', frameon=True, fontsize=11)  # 添加子图3图例
+    legend3_all.get_frame().set_edgecolor('black')  # 设置子图3图例边框颜色
+    ax3_all.tick_params(direction='in', which='both', top=True, right=True, labelsize=11)  # 设置子图3刻度样式
+
+    fig_all.suptitle(label_name, fontsize=14, fontweight='bold')  # 设置组合图总标题
+    fig_all.tight_layout(rect=(0, 0, 1, 0.95))  # 调整组合图布局并预留总标题空间
+    combined_fig_path = os.path.join(output_dir, f'{label_name}_all_in_one.png')  # 生成组合图输出路径
+    fig_all.savefig(combined_fig_path, dpi=300, bbox_inches='tight')  # 保存组合图到文件
+    plt.close(fig_all)  # 关闭组合图以释放内存
+
+    print(f"已保存图片：{accel_fig_path}")
+    print(f"已保存图片：{fft_fig_path}")
+    print(f"已保存图片：{psa_fig_path}")
+    print(f"已保存图片：{combined_fig_path}")
 
 
 def main():
+    # 创建统一输出目录（若不存在则自动创建）
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     file_paths = get_input_files()
 
     for idx, file_path in enumerate(file_paths):
@@ -300,8 +380,8 @@ def main():
             dt, accel_detrended, freqs, amps = calc_fft(t, accel)
             periods, sa = calc_response_spectrum(accel_detrended, dt, damping=0.05)
 
-            base, ext = os.path.splitext(file_path)
-            scaled_file_path = base + '_scaled' + ext
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            scaled_file_path = os.path.join(OUTPUT_DIR, base_name + '_scaled.txt')
             pd.DataFrame({'Time': t, 'Acceleration': accel}).to_csv(
                 scaled_file_path,
                 sep='\t',
@@ -311,14 +391,14 @@ def main():
             )
             print(f"已保存调幅+滤波时程：{scaled_file_path}")
 
-            label_name = os.path.splitext(os.path.basename(file_path))[0]
+            label_name = base_name
             line_color = COLOR_CYCLE[idx % len(COLOR_CYCLE)]
-            plot_all(t, accel, label_name, freqs, amps, periods, sa, line_color)
+            save_plots(t, accel, label_name, freqs, amps, periods, sa, line_color, OUTPUT_DIR)
 
         except Exception as exc:
             print(f"处理失败：{file_path} -> {exc}")
 
-    plt.show()
+    # 仅保存图片，不弹出绘图窗口
 
 
 if __name__ == '__main__':
