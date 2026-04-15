@@ -19,6 +19,112 @@ BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # �
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 定义边界处理顺序
 
 
+def main():
+    """脚本主入口：组织参数、建模、施加边界并提交作业。"""
+    logger = log_step('VAB_oblique_double_v2.log')  # 初始化日志并写入当前版本日志文件
+    total_start = time.time()  # 记录主流程起始时间
+
+    # 统一集中配置参数，便于维护和批量改动。
+    material_cfg = {
+        'angle': 30,  # 设置 SV 波入射角度（度）
+        'layer1': {
+            'elastic_modulus': 32e9,  # 设置 Layer1 杨氏模量（Pa）
+            'poisson_ratio': 0.25,  # 设置 Layer1 泊松比
+            'density': 2650,  # 设置 Layer1 密度（kg/m^3）
+        },
+        'layer2': {
+            'elastic_modulus': 8e9,  # 设置 Layer2 杨氏模量（Pa）
+            'poisson_ratio': 0.30,  # 设置 Layer2 泊松比
+            'density': 2100,  # 设置 Layer2 密度（kg/m^3）
+        },
+        'max_reflect_order': 3,  # 设置多次反射/透射最大阶数
+    }
+    geometry_cfg = {
+        'h': 100,  # 设置斜坡高度（m）
+        'i': 45,  # 设置斜坡倾角（度）
+        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
+        'f_max': 15,  # 设置目标最高频率（Hz）
+        'n_per_wave': 10,  # 设置每波长单元数
+        'interface_h': 180.0,  # 设置用户自定义界面高度（m）
+    }
+    job_cfg = {
+        'variables': ('U', 'V', 'A'),  # 设置场输出变量
+        'frequency': 1,  # 设置输出频率
+        'num_cpus': 7,  # 设置并行 CPU 数量
+        'memory_percent': 90,  # 设置作业内存百分比
+    }
+
+    try:
+        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
+
+        cs1 = _compute_wave_speed_from_elastic_modulus(  # 根据 Layer1 材料参数计算剪切波速
+            material_cfg['layer1']['elastic_modulus'],
+            material_cfg['layer1']['poisson_ratio'],
+            material_cfg['layer1']['density'])
+        cs2 = _compute_wave_speed_from_elastic_modulus(  # 根据 Layer2 材料参数计算剪切波速
+            material_cfg['layer2']['elastic_modulus'],
+            material_cfg['layer2']['poisson_ratio'],
+            material_cfg['layer2']['density'])
+
+        h = geometry_cfg['h']  # 读取斜坡高度
+        H_lower = 2.0 * h  # 设置下垫面高度
+        total_L = 8.0 * h  # 设置总模型长度
+        mesh_size_auto = min(cs1, cs2) / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按较慢层波速计算自动网格尺寸
+        mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限中的较小值
+
+        cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 生成 CAE 文件名
+
+        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
+
+        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
+            total_L=total_L,
+            h=h,
+            i=geometry_cfg['i'],
+            cs1=cs1,
+            vv1=material_cfg['layer1']['poisson_ratio'],
+            density1=material_cfg['layer1']['density'],
+            cs2=cs2,
+            vv2=material_cfg['layer2']['poisson_ratio'],
+            density2=material_cfg['layer2']['density'],
+            interface_h=geometry_cfg['interface_h'],
+            mesh_size=mesh_size,
+            H_lower=H_lower,
+            cae_name=cae_name,
+            logger=logger)
+
+        model_names = build_models(  # 依据不同地震动复制模型并施加等效边界
+            acc_info=acc_info,
+            base_model=base_model,
+            part_name=part_name,
+            inst_name=inst_name,
+            angle=material_cfg['angle'],
+            cs1=cs1,
+            vv1=material_cfg['layer1']['poisson_ratio'],
+            density1=material_cfg['layer1']['density'],
+            cs2=cs2,
+            vv2=material_cfg['layer2']['poisson_ratio'],
+            density2=material_cfg['layer2']['density'],
+            H1=geometry_cfg['interface_h'],
+            max_reflect_order=material_cfg['max_reflect_order'],
+            step_name=DEFAULT_STEP_NAME,
+            variables=job_cfg['variables'],
+            frequency=job_cfg['frequency'],
+            logger=logger)
+
+        for model_name in model_names:  # 顺序提交每个模型作业
+            submit_job(
+                num_cpus=job_cfg['num_cpus'],
+                memory_percent=job_cfg['memory_percent'],
+                model_name=model_name,
+                logger=logger)
+
+        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
+    except Exception as exc:
+        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
+        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈便于定位问题
+        raise  # 继续抛出异常，避免失败被静默吞掉
+
+
 def _next_available_name(prefix, existing_container):
     """按前缀生成可用名称（如 Part-1, Part-2）。"""
     index = 1  # 初始化名称序号
@@ -312,10 +418,18 @@ def create_model(total_L, h, i,
         else:  # 处理界面以上面
             layer2_faces.append(face)  # 将面归类到 Layer2
 
+    def _to_face_sequence(face_list):  # 定义列表到 GeomSequence 的转换函数
+        face_seq = part.faces[0:0]  # 构造空的 FaceArray 作为初始序列
+        for face in face_list:  # 遍历目标面列表
+            face_seq = face_seq + part.faces[face.index:face.index + 1]  # 逐个拼接为 Abaqus 认可的 FaceArray
+        return face_seq  # 返回可用于 Region 的 FaceArray
+
     if len(layer1_faces) > 0:  # 判断 Layer1 面集合是否非空
-        part.SectionAssignment(region=Region(faces=layer1_faces), sectionName=sec1_name, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)  # 对 Layer1 面批量分配 Layer1 截面
+        layer1_face_seq = _to_face_sequence(layer1_faces)  # 将 Layer1 列表转换为 GeomSequence
+        part.SectionAssignment(region=Region(faces=layer1_face_seq), sectionName=sec1_name, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)  # 对 Layer1 面批量分配 Layer1 截面
     if len(layer2_faces) > 0:  # 判断 Layer2 面集合是否非空
-        part.SectionAssignment(region=Region(faces=layer2_faces), sectionName=sec2_name, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)  # 对 Layer2 面批量分配 Layer2 截面
+        layer2_face_seq = _to_face_sequence(layer2_faces)  # 将 Layer2 列表转换为 GeomSequence
+        part.SectionAssignment(region=Region(faces=layer2_face_seq), sectionName=sec2_name, offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)  # 对 Layer2 面批量分配 Layer2 截面
     log_step(logger, '%s 截面分配完成: interface_h=%.3f, L1面=%d, L2面=%d', model_name, interface_h, len(layer1_faces), len(layer2_faces))  # 记录界面高度分层结果
 
     # 重新生成装配体以同步网格
@@ -1108,112 +1222,6 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     mdb.jobs[job_name].submit(consistencyChecking=OFF)
     mdb.jobs[job_name].waitForCompletion()
     log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
-
-
-def main():
-    """脚本主入口：组织参数、建模、施加边界并提交作业。"""
-    logger = log_step('VAB_oblique_noGUI_v13.log')  # 初始化日志并写入当前版本日志文件
-    total_start = time.time()  # 记录主流程起始时间
-
-    # 统一集中配置参数，便于维护和批量改动。
-    material_cfg = {
-        'angle': 30,  # 设置 SV 波入射角度（度）
-        'layer1': {
-            'elastic_modulus': 32e9,  # 设置 Layer1 杨氏模量（Pa）
-            'poisson_ratio': 0.25,  # 设置 Layer1 泊松比
-            'density': 2650,  # 设置 Layer1 密度（kg/m^3）
-        },
-        'layer2': {
-            'elastic_modulus': 8e9,  # 设置 Layer2 杨氏模量（Pa）
-            'poisson_ratio': 0.30,  # 设置 Layer2 泊松比
-            'density': 2100,  # 设置 Layer2 密度（kg/m^3）
-        },
-        'max_reflect_order': 3,  # 设置多次反射/透射最大阶数
-    }
-    geometry_cfg = {
-        'h': 100,  # 设置斜坡高度（m）
-        'i': 45,  # 设置斜坡倾角（度）
-        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
-        'f_max': 15,  # 设置目标最高频率（Hz）
-        'n_per_wave': 10,  # 设置每波长单元数
-        'interface_h': 180.0,  # 设置用户自定义界面高度（m）
-    }
-    job_cfg = {
-        'variables': ('U', 'V', 'A'),  # 设置场输出变量
-        'frequency': 1,  # 设置输出频率
-        'num_cpus': 7,  # 设置并行 CPU 数量
-        'memory_percent': 90,  # 设置作业内存百分比
-    }
-
-    try:
-        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
-
-        cs1 = _compute_wave_speed_from_elastic_modulus(  # 根据 Layer1 材料参数计算剪切波速
-            material_cfg['layer1']['elastic_modulus'],
-            material_cfg['layer1']['poisson_ratio'],
-            material_cfg['layer1']['density'])
-        cs2 = _compute_wave_speed_from_elastic_modulus(  # 根据 Layer2 材料参数计算剪切波速
-            material_cfg['layer2']['elastic_modulus'],
-            material_cfg['layer2']['poisson_ratio'],
-            material_cfg['layer2']['density'])
-
-        h = geometry_cfg['h']  # 读取斜坡高度
-        H_lower = 2.0 * h  # 设置下垫面高度
-        total_L = 8.0 * h  # 设置总模型长度
-        mesh_size_auto = min(cs1, cs2) / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按较慢层波速计算自动网格尺寸
-        mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限中的较小值
-
-        cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 生成 CAE 文件名
-
-        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
-
-        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
-            total_L=total_L,
-            h=h,
-            i=geometry_cfg['i'],
-            cs1=cs1,
-            vv1=material_cfg['layer1']['poisson_ratio'],
-            density1=material_cfg['layer1']['density'],
-            cs2=cs2,
-            vv2=material_cfg['layer2']['poisson_ratio'],
-            density2=material_cfg['layer2']['density'],
-            interface_h=geometry_cfg['interface_h'],
-            mesh_size=mesh_size,
-            H_lower=H_lower,
-            cae_name=cae_name,
-            logger=logger)
-
-        model_names = build_models(  # 依据不同地震动复制模型并施加等效边界
-            acc_info=acc_info,
-            base_model=base_model,
-            part_name=part_name,
-            inst_name=inst_name,
-            angle=material_cfg['angle'],
-            cs1=cs1,
-            vv1=material_cfg['layer1']['poisson_ratio'],
-            density1=material_cfg['layer1']['density'],
-            cs2=cs2,
-            vv2=material_cfg['layer2']['poisson_ratio'],
-            density2=material_cfg['layer2']['density'],
-            H1=geometry_cfg['interface_h'],
-            max_reflect_order=material_cfg['max_reflect_order'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            logger=logger)
-
-        for model_name in model_names:  # 顺序提交每个模型作业
-            submit_job(
-                num_cpus=job_cfg['num_cpus'],
-                memory_percent=job_cfg['memory_percent'],
-                model_name=model_name,
-                logger=logger)
-
-        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
-    except Exception as exc:
-        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
-        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈便于定位问题
-        raise  # 继续抛出异常，避免失败被静默吞掉
 
 
 if __name__ == '__main__':
