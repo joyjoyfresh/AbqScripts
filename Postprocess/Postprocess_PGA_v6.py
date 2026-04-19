@@ -87,6 +87,13 @@ def find_top_surface_nodes(instance):
     return top_nodes, diagnostics
 
 
+def strip_job_prefix(name):
+    """若名称以 job- 开头则去掉该前缀，避免输出文件名包含 job-。"""
+    if name.lower().startswith('job-'):  # 判断名称是否以 job- 前缀开头（忽略大小写）
+        return name[4:]  # 去掉前 4 个字符 "job-" 并返回
+    return name  # 若不含 job- 前缀则原样返回
+
+
 # ==============================================================================
 #  处理单个 ODB 文件
 # ==============================================================================
@@ -194,7 +201,8 @@ def process_one_odb(odb_path, logger=None):
 
         results.sort(key=lambda r: r['x/h'])
 
-        csv_name = 'PGA_{}.csv'.format(odb_stem)
+        csv_stem = strip_job_prefix(odb_stem)  # 将 ODB 名中的 job- 前缀去掉后作为输出名主体
+        csv_name = 'PGA-{}.csv'.format(csv_stem)  # 按规则生成不含 job- 的 PGA 输出文件名
         with open(csv_name, 'w') as f:
             writer = csv.writer(f, lineterminator='\n')
             writer.writerow([
