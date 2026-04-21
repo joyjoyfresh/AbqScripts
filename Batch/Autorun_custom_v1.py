@@ -8,17 +8,19 @@ import sys  # 导入系统模块用于获取 Python 解释器与命令行参数
 
 ROOT_DIR = os.getcwd()  # 设置默认根目录为脚本启动时的当前工作目录
 STOP_ON_ERROR = True  # 设置出现脚本错误时是否立即停止
-CHECK_EXISTING_SCRIPTS_BEFORE_COPY = False  # 设置是否在复制前检查子文件夹是否已存在全部执行脚本
 SKIP_FOLDER_IF_SCRIPTS_EXIST = False  # 设置当子文件夹已存在全部执行脚本时是否跳过该文件夹
-ENABLE_CUSTOM_DELETE = True  # 设置是否启用自定义删除文件功能
+
 DELETE_BY_NAMES = [  # 定义按具体文件名删除的配置列表
-    #"README.md",
+    #"abaqus.rpy",
 ]  # 结束按具体文件名删除配置定义
 DELETE_BY_EXTENSIONS = [  # 定义按文件扩展名删除的配置列表
     ".png", 
 ]  # 结束按文件扩展名删除配置定义
 
 CUSTOM_COPY_PATHS = [  # 定义需要复制进每个子目录的自定义文件完整路径列表
+    #r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\El_Centro_scaled.txt",  # 定义 El_Centro 文件完整路径
+    #r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\Loma_Prieta_scaled.txt",  # 定义 Loma_Prieta 文件完整路径
+    #r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\Northridge_scaled.txt",  # 定义 Northridge 文件完整路径
 ]  # 结束自定义复制文件路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
@@ -192,13 +194,13 @@ def main():  # 定义主函数
     for folder_path in folder_paths:  # 按名称顺序遍历所有目标子文件夹
         print("\n==============================")  # 输出分隔线便于阅读日志
         print("处理文件夹：{}".format(folder_path))  # 输出当前处理文件夹信息
-        if CHECK_EXISTING_SCRIPTS_BEFORE_COPY and run_order:  # 判断是否开启复制前脚本存在性检查且已配置待执行脚本
+        if SKIP_FOLDER_IF_SCRIPTS_EXIST and run_order:  # 判断是否配置为按已存在脚本规则跳过且已配置待执行脚本
             existing_scripts = find_existing_scripts(folder_path, run_order)  # 获取当前文件夹中已存在的执行脚本列表
             if existing_scripts:  # 判断当前文件夹是否已存在至少一个执行脚本
                 print("检测到已存在执行脚本：{}".format(folder_path))  # 输出检测到已有脚本的提示
                 for script_name in existing_scripts:  # 遍历已存在脚本列表
                     print("  - 已存在：{}".format(script_name))  # 输出已存在脚本明细
-            if has_all_scripts(folder_path, run_order) and SKIP_FOLDER_IF_SCRIPTS_EXIST:  # 判断是否已存在全部脚本且配置为跳过
+            if has_all_scripts(folder_path, run_order):  # 判断是否已存在全部脚本且配置为跳过
                 print("按配置跳过该文件夹（已存在全部执行脚本）。")  # 输出按配置跳过提示
                 skipped_folders.append(folder_path)  # 记录跳过文件夹路径
                 continue  # 跳过当前文件夹继续处理下一个
@@ -212,8 +214,7 @@ def main():  # 定义主函数
                 break  # 跳出循环结束批处理
             continue  # 当前文件夹失败后继续处理下一个
 
-        if ENABLE_CUSTOM_DELETE:  # 判断是否启用自定义删除文件功能
-            delete_custom_files_in_folder(folder_path, DELETE_BY_NAMES, DELETE_BY_EXTENSIONS)  # 按配置删除当前文件夹内匹配文件
+        delete_custom_files_in_folder(folder_path, DELETE_BY_NAMES, DELETE_BY_EXTENSIONS)  # 按配置自动执行删除或在无规则时跳过删除步骤
         ok = run_scripts_in_folder(folder_path, run_order)  # 在当前文件夹内按顺序执行脚本
         if ok:  # 判断当前文件夹是否执行成功
             succeeded_folders.append(folder_path)  # 记录执行成功的文件夹路径
