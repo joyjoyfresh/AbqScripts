@@ -10,8 +10,10 @@ import matplotlib.pyplot as plt  # 导入 pyplot 用于绘图
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前脚本目录
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认数据根目录为脚本所在目录
-OUTPUT_PNG_NAME = 'TAF_max_vs_theta_grid_v1.png'  # 定义输出 PNG 文件名
-OUTPUT_CSV_NAME = 'TAF_max_vs_theta_summary_v1.csv'  # 定义输出汇总 CSV 文件名
+OUTPUT_CSV_NAME = 'TAF_max_vs_theta_summary_v2.csv'  # 定义输出汇总 CSV 文件名
+OUTPUT_GRID_PNG_NAME = 'TAF_max_vs_theta_grid_v2.png'  # 定义输出汇总大图文件名
+OUTPUT_FIG_DIR_NAME = 'TAF_theta_panels_v2'  # 定义单图输出目录名
+OUTPUT_FIG_PREFIX = 'TAF_max_vs_theta'  # 定义单图输出文件名前缀
 PGA_GLOB_PREFIX = 'pga'  # 定义 PGA 文件名前缀（小写）
 TAF_GLOB_PREFIX = 'taf'  # 定义 TAF 文件名前缀（小写）
 TARGET_COLUMNS = ['PGA_h', 'PGA_v']  # 定义 PGA 读取分量列
@@ -247,11 +249,21 @@ def configure_axes_style(ax):  # 定义坐标轴样式函数
     for spine in ax.spines.values():  # 遍历四条边框线
         spine.set_linewidth(1.0)  # 设置边框线宽
         spine.set_color('#444444')  # 设置边框颜色
-    ax.tick_params(direction='in', top=True, right=True, length=3.0, width=0.9, color='#444444', labelsize=10)  # 设置刻度样式
+    ax.tick_params(direction='in', top=True, right=True, length=3.0, width=0.9, color='#444444', labelsize=12)  # 设置刻度样式
     ax.grid(False)  # 关闭网格线
 
 
-def plot_grid(summary_df, output_png_path):  # 定义绘制 2x3 总图的函数
+def safe_slug(text):  # 定义安全文件名片段函数
+    return re.sub(r'[^a-z0-9]+', '_', str(text).lower()).strip('_')  # 转换为仅含小写字母数字下划线
+
+
+def build_panel_filename(h_value, motion_key):  # 定义单图文件名构建函数
+    h_token = str(int(round(float(h_value))))  # 构建 h 数值片段
+    motion_token = safe_slug(motion_key)  # 构建地震波片段
+    return '{}_h{}_{}_v2.png'.format(OUTPUT_FIG_PREFIX, h_token, motion_token)  # 返回单图文件名
+
+
+def plot_grid(summary_df, output_grid_path):  # 定义绘制 2x3 汇总大图函数
     plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局字体为 Times 风格
     plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
     plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示
@@ -285,8 +297,60 @@ def plot_grid(summary_df, output_png_path):  # 定义绘制 2x3 总图的函数
     fig.text(0.5, 0.48, r'(a) $h$ = 50 m', ha='center', va='center', fontsize=24)  # 添加第一行行注释
     fig.text(0.5, 0.03, r'(b) $h$ = 100 m', ha='center', va='center', fontsize=24)  # 添加第二行行注释
     plt.subplots_adjust(left=0.09, right=0.98, top=0.84, bottom=0.12, wspace=0.33, hspace=0.62)  # 调整布局匹配目标版式
-    fig.savefig(output_png_path, dpi=350)  # 保存输出图像
+    fig.savefig(output_grid_path, dpi=350)  # 保存输出汇总图像
     plt.close(fig)  # 关闭图对象释放内存
+
+
+def plot_single_panels(summary_df, output_fig_dir):  # 定义逐子图输出函数
+    plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局字体为 Times 风格
+    plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
+    plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示
+    y_limits_map = {50.0: (1.0, 2.25), 100.0: (1.0, 2.25)}  # 定义不同 h 的纵轴范围
+    y_ticks_map = {50.0: [1.0, 1.25, 1.5, 1.75, 2.0, 2.25], 100.0: [1.0, 1.25, 1.5, 1.75, 2.0, 2.25]}  # 定义不同 h 的纵轴刻度
+    output_paths = []  # 初始化输出路径列表
+    os.makedirs(output_fig_dir, exist_ok=True)  # 创建单图输出目录
+    for h_value in TARGET_H_VALUES:  # 遍历目标 h 值
+        for motion_cfg in MOTION_CONFIGS:  # 遍历三种地震波
+            fig, ax = plt.subplots(1, 1, figsize=(5.2, 4.4), facecolor='white')  # 创建单图画布
+            configure_axes_style(ax)  # 应用坐标轴样式
+            panel = summary_df[(summary_df['h_snap'] == h_value) & (summary_df['motion'] == motion_cfg['key'])]  # 提取当前子图数据
+            for i_value in TARGET_I_VALUES:  # 遍历四条 i 曲线
+                style = I_STYLE[i_value]  # 读取当前 i 对应样式
+                series = panel[panel['i_snap'] == i_value].copy()  # 提取当前 i 的序列
+                series = series.sort_values(by='angle_snap')  # 按角度升序排序
+                x_values = series['angle_snap'].to_numpy(dtype=float)  # 读取横轴角度数组
+                y_values = series['taf_max'].to_numpy(dtype=float)  # 读取纵轴 TAF_max 数组
+                if x_values.size == 0:  # 判断当前曲线是否无数据
+                    continue  # 跳过空曲线
+                ax.plot(x_values, y_values, color=style['color'], marker=style['marker'], linestyle='-', linewidth=1.8, markersize=6.0, markeredgecolor='none', label=style['label'])  # 绘制当前 i 曲线
+            ax.set_xlim(min(TARGET_ANGLES), max(TARGET_ANGLES))  # 固定横轴范围为 0 到 30
+            ax.set_xticks(TARGET_ANGLES)  # 固定横轴刻度为 0/10/20/30
+            ax.set_ylim(*y_limits_map[h_value])  # 设置当前图纵轴范围
+            ax.set_yticks(y_ticks_map[h_value])  # 设置当前图纵轴刻度
+            ax.set_title(r'{} ($h$ = {} m)'.format(motion_cfg['display'], int(round(h_value))), fontsize=16, pad=8)  # 设置单图标题
+            ax.set_ylabel(r'$TAF_{\max}$', fontsize=15)  # 设置纵轴标签
+            ax.set_xlabel(r'$\theta_s$ (°)', fontsize=15)  # 设置横轴标签
+            ax.legend(loc='upper left', frameon=False, fontsize=10, handlelength=2.2, handletextpad=0.3, borderaxespad=0.2)  # 绘制图例
+            fig.tight_layout()  # 自动调整单图布局
+            output_name = build_panel_filename(h_value, motion_cfg['key'])  # 生成当前单图文件名
+            output_path = os.path.join(output_fig_dir, output_name)  # 生成当前单图完整路径
+            fig.savefig(output_path, dpi=350)  # 保存当前单图
+            plt.close(fig)  # 关闭当前图对象释放内存
+            output_paths.append(output_path)  # 记录当前单图路径
+    return output_paths  # 返回全部输出路径
+
+
+def resolve_output_directory(batch_root, arg_output):  # 定义输出目录解析函数
+    if not arg_output:  # 判断是否未提供输出参数
+        return batch_root  # 使用数据目录作为默认输出目录
+    abs_output = os.path.abspath(arg_output)  # 转换为绝对路径
+    ext_name = os.path.splitext(abs_output)[1].lower()  # 读取参数扩展名
+    if ext_name == '.png':  # 判断是否沿用旧版传入 PNG 路径习惯
+        parent_dir = os.path.dirname(abs_output)  # 读取 PNG 父目录
+        if parent_dir:  # 判断父目录是否非空
+            return parent_dir  # 返回父目录作为输出目录
+        return batch_root  # 父目录为空时回退到数据目录
+    return abs_output  # 将参数作为目录路径返回
 
 
 def main():  # 定义主函数
@@ -294,21 +358,25 @@ def main():  # 定义主函数
         batch_root = os.path.abspath(sys.argv[1])  # 使用命令行数据目录
     else:  # 未传入参数时使用默认目录
         batch_root = DEFAULT_BATCH_ROOT  # 使用脚本目录作为默认数据目录
-    if len(sys.argv) >= 3:  # 判断是否传入输出图片路径参数
-        output_png_path = os.path.abspath(sys.argv[2])  # 使用命令行输出路径
-    else:  # 未传入输出路径时使用默认文件名
-        output_png_path = os.path.join(batch_root, OUTPUT_PNG_NAME)  # 在数据目录输出图片
-    output_dir = os.path.dirname(output_png_path)  # 获取输出目录路径
+    arg_output = sys.argv[2] if len(sys.argv) >= 3 else ''  # 读取可选输出参数
+    output_dir = resolve_output_directory(batch_root, arg_output)  # 解析最终输出目录
     if output_dir and (not os.path.isdir(output_dir)):  # 判断输出目录是否需要创建
         os.makedirs(output_dir, exist_ok=True)  # 创建输出目录
     records = collect_records(batch_root)  # 扫描并采集所有记录
     summary_df = prepare_summary(records)  # 生成目标网格汇总数据
     output_csv_path = os.path.join(output_dir, OUTPUT_CSV_NAME)  # 组装汇总 CSV 输出路径
     summary_df.to_csv(output_csv_path, index=False, encoding='utf-8-sig')  # 保存汇总 CSV 便于复核
-    plot_grid(summary_df, output_png_path)  # 绘制并保存目标版式图
+    output_fig_dir = os.path.join(output_dir, OUTPUT_FIG_DIR_NAME)  # 组装单图输出目录路径
+    output_grid_path = os.path.join(output_fig_dir, OUTPUT_GRID_PNG_NAME)  # 组装汇总大图输出路径
+    plot_grid(summary_df, output_grid_path)  # 绘制并保存汇总大图
+    output_panel_paths = plot_single_panels(summary_df, output_fig_dir)  # 逐子图绘制并保存
     print('数据目录: {}'.format(batch_root))  # 输出数据目录信息
     print('汇总表: {}'.format(output_csv_path))  # 输出汇总 CSV 路径
-    print('图片输出: {}'.format(output_png_path))  # 输出图片路径
+    print('单图目录: {}'.format(output_fig_dir))  # 输出单图目录路径
+    print('汇总图: {}'.format(output_grid_path))  # 输出汇总大图路径
+    print('单图数量: {}'.format(len(output_panel_paths)))  # 输出单图数量统计
+    for panel_path in output_panel_paths:  # 遍历全部单图路径
+        print('单图输出: {}'.format(panel_path))  # 逐行输出单图路径
 
 
 if __name__ == '__main__':  # 判断脚本是否直接运行

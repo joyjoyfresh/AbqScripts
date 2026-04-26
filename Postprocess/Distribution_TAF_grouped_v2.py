@@ -13,6 +13,7 @@ import matplotlib.font_manager as fm  # 导入字体管理器用于中英文字�
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本目录
 WORK_ROOT = SCRIPT_DIR  # 定义输入与输出统一使用脚本当前目录
 TARGET_FILENAME = 'TAF-El_Centro.csv'  # 定义每个算例目录中目标 CSV 文件名
+OUTPUT_FIG_DIR_NAME = 'TAF_grouped_figures_v2'  # 定义分组图统一输出子目录名
 LOC_CREST = 3.0  # 定义坡顶归一化位置
 DEFAULT_TOE = 4.0  # 定义坡脚默认归一化位置
 ANGLE_STYLES = {  # 定义 angle 与颜色线型映射字典
@@ -147,9 +148,12 @@ def main():  # 定义主函数
     batch_root = WORK_ROOT  # 设置批处理根目录为脚本当前目录
     if not os.path.isdir(batch_root):  # 判断当前目录是否存在
         raise NotADirectoryError(f'当前目录不存在: {batch_root}')  # 抛出目录不存在错误
+    output_dir = os.path.join(batch_root, OUTPUT_FIG_DIR_NAME)  # 组装统一图片输出目录路径
+    if not os.path.isdir(output_dir):  # 判断统一图片输出目录是否已存在
+        os.makedirs(output_dir, exist_ok=True)  # 创建统一图片输出目录
     records = collect_taf_records(batch_root)  # 从当前目录收集所有有效算例记录
     grouped = group_records_by_hi(records)  # 按 h 与 i 对记录进行分组
     for (h_value, i_value), group_items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):  # 按 h 与 i 升序遍历分组
-        plot_group_curves(h_value, i_value, group_items, batch_root)  # 对当前分组绘图并保存到当前目录
+        plot_group_curves(h_value, i_value, group_items, output_dir)  # 对当前分组绘图并保存到统一图片输出目录
 if __name__ == '__main__':  # 判断是否作为主脚本直接运行
     main()  # 调用主函数执行流程

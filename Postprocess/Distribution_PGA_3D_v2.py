@@ -15,6 +15,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本所
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认批处理数据根目录
 OUTPUT_FIGURE_NAME = 'PGA_h_max_3D_grid.png'  # 设置输出总图文件名
 OUTPUT_SINGLE_PREFIX = 'PGA_h_max_3D'  # 设置单图文件名前缀
+OUTPUT_IMAGE_DIR_NAME = 'PGA_h_max_3D_figures_v2'  # 设置图片统一输出子目录名
 OUTPUT_SUMMARY_NAME = 'PGA_h_max_summary.csv'  # 设置输出汇总表文件名
 PGA_COLUMN = 'PGA_h'  # 设置用于统计的目标分量列
 FOLDER_PATTERN = re.compile(r'h(?P<h>-?\d+(?:\.\d+)?)_i(?P<i>-?\d+(?:\.\d+)?)_angle(?P<angle>-?\d+(?:\.\d+)?)')  # 定义参数文件夹名解析正则
@@ -267,14 +268,19 @@ def main():  # 定义主函数
     output_dir = os.path.dirname(output_figure)  # 获取输出图片所在目录路径
     if output_dir and (not os.path.isdir(output_dir)):  # 判断输出目录是否需要创建
         os.makedirs(output_dir, exist_ok=True)  # 创建输出目录并允许已存在
+    output_image_dir = os.path.join(output_dir, OUTPUT_IMAGE_DIR_NAME)  # 组装图片统一输出子目录路径
+    if not os.path.isdir(output_image_dir):  # 判断图片统一输出子目录是否需要创建
+        os.makedirs(output_image_dir, exist_ok=True)  # 创建图片统一输出子目录
+    output_figure = os.path.join(output_image_dir, OUTPUT_FIGURE_NAME)  # 将总图输出路径重定向到图片子目录
     records = collect_records(batch_root)  # 扫描批处理目录并收集全部有效记录
     summary_df = build_summary_dataframe(records)  # 构建去重后的统计汇总表
     output_summary = os.path.join(output_dir, OUTPUT_SUMMARY_NAME)  # 组装汇总 CSV 输出路径
     summary_df.to_csv(output_summary, index=False, encoding='utf-8-sig')  # 保存汇总表便于后续复核
     create_figure(summary_df, output_figure)  # 生成并保存 3D 子图总图
-    single_paths = create_single_figures(summary_df, output_dir)  # 生成并保存每个子图对应单图
+    single_paths = create_single_figures(summary_df, output_image_dir)  # 生成并保存每个子图对应单图到图片子目录
     print('批处理目录: {}'.format(batch_root))  # 输出批处理目录信息
     print('汇总数据: {}'.format(output_summary))  # 输出汇总表路径信息
+    print('图片目录: {}'.format(output_image_dir))  # 输出图片统一目录路径信息
     print('输出图片: {}'.format(output_figure))  # 输出图片路径信息
     print('单图数量: {}'.format(len(single_paths)))  # 输出单图数量信息
     for single_path in single_paths:  # 遍历单图输出路径
