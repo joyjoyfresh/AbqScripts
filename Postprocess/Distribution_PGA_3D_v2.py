@@ -15,7 +15,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本所
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认批处理数据根目录
 OUTPUT_FIGURE_NAME = 'PGA_h_max_3D_grid.png'  # 设置输出总图文件名
 OUTPUT_SINGLE_PREFIX = 'PGA_h_max_3D'  # 设置单图文件名前缀
-OUTPUT_IMAGE_DIR_NAME = 'PGA_h_max_3D_figures'  # 设置图片统一输出子目录名
+OUTPUT_IMAGE_DIR_NAME = '2-PGA_h_max_3D'  # 设置图片统一输出子目录名
 OUTPUT_SUMMARY_NAME = 'PGA_h_max_summary.csv'  # 设置输出汇总表文件名
 PGA_COLUMN = 'PGA_h'  # 设置用于统计的目标分量列
 FOLDER_PATTERN = re.compile(r'h(?P<h>-?\d+(?:\.\d+)?)_i(?P<i>-?\d+(?:\.\d+)?)_angle(?P<angle>-?\d+(?:\.\d+)?)')  # 定义参数文件夹名解析正则
@@ -274,7 +274,7 @@ def main():  # 定义主函数
     output_figure = os.path.join(output_image_dir, OUTPUT_FIGURE_NAME)  # 将总图输出路径重定向到图片子目录
     records = collect_records(batch_root)  # 扫描批处理目录并收集全部有效记录
     summary_df = build_summary_dataframe(records)  # 构建去重后的统计汇总表
-    output_summary = os.path.join(output_dir, OUTPUT_SUMMARY_NAME)  # 组装汇总 CSV 输出路径
+    output_summary = os.path.join(output_image_dir, OUTPUT_SUMMARY_NAME)  # 组装汇总 CSV 输出路径
     summary_df.to_csv(output_summary, index=False, encoding='utf-8-sig')  # 保存汇总表便于后续复核
     create_figure(summary_df, output_figure)  # 生成并保存 3D 子图总图
     single_paths = create_single_figures(summary_df, output_image_dir)  # 生成并保存每个子图对应单图到图片子目录

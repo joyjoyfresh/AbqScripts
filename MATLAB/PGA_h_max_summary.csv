@@ -1,0 +1,58 @@
+﻿motion,motion_display,marker,h,i,angle,pga_max
+el_centro,El Centro,o,10.0,15.0,0.0,0.594966
+el_centro,El Centro,o,50.0,15.0,0.0,0.681373
+el_centro,El Centro,o,100.0,15.0,0.0,0.672985
+el_centro,El Centro,o,200.0,15.0,0.0,0.62778
+el_centro,El Centro,o,10.0,30.0,0.0,0.594431
+el_centro,El Centro,o,50.0,30.0,0.0,0.678154
+el_centro,El Centro,o,100.0,30.0,0.0,0.672003
+el_centro,El Centro,o,10.0,45.0,0.0,0.594222
+el_centro,El Centro,o,50.0,45.0,0.0,0.691082
+el_centro,El Centro,o,10.0,60.0,0.0,0.59402
+el_centro,El Centro,o,50.0,60.0,0.0,0.718732
+el_centro,El Centro,o,10.0,75.0,0.0,0.593881
+el_centro,El Centro,o,10.0,15.0,30.0,0.541707
+el_centro,El Centro,o,50.0,15.0,30.0,0.678413
+el_centro,El Centro,o,100.0,15.0,30.0,0.608228
+el_centro,El Centro,o,10.0,45.0,30.0,0.559559
+el_centro,El Centro,o,50.0,45.0,30.0,0.813059
+el_centro,El Centro,o,10.0,60.0,30.0,0.562686
+el_centro,El Centro,o,10.0,75.0,30.0,0.566731
+loma_prieta,Loma Prieta,^,10.0,15.0,0.0,0.578618
+loma_prieta,Loma Prieta,^,50.0,15.0,0.0,0.650486
+loma_prieta,Loma Prieta,^,100.0,15.0,0.0,0.688702
+loma_prieta,Loma Prieta,^,200.0,15.0,0.0,0.692603
+loma_prieta,Loma Prieta,^,10.0,30.0,0.0,0.577797
+loma_prieta,Loma Prieta,^,50.0,30.0,0.0,0.645609
+loma_prieta,Loma Prieta,^,100.0,30.0,0.0,0.694094
+loma_prieta,Loma Prieta,^,10.0,45.0,0.0,0.578203
+loma_prieta,Loma Prieta,^,50.0,45.0,0.0,0.655977
+loma_prieta,Loma Prieta,^,10.0,60.0,0.0,0.57892
+loma_prieta,Loma Prieta,^,50.0,60.0,0.0,0.683323
+loma_prieta,Loma Prieta,^,10.0,75.0,0.0,0.5815
+loma_prieta,Loma Prieta,^,10.0,15.0,30.0,0.558245
+loma_prieta,Loma Prieta,^,50.0,15.0,30.0,0.630043
+loma_prieta,Loma Prieta,^,100.0,15.0,30.0,0.64386
+loma_prieta,Loma Prieta,^,10.0,45.0,30.0,0.570397
+loma_prieta,Loma Prieta,^,50.0,45.0,30.0,0.743924
+loma_prieta,Loma Prieta,^,10.0,60.0,30.0,0.575639
+loma_prieta,Loma Prieta,^,10.0,75.0,30.0,0.580318
+northridge,Northridge,s,10.0,15.0,0.0,0.588701
+northridge,Northridge,s,50.0,15.0,0.0,0.674069
+northridge,Northridge,s,100.0,15.0,0.0,0.735462
+northridge,Northridge,s,200.0,15.0,0.0,0.766838
+northridge,Northridge,s,10.0,30.0,0.0,0.587923
+northridge,Northridge,s,50.0,30.0,0.0,0.669997
+northridge,Northridge,s,100.0,30.0,0.0,0.749021
+northridge,Northridge,s,10.0,45.0,0.0,0.588253
+northridge,Northridge,s,50.0,45.0,0.0,0.686902
+northridge,Northridge,s,10.0,60.0,0.0,0.588831
+northridge,Northridge,s,50.0,60.0,0.0,0.715645
+northridge,Northridge,s,10.0,75.0,0.0,0.589509
+northridge,Northridge,s,10.0,15.0,30.0,0.565568
+northridge,Northridge,s,50.0,15.0,30.0,0.675907
+northridge,Northridge,s,100.0,15.0,30.0,0.72738
+northridge,Northridge,s,10.0,45.0,30.0,0.578478
+northridge,Northridge,s,50.0,45.0,30.0,0.791839
+northridge,Northridge,s,10.0,60.0,30.0,0.584111
+northridge,Northridge,s,10.0,75.0,30.0,0.589168

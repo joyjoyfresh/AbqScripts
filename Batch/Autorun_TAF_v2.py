@@ -13,15 +13,15 @@ STOP_ON_ERROR = True  # 设置出现脚本错误时是否立即停止
 DELETE_ODB_AFTER_RUN = True  # 设置每个文件夹脚本执行后是否删除 .odb 文件
 
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\El_Centro_scaled.txt",  # 定义 El_Centro 文件完整路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\Loma_Prieta_scaled.txt",  # 定义 Loma_Prieta 文件完整路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Seismic\Scaled\Northridge_scaled.txt",  # 定义 Northridge 文件完整路径
+    r"E:\Code\AbqScripts\Wave\Seismic\Scaled\El_Centro_scaled.txt",  # 定义 El_Centro 文件完整路径
+    r"E:\Code\AbqScripts\Wave\Seismic\Scaled\Loma_Prieta_scaled.txt",  # 定义 Loma_Prieta 文件完整路径
+    r"E:\Code\AbqScripts\Wave\Seismic\Scaled\Northridge_scaled.txt",  # 定义 Northridge 文件完整路径
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Single\VAB_oblique_TAF_v2.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_PGA_v6.py", "parameter_target": False},  # 定义后处理脚本完整路径
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Distribution_PGA_v6.py", "parameter_target": False},  # 定义分布脚本完整路径
+    {"path": r"E:\Code\AbqScripts\Modeling\Single\VAB_oblique_TAF_v3.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
+    {"path": r"E:\Code\AbqScripts\Postprocess\Postprocess_PGA_v6.py", "parameter_target": False},  # 定义后处理脚本完整路径
+    {"path": r"E:\Code\AbqScripts\Postprocess\Distribution_PGA_v6.py", "parameter_target": False},  # 定义分布脚本完整路径
 ]  # 结束脚本顺序配置定义
 
 PARAMETER_CASES = [  # 定义参数方案列表
@@ -38,6 +38,7 @@ PARAMETER_CASES = [  # 定义参数方案列表
     {"params": {"h": 100, "i": 30, "angle": 15}},
     {"params": {"h": 100, "i": 30, "angle": 20}},
     {"params": {"h": 100, "i": 30, "angle": 25}},
+    {"params": {"h": 100, "i": 30, "angle": 30}},
     {"params": {"h": 100, "i": 45, "angle": 0}},
     {"params": {"h": 100, "i": 45, "angle": 5}},
     {"params": {"h": 100, "i": 45, "angle": 10}},

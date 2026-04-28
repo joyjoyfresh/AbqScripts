@@ -15,7 +15,7 @@ DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认数据根目录为脚本目录
 OUTPUT_FIGURE_NAME = 'TAF_overview_grid.png'  # 定义总图输出文件名
 OUTPUT_RAW_SUMMARY_NAME = 'TAF_overview_raw_summary.csv'  # 定义去重后原始汇总 CSV 文件名
 OUTPUT_PANEL_SUMMARY_NAME = 'TAF_overview_panel_summary.csv'  # 定义分面统计汇总 CSV 文件名
-OUTPUT_IMAGE_DIR_NAME = 'TAF_overview_figures'  # 定义图像统一输出子目录名称
+OUTPUT_IMAGE_DIR_NAME = '4-TAF_overview'  # 定义图像统一输出子目录名称
 PGA_GLOB_PREFIX = 'pga'  # 定义 PGA 文件名前缀（小写匹配）
 TAF_GLOB_PREFIX = 'taf'  # 定义 TAF 文件名前缀（小写匹配）
 TARGET_COLUMNS = ['PGA_h', 'PGA_v']  # 定义读取 PGA 时需要的列
@@ -451,14 +451,14 @@ def main():  # 定义主函数
     raw_df = pd.DataFrame(records)  # 将记录列表转换为数据表
     summary_df = raw_df.groupby(['motion', 'motion_display', 'h', 'i', 'angle'], as_index=False)['taf_max'].mean()  # 对重复工况取均值去重
     summary_df = summary_df.sort_values(by=['motion', 'angle', 'h', 'i']).reset_index(drop=True)  # 对汇总结果排序
-    output_raw_csv = os.path.join(output_dir, OUTPUT_RAW_SUMMARY_NAME)  # 组装原始汇总 CSV 路径
+    output_raw_csv = os.path.join(output_image_dir, OUTPUT_RAW_SUMMARY_NAME)  # 组装原始汇总 CSV 路径
     summary_df.to_csv(output_raw_csv, index=False, encoding='utf-8-sig')  # 保存原始汇总 CSV
     output_figure = os.path.join(output_image_dir, OUTPUT_FIGURE_NAME)  # 组装总图输出路径
     panel_rows = create_overview_figure(summary_df, output_figure)  # 生成总图并获取分面汇总行
     output_single_dir = output_image_dir  # 将单图输出目录设置为与总图相同目录
     single_paths = create_single_panel_figures(summary_df, output_single_dir)  # 导出每个子图的单图文件
     panel_summary_df = pd.DataFrame(panel_rows)  # 将分面汇总行转为数据表
-    output_panel_csv = os.path.join(output_dir, OUTPUT_PANEL_SUMMARY_NAME)  # 组装分面汇总 CSV 路径
+    output_panel_csv = os.path.join(output_image_dir, OUTPUT_PANEL_SUMMARY_NAME)  # 组装分面汇总 CSV 路径
     panel_summary_df.to_csv(output_panel_csv, index=False, encoding='utf-8-sig')  # 保存分面汇总 CSV
     print('数据目录: {}'.format(batch_root))  # 输出数据目录信息
     print('原始汇总: {}'.format(output_raw_csv))  # 输出原始汇总 CSV 路径

@@ -12,8 +12,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前脚本目
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认数据根目录为脚本所在目录
 OUTPUT_CSV_NAME = 'TAF_max_vs_theta_summary.csv'  # 定义输出汇总 CSV 文件名
 OUTPUT_GRID_PNG_NAME = 'TAF_max_vs_theta_grid.png'  # 定义输出汇总大图文件名
-OUTPUT_FIG_DIR_NAME = 'TAF_theta_panels'  # 定义单图输出目录名
-OUTPUT_FIG_PREFIX = 'TAF_max_vs_theta'  # 定义单图输出文件名前缀
+OUTPUT_FIG_DIR_NAME = '3-TAF_theta'  # 定义单图输出目录名
+OUTPUT_FIG_PREFIX = 'TAF_max_theta'  # 定义单图输出文件名前缀
 PGA_GLOB_PREFIX = 'pga'  # 定义 PGA 文件名前缀（小写）
 TAF_GLOB_PREFIX = 'taf'  # 定义 TAF 文件名前缀（小写）
 TARGET_COLUMNS = ['PGA_h', 'PGA_v']  # 定义 PGA 读取分量列
@@ -367,10 +367,10 @@ def main():  # 定义主函数
         os.makedirs(output_dir, exist_ok=True)  # 创建输出目录
     records = collect_records(batch_root)  # 扫描并采集所有记录
     summary_df = prepare_summary(records)  # 生成目标网格汇总数据
-    output_csv_path = os.path.join(output_dir, OUTPUT_CSV_NAME)  # 组装汇总 CSV 输出路径
-    summary_df.to_csv(output_csv_path, index=False, encoding='utf-8-sig')  # 保存汇总 CSV 便于复核
     output_fig_dir = os.path.join(output_dir, OUTPUT_FIG_DIR_NAME)  # 组装单图输出目录路径
     os.makedirs(output_fig_dir, exist_ok=True)  # 提前创建单图输出目录以避免汇总图保存时报错
+    output_csv_path = os.path.join(output_fig_dir, OUTPUT_CSV_NAME)  # 组装汇总 CSV 输出路径
+    summary_df.to_csv(output_csv_path, index=False, encoding='utf-8-sig')  # 保存汇总 CSV 便于复核
     output_grid_path = os.path.join(output_fig_dir, OUTPUT_GRID_PNG_NAME)  # 组装汇总大图输出路径
     plot_grid(summary_df, output_grid_path)  # 绘制并保存汇总大图
     output_panel_paths = plot_single_panels(summary_df, output_fig_dir)  # 逐子图绘制并保存
