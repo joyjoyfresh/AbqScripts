@@ -12,11 +12,268 @@ import os
 import time
 import logging
 import traceback
+import re
+import json
+import hashlib
 
 
 DEFAULT_STEP_NAME = 'Step-earthquake'  # 定义默认分析步名称
 BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # 定义基础边界节点集名称
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 定义边界处理顺序
+DEFAULT_LOG_FILE = 'VAB_oblique_TAF.log'  # 定义当前脚本默认日志文件名
+
+
+def _parse_resume_state(log_file):
+    """解析日志并提取最近一次运行的恢复状态。"""
+    state = {  # 初始化恢复状态字典
+        'has_previous_run': False,  # 标记是否存在历史运行记录
+        'all_completed': False,  # 标记最近一次运行是否全部完成
+        'completed_jobs': set(),  # 记录最近一次运行已完成的作业名集合
+        'interrupted_job': None,  # 记录最近一次运行中断时的作业名
+        'last_signature': None,  # 记录最近一次运行的签名
+    }
+    if not os.path.exists(log_file):  # 若日志文件不存在则直接返回默认状态
+        return state
+
+    with open(log_file, 'r') as f:  # 打开日志文件读取全部行
+        lines = f.readlines()  # 读取日志全部内容
+
+    if len(lines) == 0:  # 若日志为空则返回默认状态
+        return state
+
+    start_idx = None  # 初始化最近一次运行起始行号
+    for idx, line in enumerate(lines):  # 遍历日志行查找最近一次“脚本开始执行”标记
+        if '脚本开始执行' in line:  # 命中运行起始标记
+            start_idx = idx  # 更新为最近一次起始位置
+
+    if start_idx is None:  # 若未找到起始标记则返回默认状态
+        return state  # 无法确定最近一次完整运行片段时不启用恢复
+
+    run_lines = lines[start_idx:]  # 截取最近一次运行的日志片段
+    if len(run_lines) == 0:  # 若最近运行片段为空则返回默认状态
+        return state
+
+    state['has_previous_run'] = True  # 标记存在可用历史运行记录
+    last_started_job = None  # 记录最近一次开始提交的作业名
+
+    for line in run_lines:  # 遍历最近一次运行日志以提取状态
+        if '所有作业已完成' in line:  # 若出现全量完成标记
+            state['all_completed'] = True  # 置为已全部完成
+
+        start_match = re.search(r'\] (job-\S+)作业开始提交', line)  # 匹配作业开始提交日志
+        if start_match:  # 若匹配到作业开始提交
+            last_started_job = start_match.group(1)  # 记录最近开始提交的作业名
+
+        done_match = re.search(r'\] (job-\S+)已完成', line)  # 匹配作业完成日志
+        if done_match:  # 若匹配到作业完成
+            state['completed_jobs'].add(done_match.group(1))  # 写入已完成作业集合
+
+        signature_match = re.search(r'\] 运行签名: ([0-9a-f]{64})', line)  # 匹配运行签名日志
+        if signature_match:  # 若匹配到运行签名
+            state['last_signature'] = signature_match.group(1)  # 记录最近一次运行签名
+
+    if last_started_job and last_started_job not in state['completed_jobs']:  # 若最近开始作业未完成则视为中断作业
+        state['interrupted_job'] = last_started_job  # 记录中断作业名
+
+    return state  # 返回解析后的恢复状态
+
+
+def _delete_job_if_exists(job_name, logger=None):
+    """若作业已存在则先删除，便于重建后重新提交。"""
+    if job_name in mdb.jobs:  # 若检测到同名作业已存在
+        del mdb.jobs[job_name]  # 删除同名作业避免重复定义冲突
+        if logger:  # 若提供日志器则写入删除日志
+            log_step(logger, '检测到同名旧作业，已删除: %s', job_name)  # 记录作业删除信息
+
+
+def _compute_file_sha256(file_path):
+    """计算单个文件的 SHA256 摘要。"""
+    hasher = hashlib.sha256()  # 初始化 SHA256 哈希器
+    with open(file_path, 'rb') as f:  # 以二进制模式打开文件
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):  # 分块读取文件避免大文件占用过多内存
+            hasher.update(chunk)  # 将分块数据持续写入哈希器
+    return hasher.hexdigest()  # 返回十六进制摘要字符串
+
+
+def _compute_run_signature(material_cfg, geometry_cfg, job_cfg, acc_info):
+    """基于关键参数与输入时程文件内容计算运行签名。"""
+    wave_fingerprints = []  # 初始化输入波形指纹列表
+    for acc_file, _, _ in acc_info:  # 遍历全部输入波形文件
+        abs_path = os.path.abspath(acc_file)  # 转为绝对路径以统一签名来源
+        stat_info = os.stat(abs_path)  # 读取文件元数据用于增强可追溯性
+        file_digest = _compute_file_sha256(abs_path)  # 计算输入波形内容摘要
+        wave_fingerprints.append({  # 追加单个输入文件指纹信息
+            'file': abs_path,  # 记录输入文件绝对路径
+            'size': stat_info.st_size,  # 记录输入文件字节大小
+            'mtime_ns': stat_info.st_mtime_ns,  # 记录输入文件纳秒级修改时间
+            'sha256': file_digest,  # 记录输入文件内容摘要
+        })
+
+    signature_payload = {  # 构建签名载荷字典
+        'material_cfg': material_cfg,  # 纳入材料参数配置
+        'geometry_cfg': geometry_cfg,  # 纳入几何参数配置
+        'job_cfg': {  # 纳入作业参数配置（序列化友好）
+            'variables': list(job_cfg['variables']),  # 将元组转为列表确保 JSON 稳定序列化
+            'frequency': job_cfg['frequency'],  # 记录场输出频率
+            'num_cpus': job_cfg['num_cpus'],  # 记录并行 CPU 数量
+            'memory_percent': job_cfg['memory_percent'],  # 记录作业内存百分比
+        },
+        'acc_files': wave_fingerprints,  # 纳入输入波形指纹列表
+    }
+    canonical = json.dumps(signature_payload, sort_keys=True, ensure_ascii=True)  # 生成稳定有序的签名文本
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()  # 返回运行签名摘要
+
+
+def main():
+    """脚本主入口：组织参数、建模、施加边界并提交作业。"""
+    resume_cfg = {  # 配置断点续跑行为
+        'enable': True,  # 控制是否启用断点续跑
+        'force_rerun': False,  # 控制是否强制忽略历史记录并重跑
+        'log_file': DEFAULT_LOG_FILE,  # 指定用于恢复判断的日志文件
+    }
+    resume_state = _parse_resume_state(resume_cfg['log_file'])  # 在初始化日志器前先读取上次运行状态
+    logger = log_step(resume_cfg['log_file'])  # 初始化日志并写入当前版本日志文件
+    total_start = time.time()  # 记录主流程起始时间
+
+    # 统一集中配置参数，便于维护和批量改动。
+    material_cfg = {
+        'angle': 30,  # 设置 SV 波入射角度（度）
+        'elastic_modulus': 32e9,  # 设置杨氏模量（Pa）
+        'poisson_ratio': 0.25,  # 设置泊松比
+        'density': 2650,  # 设置密度（kg/m^3）
+    }
+    geometry_cfg = {
+        'h': 50,  # 设置斜坡高度（m）
+        'i': 30,  # 设置斜坡倾角（度）
+        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
+        'f_max': 15,  # 设置目标最高频率（Hz）
+        'n_per_wave': 10,  # 设置每波长单元数
+    }
+    job_cfg = {
+        'variables': ('U', 'V', 'A'),  # 设置场输出变量
+        'frequency': 1,  # 设置输出频率
+        'num_cpus': 7,  # 设置并行 CPU 数量
+        'memory_percent': 90,  # 设置作业内存百分比
+    }
+
+    try:
+        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
+
+        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
+        run_signature = _compute_run_signature(material_cfg, geometry_cfg, job_cfg, acc_info)  # 计算当前运行签名
+        log_step(logger, '运行签名: %s', run_signature)  # 记录当前运行签名用于后续断点校验
+
+        should_resume = resume_cfg['enable'] and (not resume_cfg['force_rerun'])  # 计算是否允许断点续跑
+        signature_mismatch = (  # 计算当前签名与上次签名是否不一致
+            should_resume and
+            bool(resume_state['last_signature']) and
+            (resume_state['last_signature'] != run_signature)
+        )
+
+        if signature_mismatch:  # 若签名不一致则禁用历史续跑状态
+            log_step(logger, '检测到运行签名变化，已禁用历史断点续跑并执行全量重跑')  # 记录签名变化处理策略
+            resume_state['all_completed'] = False  # 清空“已全部完成”标记避免误跳过
+            resume_state['completed_jobs'] = set()  # 清空“已完成作业”集合避免误跳过
+            resume_state['interrupted_job'] = None  # 清空中断作业避免误删误重提
+
+        if should_resume and (not signature_mismatch) and resume_state['all_completed']:  # 若签名一致且上次已完成则安全跳过
+            log_step(logger, '检测到上次运行已全部完成且签名一致，本次执行自动跳过')  # 记录整体跳过日志
+            return  # 直接结束本次脚本执行
+
+        cs = _compute_wave_speed_from_elastic_modulus(  # 根据材料参数计算剪切波速
+            material_cfg['elastic_modulus'],
+            material_cfg['poisson_ratio'],
+            material_cfg['density'])
+
+        h = geometry_cfg['h']  # 读取斜坡高度
+        H_lower = 2.0 * h  # 设置斜坡模型下垫面高度
+        H_flat = 3.0 * h  # 设置平坦自由场模型总高度
+        total_L = 8.0 * h  # 设置总模型长度
+        mesh_size_auto = cs / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按波长准则计算自动网格尺寸
+        mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限中的较小值
+
+        cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 生成 CAE 文件名
+
+        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
+            total_L=total_L,
+            h=h,
+            i=geometry_cfg['i'],
+            cs=cs,
+            vv=material_cfg['poisson_ratio'],
+            density=material_cfg['density'],
+            mesh_size=mesh_size,
+            H_lower=H_lower,
+            cae_name=cae_name,
+            logger=logger)
+
+        flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
+            total_L=total_L,
+            H_flat=H_flat,
+            cs=cs,
+            vv=material_cfg['poisson_ratio'],
+            density=material_cfg['density'],
+            mesh_size=mesh_size,
+            logger=logger)
+
+        slope_model_names = build_models(  # 依据不同地震动复制斜坡模型并施加等效边界
+            acc_info=acc_info,
+            base_model=base_model,
+            part_name=part_name,
+            inst_name=inst_name,
+            angle=material_cfg['angle'],
+            cs=cs,
+            vv=material_cfg['poisson_ratio'],
+            density=material_cfg['density'],
+            step_name=DEFAULT_STEP_NAME,
+            variables=job_cfg['variables'],
+            frequency=job_cfg['frequency'],
+            model_scene='slope',
+            logger=logger)
+
+        flat_model_names = build_models(  # 依据不同地震动复制平坦自由场模型并施加等效边界
+            acc_info=acc_info,
+            base_model=flat_base_model,
+            part_name=flat_part_name,
+            inst_name=flat_inst_name,
+            angle=material_cfg['angle'],
+            cs=cs,
+            vv=material_cfg['poisson_ratio'],
+            density=material_cfg['density'],
+            step_name=DEFAULT_STEP_NAME,
+            variables=job_cfg['variables'],
+            frequency=job_cfg['frequency'],
+            model_scene='flat',
+            logger=logger)
+
+        model_names = slope_model_names + flat_model_names  # 合并两类模型名称用于统一提交作业
+
+        completed_jobs = resume_state['completed_jobs'] if resume_cfg['enable'] else set()  # 获取可跳过的已完成作业集合
+        interrupted_job = resume_state['interrupted_job'] if resume_cfg['enable'] else None  # 获取需要删后重提的中断作业名
+
+        if resume_cfg['enable'] and interrupted_job:  # 若检测到历史中断作业
+            log_step(logger, '检测到上次中断作业: %s，将执行删后重提', interrupted_job)  # 写入恢复策略日志
+
+        for model_name in model_names:  # 顺序提交每个模型作业
+            job_name = 'job-' + model_name  # 计算当前模型对应作业名
+
+            if resume_cfg['enable'] and (not resume_cfg['force_rerun']) and job_name in completed_jobs:  # 若该作业已完成则跳过
+                log_step(logger, '%s 已在上次运行完成，本次跳过提交', job_name)  # 记录作业跳过日志
+                continue  # 进入下一个作业
+
+            if resume_cfg['enable'] and (not resume_cfg['force_rerun']) and interrupted_job == job_name:  # 若该作业为中断作业
+                _delete_job_if_exists(job_name, logger=logger)  # 先删除旧作业后再重提
+
+            submit_job(
+                num_cpus=job_cfg['num_cpus'],
+                memory_percent=job_cfg['memory_percent'],
+                model_name=model_name,
+                logger=logger)
+
+        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
+    except Exception as exc:
+        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
+        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈便于定位问题
+        raise  # 继续抛出异常，避免失败被静默吞掉
 
 
 def _next_available_name(prefix, existing_container):
@@ -39,6 +296,16 @@ def _normalize_output_variables(variables):
 def _compute_wave_speed_from_elastic_modulus(elastic_modulus, poisson_ratio, density):
     """根据杨氏模量、泊松比和密度计算剪切波速。"""
     return math.sqrt((elastic_modulus / (2 * (1 + poisson_ratio))) / density)  # 按弹性理论公式计算 Vs
+
+
+def _build_model_name_from_record(acc_file, scene_tag):
+    """按“记录名-场景名”规则生成模型名，如 El_Centro-slope。"""
+    record_name = os.path.splitext(os.path.basename(acc_file))[0]  # 从加速度文件名中提取不含扩展名的记录名
+    if not record_name:  # 校验记录名不能为空
+        raise ValueError('无法从加速度文件生成记录名: %s' % acc_file)  # 记录名为空时抛出异常
+    if scene_tag not in ('slope', 'flat'):  # 校验场景标签是否受支持
+        raise ValueError('scene_tag 仅支持 slope 或 flat，当前为: %s' % scene_tag)  # 场景标签非法时抛出异常
+    return '{}-{}'.format(record_name, scene_tag)  # 返回“记录名-场景名”格式模型名
 
 
 def log_step(logger=None, message=None, *args):
@@ -65,7 +332,7 @@ def log_step(logger=None, message=None, *args):
             datefmt='%Y-%m-%d %H:%M:%S'
         )
 
-        file_handler = logging.FileHandler(log_filename, mode='w')
+        file_handler = logging.FileHandler(log_filename, mode='a')
         file_handler.setFormatter(formatter)
         _logger.addHandler(file_handler)
 
@@ -300,6 +567,104 @@ def create_model(total_L, h, i, cs, vv, density, mesh_size,
 
     mdb.save() 
     return model_name, part_name, inst_name
+
+
+def create_flat_model(total_L, H_flat, cs, vv, density, mesh_size, logger=None):
+    """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。"""
+    logger = logger or log_step()  # 复用已有日志器或初始化默认日志器
+    model_name = 'Model-2'  # 指定平坦自由场基础模型名称
+
+    if total_L <= 0:  # 校验模型长度参数
+        raise ValueError('total_L 必须 > 0')  # 长度非法时抛出异常
+    if H_flat <= 0:  # 校验模型高度参数
+        raise ValueError('H_flat 必须 > 0')  # 高度非法时抛出异常
+
+    model = mdb.Model(name=model_name)  # 创建平坦自由场基础模型
+    log_step(logger, '%s 基础模型开始创建（平坦自由场）', model_name)  # 记录平坦模型创建开始日志
+
+    part_name = _next_available_name('Part', model.parts)  # 生成平坦模型零件名称
+    sketch = model.ConstrainedSketch(name='__flat_profile__', sheetSize=max(total_L, H_flat) * 2)  # 创建平坦模型草图
+    sketch.Line(point1=(0.0, 0.0), point2=(total_L, 0.0))  # 绘制矩形底边
+    sketch.Line(point1=(total_L, 0.0), point2=(total_L, H_flat))  # 绘制矩形右边界
+    sketch.Line(point1=(total_L, H_flat), point2=(0.0, H_flat))  # 绘制矩形顶边
+    sketch.Line(point1=(0.0, H_flat), point2=(0.0, 0.0))  # 绘制矩形左边界
+    part = model.Part(name=part_name, dimensionality=TWO_D_PLANAR, type=DEFORMABLE_BODY)  # 创建二维可变形体零件
+    part.BaseShell(sketch=sketch)  # 由草图生成壳体面
+    del model.sketches['__flat_profile__']  # 删除临时草图对象
+    log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建完成日志
+
+    GG = density * cs ** 2  # 按剪切波速计算剪切模量
+    EE = 2 * GG * (1 + vv)  # 按线弹性关系计算杨氏模量
+
+    mat_name = _next_available_name('Material', model.materials)  # 生成材料名称
+    mat = model.Material(name=mat_name)  # 创建材料对象
+    mat.Elastic(table=((EE, vv),))  # 定义弹性参数
+    mat.Density(table=((density,),))  # 定义密度参数
+    log_step(logger, '%s 材料已定义: %s', model_name, mat_name)  # 记录材料定义日志
+
+    sec_name = _next_available_name('Section', model.sections)  # 生成截面名称
+    model.HomogeneousSolidSection(name=sec_name, material=mat_name, thickness=1.0)  # 创建均质实体截面
+    log_step(logger, '%s 截面已创建: %s', model_name, sec_name)  # 记录截面创建日志
+
+    faces = part.faces  # 获取零件全部面
+    region = Region(faces=faces)  # 将全部面打包为区域对象
+    part.SectionAssignment(  # 向全部面分配截面
+        region=region,
+        sectionName=sec_name,
+        offset=0.0,
+        offsetType=MIDDLE_SURFACE,
+        offsetField='',
+        thicknessAssignment=FROM_SECTION)
+    log_step(logger, '%s 截面已分配到所有面', model_name)  # 记录截面分配日志
+
+    assembly = model.rootAssembly  # 获取根装配体对象
+    assembly.DatumCsysByDefault(CARTESIAN)  # 设置默认笛卡尔坐标系
+    inst_name = _next_available_name(part_name, assembly.instances)  # 生成实例名称
+    assembly.Instance(name=inst_name, part=part, dependent=ON)  # 创建装配实例
+    log_step(logger, '%s 装配实例已创建: %s', model_name, inst_name)  # 记录实例创建日志
+
+    picked_regions = part.faces  # 选取全部面用于网格控制
+    part.setMeshControls(regions=picked_regions, elemShape=QUAD, technique=STRUCTURED)  # 设置结构化四边形网格
+    part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设定全局播种尺寸
+    elem_type = mesh.ElemType(elemCode=CPE4, elemLibrary=STANDARD)  # 指定平面应变四节点单元
+    part.setElementType(regions=(picked_regions,), elemTypes=(elem_type,))  # 将单元类型分配给全部面
+    part.generateMesh()  # 执行网格生成
+    assembly.regenerate()  # 重新生成装配同步网格信息
+    log_step(logger, '%s 网格已生成: 尺寸=%.3f, 单元=CPE4', model_name, mesh_size)  # 记录网格生成日志
+
+    x_list = [node.coordinates[0] for node in part.nodes]  # 提取所有节点x坐标
+    y_list = [node.coordinates[1] for node in part.nodes]  # 提取所有节点y坐标
+    xmin = min(x_list)  # 计算最小x坐标
+    xmax = max(x_list)  # 计算最大x坐标
+    ymin = min(y_list)  # 计算最小y坐标
+    ymax = max(y_list)  # 计算最大y坐标
+    tol = 1e-6  # 设置边界识别容差
+
+    l_nodes_list = [node for node in part.nodes if abs(node.coordinates[0] - xmin) < tol]  # 筛选左边界节点
+    r_nodes_list = [node for node in part.nodes if abs(node.coordinates[0] - xmax) < tol]  # 筛选右边界节点
+    b_nodes_list = [node for node in part.nodes if abs(node.coordinates[1] - ymin) < tol]  # 筛选底边界节点
+    t_nodes_list = [node for node in part.nodes if abs(node.coordinates[1] - ymax) < tol]  # 筛选顶边界节点
+
+    l_labels = tuple(node.label for node in l_nodes_list)  # 生成左边界标签元组
+    r_labels = tuple(node.label for node in r_nodes_list)  # 生成右边界标签元组
+    b_labels = tuple(node.label for node in b_nodes_list)  # 生成底边界标签元组
+    t_labels = tuple(node.label for node in t_nodes_list)  # 生成顶边界标签元组
+
+    part.SetFromNodeLabels(nodeLabels=l_labels, name='Left_boundary')  # 创建左边界节点集
+    part.SetFromNodeLabels(nodeLabels=r_labels, name='Right_boundary')  # 创建右边界节点集
+    part.SetFromNodeLabels(nodeLabels=b_labels, name='Bottom_boundary')  # 创建底边界节点集
+    part.SetFromNodeLabels(nodeLabels=t_labels, name='TOP_SURFACE')  # 创建顶面节点集
+    log_step(  # 写入平坦模型边界节点集数量日志
+        logger,
+        '%s 边界节点集已在Part中创建: 左=%d, 右=%d, 底=%d, 顶=%d',
+        model_name,
+        len(l_labels),
+        len(r_labels),
+        len(b_labels),
+        len(t_labels))
+
+    mdb.save()  # 保存当前CAE数据库
+    return model_name, part_name, inst_name  # 返回平坦基础模型及其零件/实例名称
 
 
 def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1', inst_name='Part-1-1',
@@ -866,8 +1231,9 @@ def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1'
     log_step(logger, '%s 粘弹性人工边界完成: 耗时=%.2fs', model_name, time.time() - t0)
 
 
-def build_models(acc_info, base_model, part_name, inst_name, angle, cs, vv, density, 
-                 step_name=DEFAULT_STEP_NAME, variables=('S', 'U', 'V'), frequency=10, logger=None):
+def build_models(acc_info, base_model, part_name, inst_name, angle, cs, vv, density,
+                 step_name=DEFAULT_STEP_NAME, variables=('S', 'U', 'V'), frequency=10,
+                 model_scene='slope', logger=None):
     """
     根据加速度时程信息批量复制模型、创建分析步、施加人工边界。
 
@@ -878,6 +1244,7 @@ def build_models(acc_info, base_model, part_name, inst_name, angle, cs, vv, dens
         inst_name   (str): 实例名称
         angle/cs/vv/density: 人工边界参数
         step_name   (str): 分析步名称
+        model_scene (str): 模型场景标识，支持 slope 或 flat
     返回:
         model_names (list): 新创建的模型名称列表
     """
@@ -888,7 +1255,7 @@ def build_models(acc_info, base_model, part_name, inst_name, angle, cs, vv, dens
 
     model_names = []
     for acc_file, tp, inc in acc_info:
-        new_model_name = os.path.splitext(acc_file)[0]
+        new_model_name = _build_model_name_from_record(acc_file, model_scene)  # 按“记录名-场景名”自动生成模型名
         mdb.Model(name=new_model_name, objectToCopy=mdb.models[base_model])
         log_step(logger, '%s 模型已从 %s 复制', new_model_name, base_model)
 
@@ -931,9 +1298,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     logger = logger or log_step()
     t0 = time.time()
     job_name = 'job-' + model_name
-    if job_name in mdb.jobs:
-        del mdb.jobs[job_name]
-        log_step(logger, '检测到同名旧作业，已删除: %s', job_name)
+    _delete_job_if_exists(job_name, logger=logger)
     log_step(logger, '%s作业开始提交, CPU 数量=%d, 内存=%d%%',
              job_name, num_cpus, memory_percent)
 
@@ -952,90 +1317,6 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     mdb.jobs[job_name].submit(consistencyChecking=OFF)
     mdb.jobs[job_name].waitForCompletion()
     log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
-
-
-def main():
-    """脚本主入口：组织参数、建模、施加边界并提交作业。"""
-    logger = log_step('VAB_oblique_noGUI.log')  # 初始化日志并写入当前版本日志文件
-    total_start = time.time()  # 记录主流程起始时间
-
-    # 统一集中配置参数，便于维护和批量改动。
-    material_cfg = {
-        'angle': 30,  # 设置 SV 波入射角度（度）
-        'elastic_modulus': 32e9,  # 设置杨氏模量（Pa）
-        'poisson_ratio': 0.25,  # 设置泊松比
-        'density': 2650,  # 设置密度（kg/m^3）
-    }
-    geometry_cfg = {
-        'h': 100,  # 设置斜坡高度（m）
-        'i': 45,  # 设置斜坡倾角（度）
-        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
-        'f_max': 15,  # 设置目标最高频率（Hz）
-        'n_per_wave': 10,  # 设置每波长单元数
-    }
-    job_cfg = {
-        'variables': ('U', 'V', 'A'),  # 设置场输出变量
-        'frequency': 1,  # 设置输出频率
-        'num_cpus': 7,  # 设置并行 CPU 数量
-        'memory_percent': 90,  # 设置作业内存百分比
-    }
-
-    try:
-        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
-
-        cs = _compute_wave_speed_from_elastic_modulus(  # 根据材料参数计算剪切波速
-            material_cfg['elastic_modulus'],
-            material_cfg['poisson_ratio'],
-            material_cfg['density'])
-
-        h = geometry_cfg['h']  # 读取斜坡高度
-        H_lower = 2.0 * h  # 设置下垫面高度
-        total_L = 8.0 * h  # 设置总模型长度
-        mesh_size_auto = cs / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按波长准则计算自动网格尺寸
-        mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限中的较小值
-
-        cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 生成 CAE 文件名
-
-        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
-
-        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
-            total_L=total_L,
-            h=h,
-            i=geometry_cfg['i'],
-            cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
-            mesh_size=mesh_size,
-            H_lower=H_lower,
-            cae_name=cae_name,
-            logger=logger)
-
-        model_names = build_models(  # 依据不同地震动复制模型并施加等效边界
-            acc_info=acc_info,
-            base_model=base_model,
-            part_name=part_name,
-            inst_name=inst_name,
-            angle=material_cfg['angle'],
-            cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            logger=logger)
-
-        for model_name in model_names:  # 顺序提交每个模型作业
-            submit_job(
-                num_cpus=job_cfg['num_cpus'],
-                memory_percent=job_cfg['memory_percent'],
-                model_name=model_name,
-                logger=logger)
-
-        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
-    except Exception as exc:
-        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
-        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈便于定位问题
-        raise  # 继续抛出异常，避免失败被静默吞掉
 
 
 if __name__ == '__main__':

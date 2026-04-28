@@ -10,9 +10,9 @@ import matplotlib.pyplot as plt  # 导入 pyplot 用于绘图
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前脚本目录
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认数据根目录为脚本所在目录
-OUTPUT_CSV_NAME = 'TAF_max_vs_theta_summary_v2.csv'  # 定义输出汇总 CSV 文件名
-OUTPUT_GRID_PNG_NAME = 'TAF_max_vs_theta_grid_v2.png'  # 定义输出汇总大图文件名
-OUTPUT_FIG_DIR_NAME = 'TAF_theta_panels_v2'  # 定义单图输出目录名
+OUTPUT_CSV_NAME = 'TAF_max_vs_theta_summary.csv'  # 定义输出汇总 CSV 文件名
+OUTPUT_GRID_PNG_NAME = 'TAF_max_vs_theta_grid.png'  # 定义输出汇总大图文件名
+OUTPUT_FIG_DIR_NAME = 'TAF_theta_panels'  # 定义单图输出目录名
 OUTPUT_FIG_PREFIX = 'TAF_max_vs_theta'  # 定义单图输出文件名前缀
 PGA_GLOB_PREFIX = 'pga'  # 定义 PGA 文件名前缀（小写）
 TAF_GLOB_PREFIX = 'taf'  # 定义 TAF 文件名前缀（小写）
@@ -260,7 +260,7 @@ def safe_slug(text):  # 定义安全文件名片段函数
 def build_panel_filename(h_value, motion_key):  # 定义单图文件名构建函数
     h_token = str(int(round(float(h_value))))  # 构建 h 数值片段
     motion_token = safe_slug(motion_key)  # 构建地震波片段
-    return '{}_h{}_{}_v2.png'.format(OUTPUT_FIG_PREFIX, h_token, motion_token)  # 返回单图文件名
+    return '{}_h{}_{}.png'.format(OUTPUT_FIG_PREFIX, h_token, motion_token)  # 返回单图文件名
 
 
 def plot_grid(summary_df, output_grid_path):  # 定义绘制 2x3 汇总大图函数
@@ -297,6 +297,9 @@ def plot_grid(summary_df, output_grid_path):  # 定义绘制 2x3 汇总大图函
     fig.text(0.5, 0.48, r'(a) $h$ = 50 m', ha='center', va='center', fontsize=24)  # 添加第一行行注释
     fig.text(0.5, 0.03, r'(b) $h$ = 100 m', ha='center', va='center', fontsize=24)  # 添加第二行行注释
     plt.subplots_adjust(left=0.09, right=0.98, top=0.84, bottom=0.12, wspace=0.33, hspace=0.62)  # 调整布局匹配目标版式
+    output_parent = os.path.dirname(output_grid_path)  # 提取汇总大图输出父目录
+    if output_parent:  # 判断父目录字符串是否有效
+        os.makedirs(output_parent, exist_ok=True)  # 确保汇总大图输出目录已创建
     fig.savefig(output_grid_path, dpi=350)  # 保存输出汇总图像
     plt.close(fig)  # 关闭图对象释放内存
 
@@ -367,6 +370,7 @@ def main():  # 定义主函数
     output_csv_path = os.path.join(output_dir, OUTPUT_CSV_NAME)  # 组装汇总 CSV 输出路径
     summary_df.to_csv(output_csv_path, index=False, encoding='utf-8-sig')  # 保存汇总 CSV 便于复核
     output_fig_dir = os.path.join(output_dir, OUTPUT_FIG_DIR_NAME)  # 组装单图输出目录路径
+    os.makedirs(output_fig_dir, exist_ok=True)  # 提前创建单图输出目录以避免汇总图保存时报错
     output_grid_path = os.path.join(output_fig_dir, OUTPUT_GRID_PNG_NAME)  # 组装汇总大图输出路径
     plot_grid(summary_df, output_grid_path)  # 绘制并保存汇总大图
     output_panel_paths = plot_single_panels(summary_df, output_fig_dir)  # 逐子图绘制并保存

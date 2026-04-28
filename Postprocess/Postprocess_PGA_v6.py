@@ -235,7 +235,7 @@ def process_one_odb(odb_path, logger=None):
 #  主入口
 # ==============================================================================
 if __name__ == '__main__':
-    logger = log_step('Postprocess_PGA_v5.log')
+    logger = log_step('Postprocess_PGA.log')
     total_start = time.time()
     try:
         log_step(logger, '脚本开始执行')

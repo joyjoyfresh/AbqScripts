@@ -12,10 +12,10 @@ from matplotlib.patches import Patch  # 导入 Patch 用于柱状图图例句柄
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前脚本所在目录
 DEFAULT_BATCH_ROOT = SCRIPT_DIR  # 设置默认数据根目录为脚本目录
-OUTPUT_FIGURE_NAME = 'TAF_overview_grid_v1.png'  # 定义总图输出文件名
-OUTPUT_RAW_SUMMARY_NAME = 'TAF_overview_raw_summary_v1.csv'  # 定义去重后原始汇总 CSV 文件名
-OUTPUT_PANEL_SUMMARY_NAME = 'TAF_overview_panel_summary_v1.csv'  # 定义分面统计汇总 CSV 文件名
-OUTPUT_IMAGE_DIR_NAME = 'TAF_overview_figures_v1'  # 定义图像统一输出子目录名称
+OUTPUT_FIGURE_NAME = 'TAF_overview_grid.png'  # 定义总图输出文件名
+OUTPUT_RAW_SUMMARY_NAME = 'TAF_overview_raw_summary.csv'  # 定义去重后原始汇总 CSV 文件名
+OUTPUT_PANEL_SUMMARY_NAME = 'TAF_overview_panel_summary.csv'  # 定义分面统计汇总 CSV 文件名
+OUTPUT_IMAGE_DIR_NAME = 'TAF_overview_figures'  # 定义图像统一输出子目录名称
 PGA_GLOB_PREFIX = 'pga'  # 定义 PGA 文件名前缀（小写匹配）
 TAF_GLOB_PREFIX = 'taf'  # 定义 TAF 文件名前缀（小写匹配）
 TARGET_COLUMNS = ['PGA_h', 'PGA_v']  # 定义读取 PGA 时需要的列
@@ -270,7 +270,7 @@ def compute_plot_range(y_values, y_floor):  # 定义计算纵轴范围的函数
     return y_min_ref, y_upper  # 返回纵轴下界与上界
 
 
-def draw_stat_panel(ax, stats_df, x_col, xlabel_text, title_text, y_floor, show_ylabel=False, show_legend=False):  # 定义统计子图绘制函数
+def draw_stat_panel(ax, stats_df, x_col, xlabel_text, title_text, y_floor, show_ylabel=False, show_legend=False, use_equal_spacing=False, force_y_limits=None):  # 定义统计子图绘制函数
     ax.set_facecolor(BACKGROUND_COLOR)  # 设置子图背景色
     for spine in ax.spines.values():  # 遍历坐标轴边框
         spine.set_linewidth(1.0)  # 设置边框线宽
@@ -284,10 +284,14 @@ def draw_stat_panel(ax, stats_df, x_col, xlabel_text, title_text, y_floor, show_
             ax.set_ylabel(r'$TAF_{\max}$', fontsize=14)  # 设置纵轴标签
         return  # 无数据时结束绘制
     x_values = stats_df[x_col].to_numpy(dtype=float)  # 读取横坐标值数组
+    if use_equal_spacing:  # 判断是否启用等间距类别坐标
+        x_plot = np.arange(len(x_values), dtype=float)  # 为当前分组生成等间距绘图坐标
+    else:  # 未启用等间距时按实际数值坐标绘图
+        x_plot = x_values  # 直接使用实际横坐标值
     y_avg = stats_df['taf_avg'].to_numpy(dtype=float)  # 读取均值数组
     y_min = stats_df['taf_min'].to_numpy(dtype=float)  # 读取最小值数组
     y_max = stats_df['taf_max'].to_numpy(dtype=float)  # 读取最大值数组
-    sorted_x = np.sort(np.unique(x_values))  # 计算去重升序横坐标
+    sorted_x = np.sort(np.unique(x_plot))  # 计算去重升序绘图坐标
     if sorted_x.size >= 2:  # 判断横坐标数量是否至少为 2
         min_step = float(np.min(np.diff(sorted_x)))  # 计算最小步长
     else:  # 当前仅有一个横坐标时走兜底
@@ -295,28 +299,31 @@ def draw_stat_panel(ax, stats_df, x_col, xlabel_text, title_text, y_floor, show_
     bar_width = max(0.18 * min_step, 0.4)  # 计算柱宽并设定最小值
     jitter_span = 0.22 * min_step  # 计算散点抖动幅度
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(x_values), 3)))  # 生成颜色序列
-    for x_val in x_values:  # 遍历每个横坐标
+    for x_val in x_plot:  # 遍历每个绘图横坐标
         ax.axvline(x=x_val, color='#bdbdbd', linestyle=(0, (2.5, 2.5)), linewidth=0.9, zorder=0)  # 绘制竖向虚线参考线
-    for idx, x_val in enumerate(x_values):  # 遍历每个统计点
+    for idx, x_val in enumerate(x_plot):  # 遍历每个统计点
         color = colors[idx]  # 读取当前点颜色
         ax.bar(x_val, y_avg[idx], width=bar_width, color=color, edgecolor=color, linewidth=1.4, alpha=0.30, zorder=2)  # 绘制均值柱
         yerr_lower = max(0.0, y_avg[idx] - y_min[idx])  # 计算下侧误差
         yerr_upper = max(0.0, y_max[idx] - y_avg[idx])  # 计算上侧误差
         ax.errorbar(x_val, y_avg[idx], yerr=np.array([[yerr_lower], [yerr_upper]]), fmt='none', ecolor=color, elinewidth=1.6, capsize=4.5, zorder=4)  # 绘制最小-最大误差线
-    ax.plot(x_values, y_max, color='#9a9a9a', linestyle=(0, (3, 2)), linewidth=1.2, zorder=3)  # 绘制最大值灰色虚线
-    ax.plot(x_values, y_min, color='#9a9a9a', linestyle=(0, (3, 2)), linewidth=1.2, zorder=3)  # 绘制最小值灰色虚线
+    ax.plot(x_plot, y_max, color='#9a9a9a', linestyle=(0, (3, 2)), linewidth=1.2, zorder=3)  # 绘制最大值灰色虚线
+    ax.plot(x_plot, y_min, color='#9a9a9a', linestyle=(0, (3, 2)), linewidth=1.2, zorder=3)  # 绘制最小值灰色虚线
     rng = np.random.RandomState(RANDOM_SEED)  # 初始化可复现随机数生成器
     for idx in range(len(stats_df)):  # 遍历每个分组行
         raw_values = np.asarray(stats_df.iloc[idx]['raw_values'], dtype=float)  # 读取当前分组原始样本
         if raw_values.size == 0:  # 判断当前分组是否无样本
             continue  # 跳过空样本分组
         jitter = (rng.rand(raw_values.size) - 0.5) * 2.0 * jitter_span  # 计算散点横向抖动
-        scatter_x = np.full(raw_values.size, x_values[idx]) + jitter  # 生成散点横坐标数组
+        scatter_x = np.full(raw_values.size, x_plot[idx]) + jitter  # 生成散点横坐标数组
         ax.scatter(scatter_x, raw_values, s=12, facecolors='none', edgecolors=[colors[idx]], linewidths=0.8, alpha=0.35, zorder=1)  # 绘制空心散点
-    ax.plot(x_values, y_avg, color=TREND_LINE_COLOR, linewidth=1.9, zorder=5)  # 绘制均值红色趋势线
-    y_lower, y_upper = compute_plot_range(np.concatenate((y_min, y_max)), y_floor)  # 计算纵轴范围
+    ax.plot(x_plot, y_avg, color=TREND_LINE_COLOR, linewidth=1.9, zorder=5)  # 绘制均值红色趋势线
+    if force_y_limits is None:  # 判断是否传入强制纵轴范围
+        y_lower, y_upper = compute_plot_range(np.concatenate((y_min, y_max)), y_floor)  # 未传入时按当前子图数据自动计算纵轴范围
+    else:  # 已传入强制纵轴范围时直接使用
+        y_lower, y_upper = force_y_limits  # 读取统一纵轴下界与上界
     ax.set_ylim(y_lower, y_upper)  # 设置纵轴范围
-    ax.set_xticks(x_values)  # 设置横轴刻度位置
+    ax.set_xticks(x_plot)  # 设置横轴刻度位置
     ax.set_xticklabels([('{:g}'.format(value)) for value in x_values], fontsize=11)  # 设置横轴刻度文本
     ax.set_title(title_text, fontsize=14, pad=5)  # 设置子图标题
     ax.set_xlabel(xlabel_text, fontsize=14)  # 设置横轴标签
@@ -342,9 +349,9 @@ def create_overview_figure(summary_df, output_path):  # 定义创建总图的函
     plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局字体为 Times 风格
     plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
     plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示问题
-    fig = plt.figure(figsize=(11.6, 10.2), facecolor='white')  # 创建总图画布
+    fig = plt.figure(figsize=(13.2, 10.2), facecolor='white')  # 创建总图画布并加宽以减少上排遮挡
     root_grid = fig.add_gridspec(2, 1, height_ratios=[1.0, 1.25], hspace=0.36)  # 定义上下两行网格
-    top_grid = root_grid[0].subgridspec(1, 3, width_ratios=[1.65, 1.0, 1.0], wspace=0.08)  # 定义上排三图网格
+    top_grid = root_grid[0].subgridspec(1, 3, width_ratios=[1.0, 1.0, 1.0], wspace=0.26)  # 定义上排三图等宽网格并增大横向间距
     bottom_grid = root_grid[1].subgridspec(1, 2, wspace=0.15)  # 定义下排两图网格
     ax_top_1 = fig.add_subplot(top_grid[0, 0])  # 创建上排第一个子图
     ax_top_2 = fig.add_subplot(top_grid[0, 1])  # 创建上排第二个子图
@@ -353,23 +360,77 @@ def create_overview_figure(summary_df, output_path):  # 定义创建总图的函
     ax_bottom_2 = fig.add_subplot(bottom_grid[0, 1])  # 创建下排第二个子图
     top_axes = [ax_top_1, ax_top_2, ax_top_3]  # 组装上排坐标轴列表
     panel_summary_rows = []  # 初始化分面汇总行容器
-    for idx, motion_cfg in enumerate(MOTION_CONFIGS):  # 按顺序遍历三种地震动
+    top_stats_list = []  # 初始化上排三图统计表缓存列表
+    top_all_values = []  # 初始化上排三图纵轴数据汇总列表
+    for motion_cfg in MOTION_CONFIGS:  # 按顺序遍历三种地震动并先缓存统计表
         panel_df = summary_df[summary_df['motion'] == motion_cfg['key']].copy()  # 提取当前地震动数据
         stats_df = build_group_stats(panel_df, 'angle', PREFERRED_ANGLE_VALUES)  # 构建按 angle 统计表
-        draw_stat_panel(top_axes[idx], stats_df, 'angle', r'$\theta_s (^{\circ})$', motion_cfg['display'], y_floor=0.5, show_ylabel=(idx == 0), show_legend=(idx == 0))  # 绘制当前上排子图
+        top_stats_list.append(stats_df)  # 缓存当前子图统计表
+        if not stats_df.empty:  # 判断当前统计表是否非空
+            top_all_values.extend(stats_df['taf_min'].tolist())  # 汇总当前子图最小值序列
+            top_all_values.extend(stats_df['taf_max'].tolist())  # 汇总当前子图最大值序列
+    top_y_limits = compute_plot_range(np.asarray(top_all_values, dtype=float), 0.5)  # 基于上排全部数据计算统一纵轴范围
+    for idx, motion_cfg in enumerate(MOTION_CONFIGS):  # 按顺序遍历三种地震动执行绘图
+        stats_df = top_stats_list[idx]  # 读取当前地震动缓存统计表
+        draw_stat_panel(top_axes[idx], stats_df, 'angle', r'$\theta_s (^{\circ})$', motion_cfg['display'], y_floor=0.5, show_ylabel=True, show_legend=True, force_y_limits=top_y_limits)  # 绘制当前上排子图并统一显示纵轴标签与图例
         panel_summary_rows.extend(build_panel_summary_rows(stats_df, panel_name='theta', x_name='angle', motion_display=motion_cfg['display']))  # 追加当前子图汇总
     h_stats_df = build_group_stats(summary_df, 'h', PREFERRED_H_VALUES)  # 构建按 h 统计表
-    draw_stat_panel(ax_bottom_1, h_stats_df, 'h', r'$h\,(m)$', '', y_floor=0.0, show_ylabel=True, show_legend=True)  # 绘制下排左图
+    draw_stat_panel(ax_bottom_1, h_stats_df, 'h', r'$h\,(m)$', '', y_floor=0.0, show_ylabel=True, show_legend=True, use_equal_spacing=True)  # 绘制下排左图并启用等间距横坐标
     panel_summary_rows.extend(build_panel_summary_rows(h_stats_df, panel_name='h', x_name='h', motion_display='All'))  # 追加 h 分面汇总
     i_stats_df = build_group_stats(summary_df, 'i', PREFERRED_I_VALUES)  # 构建按 i 统计表
     draw_stat_panel(ax_bottom_2, i_stats_df, 'i', r'$i\,(^{\circ})$', '', y_floor=0.0, show_ylabel=True, show_legend=True)  # 绘制下排右图
     panel_summary_rows.extend(build_panel_summary_rows(i_stats_df, panel_name='i', x_name='i', motion_display='All'))  # 追加 i 分面汇总
-    fig.text(0.50, 0.56, '(a)', ha='center', va='center', fontsize=17)  # 添加上排标注
+    fig.text(0.50, 0.51, '(a)', ha='center', va='center', fontsize=17)  # 添加上排标注
     fig.text(0.29, 0.03, '(b)', ha='center', va='center', fontsize=17)  # 添加下排左图标注
     fig.text(0.74, 0.03, '(c)', ha='center', va='center', fontsize=17)  # 添加下排右图标注
     fig.savefig(output_path, dpi=350)  # 保存总图到输出路径
     plt.close(fig)  # 关闭图对象释放内存
     return panel_summary_rows  # 返回分面汇总行数据
+
+
+def create_single_panel_figures(summary_df, output_dir):  # 定义导出每个子图为单图的函数
+    plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局字体为 Times 风格
+    plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
+    plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示问题
+    os.makedirs(output_dir, exist_ok=True)  # 创建单图输出目录并允许已存在
+    output_paths = []  # 初始化输出路径列表
+    top_stats_list = []  # 初始化 theta 单图统计表缓存列表
+    top_all_values = []  # 初始化 theta 单图纵轴数据汇总列表
+    for motion_cfg in MOTION_CONFIGS:  # 遍历三种地震动并先缓存统计表
+        panel_df = summary_df[summary_df['motion'] == motion_cfg['key']].copy()  # 提取当前地震动数据
+        stats_df = build_group_stats(panel_df, 'angle', PREFERRED_ANGLE_VALUES)  # 构建按 angle 统计表
+        top_stats_list.append(stats_df)  # 缓存当前统计表
+        if not stats_df.empty:  # 判断当前统计表是否非空
+            top_all_values.extend(stats_df['taf_min'].tolist())  # 汇总当前统计表最小值序列
+            top_all_values.extend(stats_df['taf_max'].tolist())  # 汇总当前统计表最大值序列
+    top_y_limits = compute_plot_range(np.asarray(top_all_values, dtype=float), 0.5)  # 计算与(a)图一致的统一纵轴范围
+    for idx, motion_cfg in enumerate(MOTION_CONFIGS):  # 遍历三种地震动并逐一导出 theta 子图
+        fig, ax = plt.subplots(1, 1, figsize=(5.0, 4.2), facecolor='white')  # 创建单图画布
+        stats_df = top_stats_list[idx]  # 读取当前地震动缓存统计表
+        draw_stat_panel(ax, stats_df, 'angle', r'$\theta_s (^{\circ})$', motion_cfg['display'], y_floor=0.5, show_ylabel=True, show_legend=True, force_y_limits=top_y_limits)  # 绘制当前地震动单图并统一纵轴范围
+        fig.tight_layout()  # 自动调整布局避免遮挡
+        output_name = 'TAF_overview_theta_{}.png'.format(motion_cfg['key'])  # 组装当前 theta 单图文件名
+        output_path = os.path.join(output_dir, output_name)  # 组装当前 theta 单图路径
+        fig.savefig(output_path, dpi=350)  # 保存当前 theta 单图
+        plt.close(fig)  # 关闭当前图对象释放内存
+        output_paths.append(output_path)  # 记录当前输出路径
+    fig_h, ax_h = plt.subplots(1, 1, figsize=(5.0, 4.2), facecolor='white')  # 创建 h 单图画布
+    h_stats_df = build_group_stats(summary_df, 'h', PREFERRED_H_VALUES)  # 构建按 h 统计表
+    draw_stat_panel(ax_h, h_stats_df, 'h', r'$h\,(m)$', '', y_floor=0.0, show_ylabel=True, show_legend=True, use_equal_spacing=True)  # 绘制 h 单图并启用等间距横坐标
+    fig_h.tight_layout()  # 自动调整 h 图布局
+    output_h_path = os.path.join(output_dir, 'TAF_overview_h_v1.png')  # 组装 h 单图路径
+    fig_h.savefig(output_h_path, dpi=350)  # 保存 h 单图
+    plt.close(fig_h)  # 关闭 h 图对象释放内存
+    output_paths.append(output_h_path)  # 记录 h 图路径
+    fig_i, ax_i = plt.subplots(1, 1, figsize=(5.0, 4.2), facecolor='white')  # 创建 i 单图画布
+    i_stats_df = build_group_stats(summary_df, 'i', PREFERRED_I_VALUES)  # 构建按 i 统计表
+    draw_stat_panel(ax_i, i_stats_df, 'i', r'$i\,(^{\circ})$', '', y_floor=0.0, show_ylabel=True, show_legend=True)  # 绘制 i 单图
+    fig_i.tight_layout()  # 自动调整 i 图布局
+    output_i_path = os.path.join(output_dir, 'TAF_overview_i_v1.png')  # 组装 i 单图路径
+    fig_i.savefig(output_i_path, dpi=350)  # 保存 i 单图
+    plt.close(fig_i)  # 关闭 i 图对象释放内存
+    output_paths.append(output_i_path)  # 记录 i 图路径
+    return output_paths  # 返回全部单图输出路径列表
 
 
 def main():  # 定义主函数
@@ -394,6 +455,8 @@ def main():  # 定义主函数
     summary_df.to_csv(output_raw_csv, index=False, encoding='utf-8-sig')  # 保存原始汇总 CSV
     output_figure = os.path.join(output_image_dir, OUTPUT_FIGURE_NAME)  # 组装总图输出路径
     panel_rows = create_overview_figure(summary_df, output_figure)  # 生成总图并获取分面汇总行
+    output_single_dir = output_image_dir  # 将单图输出目录设置为与总图相同目录
+    single_paths = create_single_panel_figures(summary_df, output_single_dir)  # 导出每个子图的单图文件
     panel_summary_df = pd.DataFrame(panel_rows)  # 将分面汇总行转为数据表
     output_panel_csv = os.path.join(output_dir, OUTPUT_PANEL_SUMMARY_NAME)  # 组装分面汇总 CSV 路径
     panel_summary_df.to_csv(output_panel_csv, index=False, encoding='utf-8-sig')  # 保存分面汇总 CSV
@@ -402,6 +465,10 @@ def main():  # 定义主函数
     print('分面汇总: {}'.format(output_panel_csv))  # 输出分面汇总 CSV 路径
     print('图片目录: {}'.format(output_image_dir))  # 输出图片目录信息
     print('总图输出: {}'.format(output_figure))  # 输出总图路径
+    print('单图目录: {}'.format(output_single_dir))  # 输出单图目录路径
+    print('单图数量: {}'.format(len(single_paths)))  # 输出单图数量统计
+    for single_path in single_paths:  # 遍历单图路径列表
+        print('单图输出: {}'.format(single_path))  # 输出当前单图路径
 
 
 if __name__ == '__main__':  # 判断脚本是否以主程序方式运行
