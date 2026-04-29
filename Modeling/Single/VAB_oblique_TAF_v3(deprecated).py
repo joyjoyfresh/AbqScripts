@@ -23,10 +23,39 @@ DEFAULT_LOG_FILE = 'VAB_oblique_TAF.log'  # 定义当前脚本默认日志文件
 DEFAULT_RESUME_STATE_FILE = 'VAB_oblique_TAF.resume.json'  # 定义断点续跑状态文件名
 
 
+def _build_runtime_config():
+    """构建主流程所需运行配置。"""
+    resume_cfg = {  # 定义断点续跑行为配置字典
+        'enable': True,  # 配置是否启用断点续跑
+        'force_rerun': False,  # 配置是否忽略历史状态强制重跑
+        'log_file': DEFAULT_LOG_FILE,  # 配置日志文件路径
+        'state_file': DEFAULT_RESUME_STATE_FILE,  # 配置状态文件路径
+    }
+    material_cfg = {  # 定义材料参数配置字典
+        'angle': 30,  # 配置 SV 波入射角度（度）
+        'elastic_modulus': 32e9,  # 配置杨氏模量（Pa）
+        'poisson_ratio': 0.25,  # 配置泊松比
+        'density': 2650,  # 配置密度（kg/m^3）
+    }
+    geometry_cfg = {  # 定义几何与网格控制配置字典
+        'h': 50,  # 配置斜坡高度（m）
+        'i': 30,  # 配置斜坡倾角（度）
+        'mesh_size_manual': 4,  # 配置手动网格尺寸上限（m）
+        'f_max': 15,  # 配置目标最高频率（Hz）
+        'n_per_wave': 10,  # 配置每波长单元数
+    }
+    job_cfg = {  # 定义作业与输出控制配置字典
+        'variables': ('U', 'V', 'A'),  # 配置场输出变量
+        'frequency': 1,  # 配置场输出频率
+        'num_cpus': 7,  # 配置并行 CPU 数量
+        'memory_percent': 90,  # 配置作业内存百分比
+    }
+    return resume_cfg, material_cfg, geometry_cfg, job_cfg  # 返回全部运行配置
+
+
 def _default_resume_state():
     """构造断点续跑默认状态。"""
     return {  # 返回默认状态字典
-        'has_previous_run': False,  # 标记是否存在历史运行记录
         'all_completed': False,  # 标记最近一次运行是否全部完成
         'completed_jobs': set(),  # 记录已完成作业名集合
         'interrupted_job': None,  # 记录中断作业名
@@ -48,7 +77,6 @@ def _load_resume_state(state_file):
     if not isinstance(raw_state, dict):  # 若解析结果不是字典
         return state  # 返回默认状态
 
-    state['has_previous_run'] = bool(raw_state.get('has_previous_run', True))  # 读取历史运行标记
     state['all_completed'] = bool(raw_state.get('all_completed', False))  # 读取全量完成标记
     state['interrupted_job'] = raw_state.get('interrupted_job')  # 读取中断作业名
     state['last_signature'] = raw_state.get('last_signature')  # 读取运行签名
@@ -61,7 +89,6 @@ def _load_resume_state(state_file):
 def _save_resume_state(state_file, state):
     """将断点续跑状态写入状态文件。"""
     payload = {  # 构建可序列化状态字典
-        'has_previous_run': bool(state.get('has_previous_run', True)),  # 序列化历史运行标记
         'all_completed': bool(state.get('all_completed', False)),  # 序列化全量完成标记
         'completed_jobs': sorted(list(state.get('completed_jobs', set()))),  # 序列化已完成作业列表
         'interrupted_job': state.get('interrupted_job'),  # 序列化中断作业名
@@ -70,7 +97,12 @@ def _save_resume_state(state_file, state):
     temp_state_file = state_file + '.tmp'  # 构建临时状态文件路径
     with open(temp_state_file, 'w') as f:  # 先写入临时文件避免中途写坏正式文件
         json.dump(payload, f, ensure_ascii=True, indent=2, sort_keys=True)  # 以稳定格式写入 JSON 内容
-    os.replace(temp_state_file, state_file)  # 原子替换正式状态文件
+    if os.path.exists(state_file):
+        try:
+            os.remove(state_file)
+        except OSError:
+            pass
+    os.rename(temp_state_file, state_file)  # 替换正式状态文件
 
 
 def _delete_job_if_exists(job_name, logger=None):
@@ -149,6 +181,20 @@ def _build_model_name_from_record(acc_file, scene_tag):
     if scene_tag not in ('slope', 'flat'):  # 校验场景标签是否受支持
         raise ValueError('scene_tag 仅支持 slope 或 flat，当前为: %s' % scene_tag)  # 场景标签非法时抛出异常
     return '{}-{}'.format(record_name, scene_tag)  # 返回“记录名-场景名”格式模型名
+
+
+def _filter_pending_acc_info(acc_info, completed_jobs, resume_enabled, logger=None):
+    """根据完成作业集合筛选仍需处理的输入波形。"""
+    pending_acc_info = []  # 初始化待处理输入波形列表
+    for acc_file, tp, inc in acc_info:  # 遍历全部输入波形并逐条判断
+        slope_job_name = 'job-' + _build_model_name_from_record(acc_file, 'slope')  # 计算斜坡场景作业名
+        flat_job_name = 'job-' + _build_model_name_from_record(acc_file, 'flat')  # 计算平坦场景作业名
+        if resume_enabled and slope_job_name in completed_jobs and flat_job_name in completed_jobs:  # 若双场景均完成则可跳过
+            if logger:  # 若提供日志器则输出跳过信息
+                log_step(logger, '%s 与 %s 已在上次运行完成，本次跳过建模与提交', slope_job_name, flat_job_name)  # 记录双场景跳过日志
+            continue  # 跳过当前波形并处理下一条
+        pending_acc_info.append((acc_file, tp, inc))  # 记录仍需建模的波形条目
+    return pending_acc_info  # 返回待处理输入波形列表
 
 
 def log_step(logger=None, message=None, *args):
@@ -1162,191 +1208,239 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
     log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
 
 
+def _persist_resume_state(state_file, resume_state):
+    """统一持久化断点续跑状态。"""
+    _save_resume_state(state_file, resume_state)  # 调用底层状态写入函数完成持久化
+
+
+def _build_scene_models(pending_acc_info, scene_specs, material_cfg, job_cfg, cs, logger):
+    """按场景规格批量创建待提交模型。"""
+    model_names = []  # 初始化待提交模型名称列表
+    for scene_spec in scene_specs:  # 遍历每个场景规格并执行建模
+        scene_model_names = build_models(  # 针对当前场景批量复制模型并施加边界
+            acc_info=pending_acc_info,
+            base_model=scene_spec['base_model'],
+            part_name=scene_spec['part_name'],
+            inst_name=scene_spec['inst_name'],
+            angle=material_cfg['angle'],
+            cs=cs,
+            vv=material_cfg['poisson_ratio'],
+            density=material_cfg['density'],
+            step_name=DEFAULT_STEP_NAME,
+            variables=job_cfg['variables'],
+            frequency=job_cfg['frequency'],
+            model_scene=scene_spec['scene'],
+            logger=logger)
+        model_names.extend(scene_model_names)  # 合并当前场景生成的模型名称
+    return model_names  # 返回全部待提交模型名称
+
+
+def _submit_models_with_resume(model_names, completed_jobs, interrupted_job,
+                               resume_enabled, resume_cfg, resume_state,
+                               job_cfg, logger):
+    """提交待运行作业并同步更新断点状态。"""
+    for model_name in model_names:  # 顺序提交每个模型对应作业
+        job_name = 'job-' + model_name  # 计算当前模型对应作业名
+
+        if resume_enabled and job_name in completed_jobs:  # 若该作业已完成则跳过提交
+            log_step(logger, '%s 已在上次运行完成，本次跳过提交', job_name)  # 记录作业跳过日志
+            continue  # 进入下一个作业
+
+        if resume_enabled and interrupted_job == job_name:  # 若该作业是上次中断作业则先删后提
+            _delete_job_if_exists(job_name, logger=logger)  # 删除同名旧作业避免提交冲突
+
+        if resume_enabled:  # 若启用断点续跑则在提交前刷新中断指针
+            resume_state['interrupted_job'] = job_name  # 标记当前作业为潜在中断点
+            _persist_resume_state(resume_cfg['state_file'], resume_state)  # 持久化当前中断指针
+
+        submit_job(  # 提交当前模型作业并等待完成
+            num_cpus=job_cfg['num_cpus'],
+            memory_percent=job_cfg['memory_percent'],
+            model_name=model_name,
+            logger=logger)
+
+        if resume_enabled:  # 若启用断点续跑则在成功后更新完成状态
+            resume_state['completed_jobs'].add(job_name)  # 将当前作业加入已完成集合
+            completed_jobs.add(job_name)  # 同步更新本轮内存集合避免重复提交
+            resume_state['interrupted_job'] = None  # 作业完成后清空中断指针
+            _persist_resume_state(resume_cfg['state_file'], resume_state)  # 持久化完成后的状态
+
+
+def _prepare_resume_state_for_current_run(run_signature, resume_enabled,
+                                          resume_cfg, resume_state, logger):
+    """完成签名比较、状态迁移与当前轮次初始化。"""
+    previous_signature = resume_state.get('last_signature')  # 读取上次运行签名用于比较
+    signature_mismatch = (  # 计算当前签名与上次签名是否不一致
+        resume_enabled and
+        bool(previous_signature) and
+        (previous_signature != run_signature)
+    )
+
+    resume_state['last_signature'] = run_signature  # 更新当前运行签名到内存状态
+    _persist_resume_state(resume_cfg['state_file'], resume_state)  # 将当前签名写入状态文件
+
+    if signature_mismatch:  # 若签名不一致则禁用历史续跑状态
+        log_step(logger, '检测到运行签名变化，已禁用历史断点续跑并执行全量重跑')  # 记录签名变化处理策略
+        resume_state['all_completed'] = False  # 清空“已全部完成”标记避免误跳过
+        resume_state['completed_jobs'] = set()  # 清空“已完成作业”集合避免误跳过
+        resume_state['interrupted_job'] = None  # 清空中断作业避免误删误重提
+        _persist_resume_state(resume_cfg['state_file'], resume_state)  # 将签名变更后的重置状态写回文件
+
+    if resume_enabled and (not signature_mismatch) and resume_state['all_completed']:  # 若签名一致且上次已完成则可整体跳过
+        log_step(logger, '检测到上次运行已全部完成且签名一致，本次执行自动跳过')  # 记录整体跳过日志
+        return False  # 返回“无需继续执行”标记
+
+    resume_state['all_completed'] = False  # 进入新一轮执行时先标记为未全部完成
+    _persist_resume_state(resume_cfg['state_file'], resume_state)  # 将“执行中”状态写回文件
+    return True  # 返回“继续执行”标记
+
+
+def _derive_geometry_runtime(material_cfg, geometry_cfg):
+    """根据材料与几何配置推导运行时几何参数。"""
+    cs = _compute_wave_speed_from_elastic_modulus(  # 根据材料参数计算剪切波速
+        material_cfg['elastic_modulus'],
+        material_cfg['poisson_ratio'],
+        material_cfg['density'])
+    h = geometry_cfg['h']  # 读取斜坡高度
+    h_lower = 2.0 * h  # 推导斜坡模型下垫面高度
+    h_flat = 3.0 * h  # 推导平坦自由场总高度
+    total_l = 8.0 * h  # 推导模型总长度
+    mesh_size_auto = cs / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按波长准则推导自动网格尺寸
+    mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限较小值
+    cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 推导 CAE 文件名
+    return cs, h, h_lower, h_flat, total_l, mesh_size, cae_name  # 返回运行时几何参数
+
+
+def _create_base_models(total_l, h, h_lower, h_flat, mesh_size, cs,
+                        material_cfg, geometry_cfg, cae_name, logger):
+    """创建斜坡与平坦自由场基础模型并返回场景规格。"""
+    base_model, part_name, inst_name = create_model(  # 创建斜坡基础几何与网格模型
+        total_L=total_l,
+        h=h,
+        i=geometry_cfg['i'],
+        cs=cs,
+        vv=material_cfg['poisson_ratio'],
+        density=material_cfg['density'],
+        mesh_size=mesh_size,
+        H_lower=h_lower,
+        cae_name=cae_name,
+        logger=logger)
+
+    flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
+        total_L=total_l,
+        H_flat=h_flat,
+        cs=cs,
+        vv=material_cfg['poisson_ratio'],
+        density=material_cfg['density'],
+        mesh_size=mesh_size,
+        logger=logger)
+
+    scene_specs = [  # 组织统一场景规格列表供后续批量建模使用
+        {'scene': 'slope', 'base_model': base_model, 'part_name': part_name, 'inst_name': inst_name},  # 记录斜坡场景规格
+        {'scene': 'flat', 'base_model': flat_base_model, 'part_name': flat_part_name, 'inst_name': flat_inst_name},  # 记录平坦场景规格
+    ]
+    return scene_specs  # 返回基础场景规格列表
+
+
+def _finalize_resume_state_on_success(resume_enabled, resume_cfg, resume_state):
+    """在作业全部成功后更新并持久化断点状态。"""
+    if not resume_enabled:  # 若未启用断点续跑则无需写入状态
+        return  # 直接结束成功收尾流程
+    resume_state['all_completed'] = True  # 标记本轮全部作业已完成
+    resume_state['interrupted_job'] = None  # 清空中断作业指针
+    _persist_resume_state(resume_cfg['state_file'], resume_state)  # 持久化成功收尾状态
+
+
+def _finalize_resume_state_on_failure(resume_enabled, resume_cfg, resume_state):
+    """在主流程异常时更新并持久化断点状态。"""
+    if not resume_enabled:  # 若未启用断点续跑则无需写入状态
+        return  # 直接结束失败收尾流程
+    resume_state['all_completed'] = False  # 失败时明确标记为未全部完成
+    _persist_resume_state(resume_cfg['state_file'], resume_state)  # 持久化失败收尾状态
+
+
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""
-    resume_cfg = {  # 配置断点续跑行为
-        'enable': True,  # 控制是否启用断点续跑
-        'force_rerun': False,  # 控制是否强制忽略历史记录并重跑
-        'log_file': DEFAULT_LOG_FILE,  # 指定脚本日志文件
-        'state_file': DEFAULT_RESUME_STATE_FILE,  # 指定断点续跑状态文件
-    }
+    resume_cfg, material_cfg, geometry_cfg, job_cfg = _build_runtime_config()  # 构建主流程运行配置
     resume_state = _load_resume_state(resume_cfg['state_file'])  # 在初始化日志器前先读取状态文件
     logger = log_step(resume_cfg['log_file'])  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
-
-    # 统一集中配置参数，便于维护和批量改动。
-    material_cfg = {
-        'angle': 30,  # 设置 SV 波入射角度（度）
-        'elastic_modulus': 32e9,  # 设置杨氏模量（Pa）
-        'poisson_ratio': 0.25,  # 设置泊松比
-        'density': 2650,  # 设置密度（kg/m^3）
-    }
-    geometry_cfg = {
-        'h': 50,  # 设置斜坡高度（m）
-        'i': 30,  # 设置斜坡倾角（度）
-        'mesh_size_manual': 4,  # 设置手动网格尺寸上限（m）
-        'f_max': 15,  # 设置目标最高频率（Hz）
-        'n_per_wave': 10,  # 设置每波长单元数
-    }
-    job_cfg = {
-        'variables': ('U', 'V', 'A'),  # 设置场输出变量
-        'frequency': 1,  # 设置输出频率
-        'num_cpus': 7,  # 设置并行 CPU 数量
-        'memory_percent': 90,  # 设置作业内存百分比
-    }
+    resume_enabled = resume_cfg['enable'] and (not resume_cfg['force_rerun'])  # 计算是否允许断点续跑
 
     try:
         log_step(logger, '脚本开始执行')  # 写入脚本启动日志
 
         acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
         run_signature = _compute_run_signature(material_cfg, geometry_cfg, job_cfg, acc_info)  # 计算当前运行签名
-        resume_state['has_previous_run'] = True  # 标记已进入可恢复运行阶段
-        resume_state['last_signature'] = run_signature  # 记录当前运行签名到内存状态
-        _save_resume_state(resume_cfg['state_file'], resume_state)  # 将当前签名立刻写入状态文件
+        should_continue = _prepare_resume_state_for_current_run(  # 执行签名比较与状态迁移
+            run_signature=run_signature,
+            resume_enabled=resume_enabled,
+            resume_cfg=resume_cfg,
+            resume_state=resume_state,
+            logger=logger)
+        if not should_continue:  # 若当前轮次可整体跳过则直接结束
+            return  # 结束当前脚本执行
 
-        should_resume = resume_cfg['enable'] and (not resume_cfg['force_rerun'])  # 计算是否允许断点续跑
-        signature_mismatch = (  # 计算当前签名与上次签名是否不一致
-            should_resume and
-            bool(resume_state['last_signature']) and
-            (resume_state['last_signature'] != run_signature)
-        )
-
-        if signature_mismatch:  # 若签名不一致则禁用历史续跑状态
-            log_step(logger, '检测到运行签名变化，已禁用历史断点续跑并执行全量重跑')  # 记录签名变化处理策略
-            resume_state['all_completed'] = False  # 清空“已全部完成”标记避免误跳过
-            resume_state['completed_jobs'] = set()  # 清空“已完成作业”集合避免误跳过
-            resume_state['interrupted_job'] = None  # 清空中断作业避免误删误重提
-            _save_resume_state(resume_cfg['state_file'], resume_state)  # 将签名变更后的重置状态写回文件
-
-        if should_resume and (not signature_mismatch) and resume_state['all_completed']:  # 若签名一致且上次已完成则安全跳过
-            log_step(logger, '检测到上次运行已全部完成且签名一致，本次执行自动跳过')  # 记录整体跳过日志
-            return  # 直接结束本次脚本执行
-
-        resume_state['all_completed'] = False  # 进入新一轮执行时先标记为未全部完成
-        _save_resume_state(resume_cfg['state_file'], resume_state)  # 将“执行中”状态写回文件
-
-        cs = _compute_wave_speed_from_elastic_modulus(  # 根据材料参数计算剪切波速
-            material_cfg['elastic_modulus'],
-            material_cfg['poisson_ratio'],
-            material_cfg['density'])
-
-        h = geometry_cfg['h']  # 读取斜坡高度
-        H_lower = 2.0 * h  # 设置斜坡模型下垫面高度
-        H_flat = 3.0 * h  # 设置平坦自由场模型总高度
-        total_L = 8.0 * h  # 设置总模型长度
-        mesh_size_auto = cs / (geometry_cfg['f_max'] * geometry_cfg['n_per_wave'])  # 按波长准则计算自动网格尺寸
-        mesh_size = min(mesh_size_auto, geometry_cfg['mesh_size_manual'])  # 取自动尺寸与手动上限中的较小值
-
-        cae_name = 'h{}_i{}_a{}.cae'.format(h, geometry_cfg['i'], material_cfg['angle'])  # 生成 CAE 文件名
-
-        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
-            total_L=total_L,
+        cs, h, H_lower, H_flat, total_L, mesh_size, cae_name = _derive_geometry_runtime(  # 推导运行时几何与网格参数
+            material_cfg=material_cfg,
+            geometry_cfg=geometry_cfg)
+        scene_specs = _create_base_models(  # 创建斜坡与平坦自由场基础模型
+            total_l=total_L,
             h=h,
-            i=geometry_cfg['i'],
-            cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
+            h_lower=H_lower,
+            h_flat=H_flat,
             mesh_size=mesh_size,
-            H_lower=H_lower,
+            cs=cs,
+            material_cfg=material_cfg,
+            geometry_cfg=geometry_cfg,
             cae_name=cae_name,
             logger=logger)
 
-        flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
-            total_L=total_L,
-            H_flat=H_flat,
-            cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
-            mesh_size=mesh_size,
+        completed_jobs = resume_state['completed_jobs'] if resume_enabled else set()  # 获取可跳过的已完成作业集合
+        interrupted_job = resume_state['interrupted_job'] if resume_enabled else None  # 获取需要删后重提的中断作业名
+        pending_acc_info = _filter_pending_acc_info(  # 根据历史完成状态筛选待处理波形
+            acc_info=acc_info,
+            completed_jobs=completed_jobs,
+            resume_enabled=resume_enabled,
             logger=logger)
 
-        completed_jobs = resume_state['completed_jobs'] if resume_cfg['enable'] else set()  # 获取可跳过的已完成作业集合
-        interrupted_job = resume_state['interrupted_job'] if resume_cfg['enable'] else None  # 获取需要删后重提的中断作业名
-        pending_acc_info = []  # 初始化待处理的输入波形列表
-        for acc_file, tp, inc in acc_info:  # 遍历全部输入波形并筛选是否仍需处理
-            slope_job_name = 'job-' + _build_model_name_from_record(acc_file, 'slope')  # 计算斜坡场景对应作业名
-            flat_job_name = 'job-' + _build_model_name_from_record(acc_file, 'flat')  # 计算平坦场景对应作业名
-            if resume_cfg['enable'] and (not resume_cfg['force_rerun']) and slope_job_name in completed_jobs and flat_job_name in completed_jobs:  # 若两类场景作业均已完成则无需再建模
-                log_step(logger, '%s 与 %s 已在上次运行完成，本次跳过建模与提交', slope_job_name, flat_job_name)  # 记录双场景整体跳过日志
-                continue  # 进入下一条输入波形
-            pending_acc_info.append((acc_file, tp, inc))  # 记录仍需处理的输入波形
-
-        if len(pending_acc_info) == 0:  # 若无任何待处理波形则直接结束本次运行
+        if not pending_acc_info:  # 若无任何待处理波形则直接结束本次运行
             log_step(logger, '检测到全部作业已完成，本次无需建模与提交')  # 记录无任务可执行日志
             return  # 结束当前脚本执行
 
-        slope_model_names = build_models(  # 仅对待处理波形创建斜坡模型并施加等效边界
-            acc_info=pending_acc_info,
-            base_model=base_model,
-            part_name=part_name,
-            inst_name=inst_name,
-            angle=material_cfg['angle'],
+        model_names = _build_scene_models(  # 按统一场景规格创建全部待提交模型
+            pending_acc_info=pending_acc_info,
+            scene_specs=scene_specs,
+            material_cfg=material_cfg,
+            job_cfg=job_cfg,
             cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            model_scene='slope',
             logger=logger)
 
-        flat_model_names = build_models(  # 仅对待处理波形创建平坦自由场模型并施加等效边界
-            acc_info=pending_acc_info,
-            base_model=flat_base_model,
-            part_name=flat_part_name,
-            inst_name=flat_inst_name,
-            angle=material_cfg['angle'],
-            cs=cs,
-            vv=material_cfg['poisson_ratio'],
-            density=material_cfg['density'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            model_scene='flat',
-            logger=logger)
-
-        model_names = slope_model_names + flat_model_names  # 合并待提交的两类模型名称用于统一提交作业
-
-        if resume_cfg['enable'] and interrupted_job:  # 若检测到历史中断作业
+        if resume_enabled and interrupted_job:  # 若检测到历史中断作业
             log_step(logger, '检测到上次中断作业: %s，将执行删后重提', interrupted_job)  # 写入恢复策略日志
 
-        for model_name in model_names:  # 顺序提交每个模型作业
-            job_name = 'job-' + model_name  # 计算当前模型对应作业名
+        _submit_models_with_resume(  # 提交全部待运行作业并同步状态
+            model_names=model_names,
+            completed_jobs=completed_jobs,
+            interrupted_job=interrupted_job,
+            resume_enabled=resume_enabled,
+            resume_cfg=resume_cfg,
+            resume_state=resume_state,
+            job_cfg=job_cfg,
+            logger=logger)
 
-            if resume_cfg['enable'] and (not resume_cfg['force_rerun']) and job_name in completed_jobs:  # 若该作业已完成则跳过
-                log_step(logger, '%s 已在上次运行完成，本次跳过提交', job_name)  # 记录作业跳过日志
-                continue  # 进入下一个作业
-
-            if resume_cfg['enable'] and (not resume_cfg['force_rerun']) and interrupted_job == job_name:  # 若该作业为中断作业
-                _delete_job_if_exists(job_name, logger=logger)  # 先删除旧作业后再重提
-
-            if resume_cfg['enable']:  # 若启用断点续跑则在提交前更新中断作业指针
-                resume_state['interrupted_job'] = job_name  # 标记当前作业为潜在中断点
-                _save_resume_state(resume_cfg['state_file'], resume_state)  # 将潜在中断点实时写入状态文件
-
-            submit_job(
-                num_cpus=job_cfg['num_cpus'],
-                memory_percent=job_cfg['memory_percent'],
-                model_name=model_name,
-                logger=logger)
-
-            if resume_cfg['enable']:  # 若启用断点续跑则在作业完成后更新完成集合
-                resume_state['completed_jobs'].add(job_name)  # 将当前完成作业写入已完成集合
-                completed_jobs.add(job_name)  # 同步更新当前轮次跳过集合避免重复提交
-                resume_state['interrupted_job'] = None  # 清除中断作业指针
-                _save_resume_state(resume_cfg['state_file'], resume_state)  # 将作业完成状态实时写入状态文件
-
-        if resume_cfg['enable']:  # 若启用断点续跑则在全部作业完成后写入全量完成标记
-            resume_state['all_completed'] = True  # 标记本轮全部作业已完成
-            resume_state['interrupted_job'] = None  # 清空中断作业指针
-            _save_resume_state(resume_cfg['state_file'], resume_state)  # 持久化全量完成状态
+        _finalize_resume_state_on_success(  # 在成功路径更新并持久化断点状态
+            resume_enabled=resume_enabled,
+            resume_cfg=resume_cfg,
+            resume_state=resume_state)
         log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
     except Exception as exc:
         log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
         logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈便于定位问题
-        if resume_cfg['enable']:  # 若启用断点续跑则在失败路径也写回当前状态
-            resume_state['all_completed'] = False  # 失败时明确标记为未全部完成
-            _save_resume_state(resume_cfg['state_file'], resume_state)  # 持久化失败时的断点状态
+        _finalize_resume_state_on_failure(  # 在失败路径更新并持久化断点状态
+            resume_enabled=resume_enabled,
+            resume_cfg=resume_cfg,
+            resume_state=resume_state)
         raise  # 继续抛出异常，避免失败被静默吞掉
 
 
