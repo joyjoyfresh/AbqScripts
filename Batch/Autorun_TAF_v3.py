@@ -19,47 +19,13 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Single\VAB_oblique_TAF_v2.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
+    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Single\VAB_oblique_TAF_v3.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_PGA_v6.py", "parameter_target": False},  # 定义后处理脚本完整路径
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Distribution_PGA_v6.py", "parameter_target": False},  # 定义分布脚本完整路径
 ]  # 结束脚本顺序配置定义
 
 PARAMETER_CASES = [  # 定义参数方案列表
-    {"params": {"h": 100, "i": 15, "angle": 0}},
-    {"params": {"h": 100, "i": 15, "angle": 5}},
-    {"params": {"h": 100, "i": 15, "angle": 10}},
-    {"params": {"h": 100, "i": 15, "angle": 15}},
-    {"params": {"h": 100, "i": 15, "angle": 20}},
-    {"params": {"h": 100, "i": 15, "angle": 25}},
-    {"params": {"h": 100, "i": 15, "angle": 30}},
-    {"params": {"h": 100, "i": 30, "angle": 0}},
-    {"params": {"h": 100, "i": 30, "angle": 5}},
-    {"params": {"h": 100, "i": 30, "angle": 10}},
-    {"params": {"h": 100, "i": 30, "angle": 15}},
-    {"params": {"h": 100, "i": 30, "angle": 20}},
-    {"params": {"h": 100, "i": 30, "angle": 25}},
-    {"params": {"h": 100, "i": 30, "angle": 30}},
-    {"params": {"h": 100, "i": 45, "angle": 0}},
-    {"params": {"h": 100, "i": 45, "angle": 5}},
-    {"params": {"h": 100, "i": 45, "angle": 10}},
-    {"params": {"h": 100, "i": 45, "angle": 15}},
-    {"params": {"h": 100, "i": 45, "angle": 20}},
-    {"params": {"h": 100, "i": 45, "angle": 25}},
-    {"params": {"h": 100, "i": 45, "angle": 30}},
-    {"params": {"h": 100, "i": 60, "angle": 0}},
-    {"params": {"h": 100, "i": 60, "angle": 5}},
-    {"params": {"h": 100, "i": 60, "angle": 10}},
-    {"params": {"h": 100, "i": 60, "angle": 15}},
-    {"params": {"h": 100, "i": 60, "angle": 20}},
-    {"params": {"h": 100, "i": 60, "angle": 25}},
-    {"params": {"h": 100, "i": 60, "angle": 30}},
-    {"params": {"h": 100, "i": 75, "angle": 0}},
-    {"params": {"h": 100, "i": 75, "angle": 5}},
-    {"params": {"h": 100, "i": 75, "angle": 10}},
-    {"params": {"h": 100, "i": 75, "angle": 15}},
-    {"params": {"h": 100, "i": 75, "angle": 20}},
-    {"params": {"h": 100, "i": 75, "angle": 25}},
-    {"params": {"h": 100, "i": 75, "angle": 30}},
+    {"params": {"h": 10, "i": 15, "angle": 0}},
 ]  # 结束参数方案列表定义
 
 
@@ -166,12 +132,37 @@ def run_scripts_in_folder(folder_path, run_order):  # 定义在单个目录内�
         script_path = os.path.join(folder_path, script_name)  # 生成当前脚本完整路径
         if not os.path.isfile(script_path):  # 检查当前脚本是否存在
             print("错误：脚本不存在 -> {}".format(script_path))  # 输出脚本缺失错误
-            return False  # 返回执行失败
+            sys.exit(1)  # 遇到错误终止整个进程
         print("开始执行：{}".format(script_path))  # 输出脚本开始执行信息
-        result = subprocess.run([sys.executable, script_name], cwd=folder_path, check=False)  # 使用当前 Python 解释器在目标目录执行脚本
-        if result.returncode != 0:  # 判断脚本是否执行失败
-            print("错误：{} 执行失败，返回码={}".format(script_name, result.returncode))  # 输出脚本失败信息
-            return False  # 返回执行失败
+
+        if script_name.startswith("VAB_") or "Modeling" in script_path:  # 识别 Abaqus 建模脚本
+            cmd = "abaqus cae noGUI=" + script_name  # 构造 abaqus 执行命令
+            result = subprocess.run(cmd, cwd=folder_path, check=False, shell=True, capture_output=True, text=True)  # 获取输出用于错误检查
+            if result.stdout:  # 判断是否有标准输出
+                print(result.stdout)  # 打印标准输出
+            if result.stderr:  # 判断是否有标准错误
+                print(result.stderr)  # 打印标准错误
+            
+            if "Abaqus Error: cae exited with an error" in result.stdout or "Abaqus Error: cae exited with an error" in result.stderr or result.returncode != 0:  # 判断是否发生错误
+                print("错误：{} 执行失败".format(script_name))  # 输出错误信息
+                sys.exit(1)  # 终止进程
+        elif script_name.startswith("Postprocess_"):  # 识别 Abaqus 后处理脚本
+            cmd = "abaqus python " + script_name  # 构造 abaqus python 执行命令
+            result = subprocess.run(cmd, cwd=folder_path, check=False, shell=True, capture_output=True, text=True)  # 获取输出用于错误检查
+            if result.stdout:  # 判断是否有标准输出
+                print(result.stdout)  # 打印标准输出
+            if result.stderr:  # 判断是否有标准错误
+                print(result.stderr)  # 打印标准错误
+
+            if result.returncode != 0:  # 判断是否发生错误
+                print("错误：{} 执行失败，返回码={}".format(script_name, result.returncode))  # 输出脚本失败信息
+                sys.exit(1)  # 遇到错误终止整个进程
+        else:  # 其他标准 Python 脚本
+            cmd = [sys.executable, script_name]  # 构造标准 Python 执行命令
+            result = subprocess.run(cmd, cwd=folder_path, check=False)  # 使用当前 Python 解释器在目标目录执行脚本
+            if result.returncode != 0:  # 判断脚本是否执行失败
+                print("错误：{} 执行失败，返回码={}".format(script_name, result.returncode))  # 输出脚本失败信息
+                sys.exit(1)  # 遇到错误终止整个进程
         print("完成执行：{}".format(script_name))  # 输出脚本执行完成信息
     return True  # 返回全部脚本执行成功
 
