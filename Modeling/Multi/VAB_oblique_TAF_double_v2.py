@@ -42,7 +42,7 @@ def main():
 
     geometry_cfg = {
         'H_minus_h': 200.0,  # 斜坡高度 H - h (m)
-        'i': 30.0,  # 斜坡倾角 (度)
+        'i': 45.0,  # 斜坡倾角 (度)
         'h_over_H': 0.5,  # 深度比 h / H
         'total_L': 1800.0,  # 总模型长度 (m)
         'left_flat': 1000.0,  # 上平台长度 (m)
@@ -81,7 +81,7 @@ def main():
         left_flat = geometry_cfg['left_flat']
 
         # 网格尺寸设为高度 (H - h) 的 4%
-        mesh_size = 0.08 * H_minus_h
+        mesh_size = 4
 
         cae_name = 'h{}_i{}_a{}.cae'.format(int(H_minus_h), int(geometry_cfg['i']), int(material_cfg['angle']))
 

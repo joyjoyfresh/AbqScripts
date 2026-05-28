@@ -273,17 +273,15 @@ def main():
             flat_x = flat_df_norm['x'].to_numpy()
             
             flat_pga_h_interp = np.interp(slope_x, flat_x, flat_df_norm['PGA_h'].to_numpy())
-            flat_pga_v_interp = np.interp(slope_x, flat_x, flat_df_norm['PGA_v'].to_numpy())
             
-            # TAF = slope / flat
+            # TAF = slope / flat_h (both horizontal and vertical divided by horizontal free-field)
             taf_h = np.zeros_like(slope_x)
             taf_v = np.zeros_like(slope_x)
             
             mask_h = np.abs(flat_pga_h_interp) > SAFE_DIVIDE_EPS
-            mask_v = np.abs(flat_pga_v_interp) > SAFE_DIVIDE_EPS
             
             taf_h[mask_h] = slope_df_norm['PGA_h'].to_numpy()[mask_h] / flat_pga_h_interp[mask_h]
-            taf_v[mask_v] = slope_df_norm['PGA_v'].to_numpy()[mask_v] / flat_pga_v_interp[mask_v]
+            taf_v[mask_h] = slope_df_norm['PGA_v'].to_numpy()[mask_h] / flat_pga_h_interp[mask_h]
             
             # 生成 TAF 数据表并保存 (仅保留 x 坐标与 TAF 分量)
             taf_df = pd.DataFrame({
