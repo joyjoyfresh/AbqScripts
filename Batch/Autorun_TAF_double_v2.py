@@ -9,8 +9,8 @@ import sys  # 导入系统模块用于获取 Python 解释器
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根目录
 FOLDER_PREFIX = "double-"  # 设置目标文件夹前缀
-STOP_ON_ERROR = True  # 设置出现脚本错误时是否立即停止
-DELETE_ODB_AFTER_RUN = False  # 设置每个文件夹脚本执行后是否删除 .odb 文件
+DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg",".prt"]  # 设置每个文件夹脚本执行后要删除的文件类型列表，例如 [".odb", ".lck"]。若为空则不删除。
+DELETE_FILE_TYPES = []
 
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 定义 El_Centro 文件完整路径
@@ -21,12 +21,14 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_double_v3.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_PGA_v7.py", "parameter_target": False},  # 定义后处理脚本完整路径
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Distribution_TAF_realcoords_v2.py", "parameter_target": False},  # 定义分布脚本完整路径
+    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Distribution_Multi_TAF_v2.py", "parameter_target": False},  # 定义分布脚本完整路径
 ]  # 结束脚本顺序配置定义
 
 PARAMETER_CASES = [  # 定义参数方案列表
     {"params": { "i": 30, "angle": 0}},
     {"params": { "i": 30, "angle": 15}},
+    {"params": { "i": 45, "angle": 0}},
+    {"params": { "i": 45, "angle": 15}},
     {"params": { "i": 60, "angle": 0}},
     {"params": { "i": 60, "angle": 15}},
 ]  # 结束参数方案列表定义
@@ -145,26 +147,34 @@ def run_scripts_in_folder(folder_path, run_order):  # 定义在单个目录内�
     return True  # 返回全部脚本执行成功
 
 
-def delete_odb_files_in_folder(folder_path):  # 定义删除单个目录下全部 .odb 文件的函数
-    deleted_files = []  # 初始化已删除文件路径列表
+def delete_files_in_folder(folder_path, file_types):  # 定义删除单个目录下指定类型文件的函数
+    if not file_types:  # 如果没有指定类型，则直接返回
+        return
+    normalized_types = {t.lower() if t.startswith(".") else "." + t.lower() for t in file_types}
+    deleted_files = {t: [] for t in normalized_types}  # 初始化已删除文件路径字典
     failed_files = []  # 初始化删除失败文件路径列表
+    
     for file_name in sorted(os.listdir(folder_path)):  # 遍历目录下全部文件与子目录名称
         file_path = os.path.join(folder_path, file_name)  # 组装当前条目的完整路径
         if not os.path.isfile(file_path):  # 判断当前条目是否为普通文件
             continue  # 跳过非文件条目
-        if os.path.splitext(file_name)[1].lower() != ".odb":  # 判断当前文件扩展名是否为 .odb
-            continue  # 跳过非 .odb 文件
-        try:  # 尝试删除当前 .odb 文件
-            os.remove(file_path)  # 删除当前 .odb 文件
-            deleted_files.append(file_path)  # 记录删除成功的文件路径
+        ext = os.path.splitext(file_name)[1].lower()  # 获取文件扩展名
+        if ext not in normalized_types:  # 判断当前文件扩展名是否在待删除列表中
+            continue  # 跳过非指定类型文件
+        try:  # 尝试删除当前文件
+            os.remove(file_path)  # 删除当前文件
+            deleted_files[ext].append(file_path)  # 记录删除成功的文件路径
         except OSError as exc:  # 捕获文件删除异常
             failed_files.append((file_path, str(exc)))  # 记录删除失败文件及错误信息
-    if deleted_files:  # 判断是否存在删除成功的文件
-        print("已删除 .odb 文件数量：{}".format(len(deleted_files)))  # 输出删除成功数量
-    else:  # 判断是否没有找到可删除的 .odb 文件
-        print("未找到需要删除的 .odb 文件。")  # 输出未找到 .odb 的提示
+            
+    for ext, files in sorted(deleted_files.items()):  # 遍历删除结果
+        if files:  # 判断是否存在删除成功的文件
+            print("已删除 {} 文件数量：{}".format(ext, len(files)))  # 输出删除成功数量
+        else:  # 判断为未找到可删除文件
+            print("未找到需要删除的 {} 文件。".format(ext))  # 输出未找到提示
+            
     if failed_files:  # 判断是否存在删除失败的文件
-        print("警告：以下 .odb 文件删除失败：")  # 输出删除失败提示标题
+        print("警告：以下文件删除失败：")  # 输出删除失败提示标题
         for failed_path, error_text in failed_files:  # 遍历删除失败文件信息
             print("  - {} -> {}".format(failed_path, error_text))  # 输出删除失败文件路径与错误详情
 
@@ -174,8 +184,11 @@ def main():  # 定义主函数
     if len(sys.argv) >= 2:  # 判断是否通过命令行传入根目录参数
         root_dir = sys.argv[1]  # 使用命令行传入的根目录覆盖默认值
 
+    # 构造本次运行要删除的文件类型列表
+    types_to_delete = list(DELETE_FILE_TYPES)
+
     print("目标根目录：{}".format(root_dir))  # 输出本次运行根目录
-    print(".odb 删除开关：{}".format("开启" if DELETE_ODB_AFTER_RUN else "关闭"))  # 输出本次运行的 .odb 删除开关状态
+    print("要删除的文件类型：{}".format(types_to_delete if types_to_delete else "无"))  # 输出本次运行待删除的文件类型
     source_files, missing_items, duplicate_items = build_source_files(STATIC_SOURCE_PATHS, SCRIPT_SEQUENCE)  # 根据完整路径配置构建源文件映射
     run_order = [os.path.basename(script_config["path"]) for script_config in SCRIPT_SEQUENCE]  # 按脚本完整路径解析执行顺序文件名列表
     parameter_script_candidates = [os.path.basename(script_config["path"]) for script_config in SCRIPT_SEQUENCE if script_config.get("parameter_target")]  # 收集参数替换目标脚本候选列表
@@ -233,15 +246,12 @@ def main():  # 定义主函数
         print("处理文件夹：{}".format(folder_path))  # 输出当前处理文件夹信息
         create_and_fill_folder(folder_path, source_files, parameter_script_name, params)  # 创建并填充当前文件夹并执行参数替换
         ok = run_scripts_in_folder(folder_path, run_order)  # 在当前文件夹内按顺序执行脚本
-        if DELETE_ODB_AFTER_RUN:  # 判断是否开启执行后删除 .odb 文件
-            delete_odb_files_in_folder(folder_path)  # 在当前文件夹脚本执行结束后删除该目录下全部 .odb 文件
+        if types_to_delete:  # 判断是否需要执行文件删除
+            delete_files_in_folder(folder_path, types_to_delete)  # 在当前文件夹脚本执行结束后删除该目录下指定类型的文件
         else:  # 判断为关闭删除开关时输出提示
-            print("已跳过 .odb 删除（DELETE_ODB_AFTER_RUN=False）。")  # 输出跳过删除提示
+            print("已跳过文件删除（没有指定要删除的文件类型）。")  # 输出跳过删除提示
         if not ok:  # 判断当前文件夹是否执行失败
             failed_folders.append(folder_path)  # 记录失败文件夹路径
-            if STOP_ON_ERROR:  # 判断是否配置为失败即停止
-                print("检测到失败，按配置停止后续文件夹处理。")  # 输出停止处理提示
-                break  # 跳出循环结束批处理
 
     print("\n==============================")  # 输出结束分隔线
     if failed_folders:  # 判断是否存在失败文件夹
