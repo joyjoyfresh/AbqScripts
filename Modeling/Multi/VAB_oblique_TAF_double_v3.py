@@ -51,8 +51,8 @@ def main():
 
     job_cfg = {
         'variables': ('U', 'V', 'A'),  # 设置场输出变量
-        'frequency': 1,  # 设置输出频率（由1改为5以减少磁盘I/O瓶颈）
-        'num_cpus': 4,  # 设置并行 CPU 数量
+        'frequency': 1,  # 设置输出频率
+        'num_cpus': 8,  # 设置并行 CPU 数量
         'memory_percent': 90,  # 设置作业内存百分比
     }
 
@@ -1323,8 +1323,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
             getMemoryFromAnalysis=True, explicitPrecision=SINGLE,
             nodalOutputPrecision=SINGLE, echoPrint=OFF, modelPrint=OFF,
             contactPrint=OFF, historyPrint=OFF,
-            numCpus=num_cpus, numDomains=num_cpus,
-            multiprocessingMode=MPI, numGPUs=0)
+            numCpus=num_cpus, numGPUs=0)
 
     mdb.save()
     log_step(logger, '%s作业已提交，正在等待完成...', job_name)
