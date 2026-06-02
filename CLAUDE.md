@@ -56,10 +56,6 @@
 - `Autorun_TAF_*.py` — TAF 相关批处理
 - `.bat` 文件 — 交互式选择器（`Python_selectrun.bat`）和自动运行器（`Python_autorun.bat`）
 
-### 节点（`Nodes/`）
-
-用于读取节点坐标和从 ODB 或 CAE 模型创建节点集的工具程序。
-
 ## 编码约定
 
 **每行必须有中文注释**说明其作用。这由 `.github/copilot-instructions.md` 强制执行。注释简洁，尽可能内联，对于结构行（空行、花括号）放在前一行。
