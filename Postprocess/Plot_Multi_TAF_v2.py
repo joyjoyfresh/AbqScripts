@@ -13,24 +13,34 @@ import matplotlib
 matplotlib.use('Agg')  # 无界面模式
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import matplotlib.ticker as mticker  # 导入刻度定位与格式化模块
 
 # ==============================================================================
 #  配置与常量
 # ==============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 当前脚本目录
 TAF_GLOB_PATTERN = 'TAF-*.csv'  # TAF 数据表文件模式
-VS_OVERLYING = 1600.0  # 覆盖层剪切波速 (m/s)，用于由 Hz 估算 a0
+CUSTOM_YLIM = {'horizontal': (0, 2), 'vertical': (0, 1)}  # 自定义纵轴显示范围。可为 None (自适应)，元组 (min, max)，或字典分别设定 {'horizontal': (min, max), 'vertical': (min, max)}
+#CUSTOM_YLIM = None
+TARGET_INTERVALS = 5  # 纵轴刻度区间划分数量（即把上下边界均划分为多少个小刻度区间）
 
 # 默认坡体几何参数（当目录下不存在 PGA-*-slope.csv 文件时作为兜底使用）
 DEFAULT_X_CREST = 800.0  # 默认坡顶 x 坐标
 DEFAULT_X_TOE = 1000.0   # 默认坡脚 x 坐标
 DEFAULT_H_VAL = 200.0     # 默认坡高 h
 
-# 曲线样式映射（按频率/a0升序循环使用）
+# 曲线样式映射（按频率升序循环使用）
 CURVE_STYLES = [
     {'color': '#2ca02c', 'linestyle': '--', 'linewidth': 1.5},  # 第一条曲线: 绿色虚线
     {'color': '#1f77b4', 'linestyle': '-.', 'linewidth': 1.5},  # 第二条曲线: 蓝色点划线
     {'color': '#d62728', 'linestyle': '-', 'linewidth': 1.5},   # 第三条曲线: 红色实线
+    {'color': '#9467bd', 'linestyle': ':', 'linewidth': 1.5},   # 第四条曲线: 紫色点线
+    {'color': '#ff7f0e', 'linestyle': '-', 'linewidth': 1.5},   # 第五条曲线: 橙色实线
+    {'color': '#8c564b', 'linestyle': '--', 'linewidth': 1.5},  # 第六条曲线: 棕色虚线
+    {'color': '#e377c2', 'linestyle': '-.', 'linewidth': 1.5},  # 第七条曲线: 粉色点划线
+    {'color': '#7f7f7f', 'linestyle': ':', 'linewidth': 1.5},   # 第八条曲线: 灰色点线
+    {'color': '#17becf', 'linestyle': '-', 'linewidth': 1.5},   # 第九条曲线: 青色实线
+    {'color': '#bcbd22', 'linestyle': '--', 'linewidth': 1.5},  # 第十条曲线: 黄绿色虚线
 ]
 
 # ==============================================================================
@@ -86,29 +96,18 @@ def get_incident_angle(cwd):
         
     return 0.0
 
-def parse_wave_info(core_name, h_val):
-    """
-    从 CSV 文件名的核心主干中解析出基础波名、a0 数值（排序键）及图例展示标签（即完整波名）。
-    """
-    # 1. 优先解析是否显式包含 a0
-    match_a0 = re.search(r'[_-]a0[_-](?P<val>\d+(?:\.\d+)?)', core_name, re.IGNORECASE)
-    if match_a0:
-        a0_val = float(match_a0.group('val'))
-        base_name = core_name[:match_a0.start()].strip('_-')
-        return base_name, a0_val, core_name
 
-    # 2. 尝试解析是否包含 Hz
-    match_hz = re.search(r'[_-](?P<val>\d+(?:\.\d+)?)Hz', core_name, re.IGNORECASE)
-    if match_hz:
-        freq = float(match_hz.group('val'))
-        base_name = core_name[:match_hz.start()].strip('_-')
-        if h_val is not None and h_val > 1.0:
-            a0_val = (2.0 * freq * h_val) / VS_OVERLYING
-        else:
-            a0_val = freq / 4.0
-        return base_name, a0_val, core_name
+def parse_wave_info(core_name):  # 解析文件名波形参数以供分组与排序的辅助函数
+    """
+    从文件名中提取基础波名（用于同一图表内分组绘制）和频率数值（用于排序）。
+    """
+    match_hz = re.search(r'[_-](?P<val>\d+(?:\.\d+)?)Hz', core_name, re.IGNORECASE)  # 正则匹配文件名中的频率字段
+    if match_hz:  # 若提取成功
+        freq = float(match_hz.group('val'))  # 提取频率值作为排序键
+        base_name = core_name[:match_hz.start()].strip('_-')  # 提取不含频率的基础波名作为分组键
+        return base_name, freq  # 返回分组波名与频率排序键
+    return core_name, 0.0  # 兜底返回完整名称与默认排序键 0.0
 
-    return core_name, 0.0, core_name
 
 def style_axes(ax):
     """设置刻度朝内、四周框线、四周刻度及点线网格。"""
@@ -141,8 +140,8 @@ def plot_taf_curves(taf_records, incident_angle, output_dir):
     for motion_name, group_df in grouped:
         print(f"\n>>> 正在为波形 [{motion_name}] 绘制对比图...")
         
-        # 按 a0 排序键(反映频率)排序曲线
-        sorted_group = group_df.sort_values(by='a0').reset_index(drop=True)
+        # 按频率排序键对曲线进行升序排序
+        sorted_group = group_df.sort_values(by='freq').reset_index(drop=True)  # 根据频率字段对分组记录进行升序排序
         
         # 获取第一条曲线的斜坡几何定位（所有曲线几何应一致）
         x_crest = sorted_group.loc[0, 'x_crest']
@@ -170,32 +169,44 @@ def plot_taf_curves(taf_records, incident_angle, output_dir):
             tick_step = 600.0 if abs(total_L - 1800.0) < 50.0 else (total_L / 3.0)
             ax.set_xticks(np.arange(0, total_L + 1.0, tick_step))
             
-            # 获取当前所有 TAF 数据的最大最小值，保证 y 轴显示美观
-            all_y_values = np.concatenate([r['taf_h'] if direction == 'horizontal' else r['taf_v'] for _, r in sorted_group.iterrows()])
-            min_y = all_y_values.min()
-            max_y = all_y_values.max()
-            
-            # 自适应 y 轴刻度：根据数据范围自动选取合适步长（目标 4~8 个刻度区间）
-            y_span = max_y - min_y
-            TARGET_INTERVALS = 6  # 期望划分的刻度区间数
-            raw_step = y_span / TARGET_INTERVALS if y_span > 1e-6 else 1.0
-            # 候选"整洁"步长列表（量级自动扩展）
-            magnitude = 10.0 ** np.floor(np.log10(raw_step))
-            nice_steps = [0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0]
-            y_step = magnitude * min(nice_steps, key=lambda s: abs(s * magnitude - raw_step))
-            
-            ylim_min = max(0.0, np.floor(min_y / y_step) * y_step)
-            # 曲线最多占纵向总高度的 4/5，顶部留 1/5 空白给图例
-            # 推导: (max_y - ylim_min) / (ylim_max - ylim_min) <= 4/5
-            #   => ylim_max >= ylim_min + (max_y - ylim_min) * 5/4
-            ylim_max_needed = ylim_min + (max_y - ylim_min) * (5.0 / 4.0)
-            ylim_max = np.ceil(ylim_max_needed / y_step) * y_step
-            # 再次确认上限严格大于 max_y（应对浮点误差）
-            if ylim_max <= max_y:
-                ylim_max += y_step
+            # 优先检查并读取自定义纵轴范围配置
+            custom_lim = None  # 初始化自定义纵轴限制变量
+            if isinstance(CUSTOM_YLIM, tuple) and len(CUSTOM_YLIM) == 2:  # 判断是否为通用的二元元组配置
+                custom_lim = CUSTOM_YLIM  # 直接采用通用纵轴范围配置
+            elif isinstance(CUSTOM_YLIM, dict):  # 判断是否为字典分量配置方式
+                custom_lim = CUSTOM_YLIM.get(direction)  # 根据当前绘制方向提取对应的配置
+                
+            if custom_lim is not None:  # 若设定了有效的自定义纵轴范围
+                ylim_min, ylim_max = custom_lim  # 解包自定义的纵轴下限与上限
+                y_span = ylim_max - ylim_min  # 计算纵轴数值的跨度范围
+                y_step = y_span / TARGET_INTERVALS if y_span > 1e-6 else 1.0  # 直接计算均分步长以精准匹配配置的区间数
+            else:  # 若未设定自定义范围，则启用自适应估算逻辑
+                # 获取当前所有 TAF 数据的最大最小值，保证 y 轴显示美观
+                all_y_values = np.concatenate([r['taf_h'] if direction == 'horizontal' else r['taf_v'] for _, r in sorted_group.iterrows()])  # 拼接各个频率曲线的 y 数据点
+                min_y = all_y_values.min()  # 取全部曲线的最小值
+                max_y = all_y_values.max()  # 取全部曲线的最大值
+                
+                # 自适应 y 轴刻度：根据数据范围自动选取合适步长（目标 4~8 个刻度区间）
+                y_span = max_y - min_y  # 计算数据的实际变化跨度
+                raw_step = y_span / TARGET_INTERVALS if y_span > 1e-6 else 1.0  # 使用全局配置计算未圆整的基准步长
+                # 候选"整洁"步长列表（量级自动扩展）
+                magnitude = 10.0 ** np.floor(np.log10(raw_step))  # 确定当前步长的数量级
+                nice_steps = [0.1, 0.2, 0.25, 0.5, 1.0, 2.0, 2.5, 5.0, 10.0]  # 候选的美观刻度因子
+                y_step = magnitude * min(nice_steps, key=lambda s: abs(s * magnitude - raw_step))  # 精准匹配最合适的圆整刻度步长
+                
+                ylim_min = max(0.0, np.floor(min_y / y_step) * y_step)  # 计算自适应的纵轴显示下限
+                # 曲线最多占纵向总高度的 4/5，顶部留 1/5 空白给图例
+                # 推导: (max_y - ylim_min) / (ylim_max - ylim_min) <= 4/5
+                #   => ylim_max >= ylim_min + (max_y - ylim_min) * 5/4
+                ylim_max_needed = ylim_min + (max_y - ylim_min) * (5.0 / 4.0)  # 估算所需的纵轴上限空间
+                ylim_max = np.ceil(ylim_max_needed / y_step) * y_step  # 圆整得到自适应的纵轴显示上限
+                # 再次确认上限严格大于 max_y（应对浮点误差）
+                if ylim_max <= max_y:  # 如果圆整后的上限仍没有完全包含最大值
+                    ylim_max += y_step  # 额外增加一个步长的高度以确保美观
                 
             ax.set_ylim(ylim_min, ylim_max)
             ax.set_yticks(np.arange(ylim_min, ylim_max + 1e-9, y_step))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.1f'))  # 设置纵轴刻度标签显示为1位小数
             
             # 绘制坡顶与坡脚虚线并在侧上角标注 #1 与 #2
             ax.axvline(x=x_crest, color='black', linestyle='--', linewidth=1.0)
@@ -207,11 +218,11 @@ def plot_taf_curves(taf_records, incident_angle, output_dir):
             ax.text(x_crest - offset_x, text_y, '#1', fontsize=11, fontproperties=EN_FONT, va='top', ha='right')
             ax.text(x_toe - offset_x, text_y, '#2', fontsize=11, fontproperties=EN_FONT, va='top', ha='right')
 
-            # 设置轴标签与标题 (Times New Roman Font)
-            ax.set_xlabel('Surface Receiver Location(m)', fontsize=13, fontproperties=EN_FONT)
-            dir_label = 'Horizontal' if direction == 'horizontal' else 'Vertical'
-            ax.set_ylabel(f'{dir_label} TAF', fontsize=13, fontproperties=EN_FONT)
-            ax.set_title(r'$\theta_s = %g^\circ$' % incident_angle, fontsize=14, fontproperties=EN_FONT, pad=10)
+            # 设置轴标签与标题 (中文字体支持)
+            ax.set_xlabel('地表测点位置 (m)', fontsize=13, fontproperties=CN_FONT)  # 设置横坐标标签为中文“地表测点位置 (m)”
+            dir_label = '水平向' if direction == 'horizontal' else '竖向'  # 根据绘制方向确定中文前缀
+            ax.set_ylabel(f'{dir_label} TAF', fontsize=13, fontproperties=CN_FONT)  # 设置纵坐标标签为中文“水平向/竖向 TAF”
+            ax.set_title(r'入射角 $\theta_s = %g^\circ$' % incident_angle, fontsize=14, fontproperties=CN_FONT, pad=10)  # 设置标题为中文“入射角”并结合 LaTeX 数学公式形式
             
             # 放置图例：左上角，带有细黑边框的白色背景
             ax.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='black', 
@@ -305,19 +316,20 @@ def main():
                 h_val = DEFAULT_H_VAL
                 print(f"  未找到 PGA 原始文件，将使用预设几何参数: h={h_val:.2f}m, 坡顶x={x_crest:.2f}m, 坡脚x={x_toe:.2f}m")
                 
-            # 解析波形参数 (频率/a0与波名图例)
-            base_motion, a0_val, legend_label = parse_wave_info(base_key, h_val)
+            # 解析波形参数 (以不含频率的波名为分组键，以完整波名为图例)
+            base_motion, freq_val = parse_wave_info(base_key)  # 解析获取用于分组的基础波名和用于排序的频率值
+            legend_label = base_key  # 图例名称直接使用包含频率的完整波名
             
-            taf_records.append({
-                'base_motion': base_motion.lower(),
-                'a0': a0_val,
-                'legend': legend_label,
-                'x': slope_x,
-                'taf_h': taf_h,
-                'taf_v': taf_v,
-                'x_crest': x_crest,
-                'x_toe': x_toe,
-                'total_L': total_L
+            taf_records.append({  # 将记录追加到列表中
+                'base_motion': base_motion.lower(),  # 转为小写的基础波名
+                'freq': freq_val,  # 频率数值作为后续排序键
+                'legend': legend_label,  # 图例展示标签
+                'x': slope_x,  # 坡面节点水平绝对坐标 x
+                'taf_h': taf_h,  # 水平向地形放大因子
+                'taf_v': taf_v,  # 竖向地形放大因子
+                'x_crest': x_crest,  # 坡顶绝对坐标
+                'x_toe': x_toe,  # 坡脚绝对坐标
+                'total_L': total_L  # 坡面总长度
             })
             
         except Exception as e:
