@@ -20,7 +20,7 @@ import matplotlib.ticker as mticker  # 导入刻度定位与格式化模块
 # ==============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 当前脚本目录
 TAF_GLOB_PATTERN = 'TAF-*.csv'  # TAF 数据表文件模式
-CUSTOM_YLIM = {'horizontal': (0, 2), 'vertical': (0, 1)}  # 自定义纵轴显示范围。可为 None (自适应)，元组 (min, max)，或字典分别设定 {'horizontal': (min, max), 'vertical': (min, max)}
+CUSTOM_YLIM = {'horizontal': (0.5, 2), 'vertical': (0, 1)}  # 自定义纵轴显示范围。可为 None (自适应)，元组 (min, max)，或字典分别设定 {'horizontal': (min, max), 'vertical': (min, max)}
 #CUSTOM_YLIM = None  # 屏蔽的默认自适应纵轴配置，可用于切换为自适应模式
 TARGET_INTERVALS = {'horizontal': 3, 'vertical': 5}  # 纵轴刻度区间划分数量。支持字典为水平/竖向图分别设置，也支持单个整数统一设置
 
