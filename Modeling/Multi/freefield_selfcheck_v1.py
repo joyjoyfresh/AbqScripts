@@ -143,16 +143,86 @@ def run_selfcheck():  # 定义自检主函数
     print('地表 |τ_xy| / 特征应力 (应≈0):     %.3e' % (np.max(np.abs(sxy_tb)) / stress_scale))  # 打印自由面剪应力
     print('斜入射结果全部有限 (应 True):      %s' % finite_ok)  # 打印有限性
 
+    # ===================== 检验 C：速度基线校正（#4 回归） =====================
+    print('\n========== C. 速度基线校正回归（#4） ==========')  # 打印分节标题
+    # 构造一段"干净"加速度（双窗正弦），叠加直流零偏 + 线性漂移，模拟真实记录的基线问题
+    tc = np.arange(n) * dt  # 构造时间轴
+    acc_clean = np.sin(2.0 * math.pi * 1.5 * tc) * np.exp(-((tc - 1.0) / 0.5) ** 2)  # 干净加速度（带高斯窗）
+    acc_bad = acc_clean + 0.05 + 0.02 * tc  # 叠加 0.05 直流零偏与线性漂移
+    vel_corr, slope = eng._integrate_acc_to_velocity(acc_bad, dt, tc)  # 调用 v6 同一函数做积分+基线校正
+    # 对照：不做任何校正的朴素积分
+    vel_naive = np.zeros_like(acc_bad)  # 初始化朴素速度
+    vel_naive[1:] = np.cumsum((acc_bad[:-1] + acc_bad[1:]) / 2 * dt)  # 朴素梯形积分（无校正）
+    vscale = np.max(np.abs(vel_corr)) + 1e-30  # 速度特征量级（防零除）
+    naive_drift = abs(vel_naive[-1] - vel_naive[0]) / (np.max(np.abs(vel_naive)) + 1e-30)  # 朴素积分的净漂移占比
+    corr_resid_slope = abs(np.polyfit(tc, vel_corr, 1)[0])  # 校正后残余线性斜率
+    corr_mean = abs(np.mean(vel_corr)) / vscale  # 校正后速度均值占比
+    print('扣除的速度趋势斜率:               %.4e' % slope)  # 打印被扣除的趋势斜率
+    print('朴素积分净漂移/峰值 (越大越坏):    %.3f' % naive_drift)  # 打印朴素积分漂移
+    print('校正后残余斜率 (应≈0):            %.3e' % corr_resid_slope)  # 打印残余斜率
+    print('校正后速度均值/峰值 (应≈0):        %.3e' % corr_mean)  # 打印残余均值
+
+    # ===================== 检验 D：底边覆盖层厚度按 x 取值（#2 回归） =====================
+    print('\n========== D. 底边覆盖层厚度修正回归（#2） ==========')  # 打印分节标题
+    # 需要软/硬两层对比，厚度差异才会通过"层共振"体现在自由场里
+    mat_ov = eng._compute_material_params(1000.0, vv, rho)  # 覆盖层取更软材料 cs=1000
+    # 斜坡几何：坡顶平台高 400（软层厚 200），坡脚平台高 300（软层薄 100）
+    bedrock_t = 200.0  # 基岩厚度
+    H_up = 400.0  # 坡顶平台地表高度
+    H_lo = 300.0  # 坡脚平台地表高度
+    left_flat = 1000.0  # 上平台长度
+    w_slope = 200.0  # 坡面水平长度
+    total_L = 1800.0  # 模型总长
+    x_corner = total_L  # 右下角点横坐标（位于坡脚平台正下方）
+
+    # D-1：几何函数 _surface_y_at 三点检查
+    sy_top = eng._surface_y_at(0.0, H_up, H_lo, left_flat, w_slope)  # 坡顶平台地表
+    sy_toe = eng._surface_y_at(total_L, H_up, H_lo, left_flat, w_slope)  # 坡脚平台地表
+    sy_mid = eng._surface_y_at(left_flat + w_slope / 2.0, H_up, H_lo, left_flat, w_slope)  # 坡面中点地表
+    geom_ok = (abs(sy_top - H_up) < 1e-9) and (abs(sy_toe - H_lo) < 1e-9) and \
+              (abs(sy_mid - 0.5 * (H_up + H_lo)) < 1e-9)  # 三点是否符合预期
+    print('地表高度 坡顶/坡脚/坡中: %.1f / %.1f / %.1f (期望 %.1f / %.1f / %.1f)' %
+          (sy_top, sy_toe, sy_mid, H_up, H_lo, 0.5 * (H_up + H_lo)))  # 打印三点高度
+
+    # D-2：右下角点自由场一致性（取剪应力时程对比）
+    def _corner_sxy(h_ov):  # 定义按给定覆盖层厚度计算角点剪应力时程的辅助函数
+        ff = eng._compute_freefield_at_node(  # 计算右下角点自由场
+            y_target=0.0, x_target=x_corner,  # 角点位于底边 y=0
+            mat_bedrock=mat, mat_overlying=mat_ov,  # 硬基岩 + 软覆盖层
+            h_bedrock=bedrock_t, h_overlying=h_ov,  # 基岩厚 + 给定覆盖层厚
+            y_bottom=0.0, p_horiz=p_horiz,  # 底部与（垂直入射）慢度
+            vel_freq=vel_freq, freq_arr=freq_arr, dt=dt, N_fft=n_fft)  # 频域输入
+        return ff['sxy'][:n_orig]  # 返回剪应力时程
+
+    h_right = H_lo - bedrock_t  # 右边界所用覆盖层厚度（薄，=100）
+    h_old_bottom = H_up - bedrock_t  # 旧做法：底边一刀切用最厚（=200）
+    h_fix_bottom = eng._surface_y_at(x_corner, H_up, H_lo, left_flat, w_slope) - bedrock_t  # 修正后底边按 x 取厚度
+    sxy_right = _corner_sxy(h_right)  # 右边界视角的角点剪应力
+    sxy_old = _corner_sxy(h_old_bottom)  # 旧底边视角的角点剪应力
+    sxy_fix = _corner_sxy(h_fix_bottom)  # 修正底边视角的角点剪应力
+    scale = np.max(np.abs(sxy_right)) + 1e-30  # 参考量级（防零除）
+    rel_old = np.max(np.abs(sxy_old - sxy_right)) / scale  # 旧做法与右边界的不一致度
+    rel_fix = np.max(np.abs(sxy_fix - sxy_right)) / scale  # 修正后与右边界的不一致度
+    print('修正后底边厚度 = %.1f (右边界厚度 = %.1f, 旧底边 = %.1f)' % (h_fix_bottom, h_right, h_old_bottom))  # 打印厚度对比
+    print('旧做法 角点不一致度 (越大越坏): %.3f' % rel_old)  # 打印旧不一致度
+    print('修正后 角点不一致度 (应≈0):     %.3e' % rel_fix)  # 打印修正后不一致度
+
     # ===================== 判定 =====================
     print('\n========== 判定 ==========')  # 打印判定标题
     ok_amp = abs(amp_ratio - 2.0) < 0.05  # 放大比是否接近 2
     ok_vy = (np.max(np.abs(vy_top)) / np.max(np.abs(vx_top))) < 1e-3  # 竖向是否近零
     ok_free = (np.max(np.abs(syy_top)) / stress_scale < 1e-3) and \
               (np.max(np.abs(sxy_top)) / stress_scale < 1e-3)  # 自由面应力是否近零
+    ok_baseline = (corr_resid_slope < 1e-6) and (corr_mean < 1e-9) and (naive_drift > 0.1)  # 校正有效且朴素确有漂移
+    ok_geom = geom_ok  # 几何函数三点是否正确
+    ok_consist = (rel_fix < 1e-9) and (rel_old > 0.01)  # 修正后一致且旧做法确有不一致
     print('A1 地表放大=2:        %s' % ('通过' if ok_amp else '不通过'))  # 打印放大判定
     print('A2 竖向≈0:           %s' % ('通过' if ok_vy else '不通过'))  # 打印竖向判定
     print('A3 自由面应力≈0:      %s' % ('通过' if ok_free else '不通过'))  # 打印自由面判定
     print('B  斜入射自由面/有限:  %s' % ('通过' if finite_ok else '不通过'))  # 打印斜入射判定
+    print('C  速度基线校正:       %s' % ('通过' if ok_baseline else '不通过'))  # 打印基线校正判定
+    print('D1 地表高度函数:      %s' % ('通过' if ok_geom else '不通过'))  # 打印几何函数判定
+    print('D2 底边厚度一致性:    %s' % ('通过' if ok_consist else '不通过'))  # 打印底边一致性判定
 
 
 if __name__ == '__main__':  # 判断是否直接运行

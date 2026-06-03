@@ -228,6 +228,38 @@ def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
     return {'GG': GG, 'EE': EE, 'lam': lam, 'cp': cp, 'cs': cs, 'vv': vv, 'density': density}  # 返回材料参数字典
 
 
+def _integrate_acc_to_velocity(acc, dt, time_arr):  # 定义加速度积分并基线校正的纯数值函数
+    """加速度梯形积分为速度并做基线校正（去零偏 + 线性去趋势），抑制低频漂移。
+
+    acc      : 加速度时程数组
+    dt       : 时间步长 (s)
+    time_arr : 与 acc 对应的时间轴数组
+    返回 (vel, slope)：校正后的速度数组与被扣除的速度线性趋势斜率
+    """
+    acc = acc - np.mean(acc)  # 去除加速度零频偏移，避免积分后速度产生线性漂移
+    vel = np.zeros_like(acc)  # 初始化速度数组
+    vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 通过梯形积分计算速度
+    trend = np.polyfit(time_arr, vel, 1)  # 最小二乘拟合速度的线性趋势项
+    vel = vel - (trend[0] * time_arr + trend[1])  # 扣除线性趋势完成基线校正（位移=速度/(iω) 会放大低频误差）
+    return vel, trend[0]  # 返回校正后速度与趋势斜率
+
+
+def _surface_y_at(x, H_upper, H_lower, left_flat, w_slope):  # 定义按横坐标计算地表高度的纯函数
+    """返回横坐标 x 处的地表 y 坐标（用于底边节点取其正上方柱子的覆盖层厚度）。
+
+    几何：坡顶平台高 H_upper，坡脚平台高 H_lower，二者之间为线性坡面。
+    x <= left_flat            : 坡顶平台，地表 = H_upper
+    left_flat < x <= +w_slope : 坡面段，地表沿 x 从 H_upper 线性降到 H_lower
+    x  > left_flat + w_slope  : 坡脚平台，地表 = H_lower
+    """
+    w = max(w_slope, 1e-9)  # 防止除零（平坦模型 w_slope 取极小值）
+    if x <= left_flat:  # 判断是否位于坡顶平台
+        return H_upper  # 返回坡顶平台高度
+    if x <= left_flat + w:  # 判断是否位于坡面段
+        return H_upper - (x - left_flat) * (H_upper - H_lower) / w  # 返回坡面线性过渡高度
+    return H_lower  # 其余位于坡脚平台，返回坡脚高度
+
+
 def _build_model_name_from_record(acc_file, scene_tag):  # 定义模型命名函数
     """按"记录名-场景名"规则生成模型名。"""  # 说明函数用途
     record_name = os.path.splitext(os.path.basename(acc_file))[0]  # 提取不带扩展名的记录名
@@ -949,7 +981,12 @@ def _compute_freefield_at_node(y_target, x_target, mat_bedrock, mat_overlying,
     """
     用传播矩阵法计算单个节点的自由场位移、速度和应力时程。
 
-    vel_freq  : 输入速度时程（底部入射 SV 幅值）的频谱（复数数组，长度 N_fft//2+1）
+    [输入幅值约定（#5）] vel_freq 被视为"基底入射上行 SV 波"幅值 E 的频谱。
+      故自由岩面运动 = 2E（自由面效应），即模型地表 ≈ 2×输入记录，属正确物理。
+      本项目 TAF = PGA_slope / PGA_flat 相对平坦自由场取比值，线性分析下该归一化
+      在比值中精确抵消，对 TAF 无影响；仅当引用"绝对 PGA"时需按 E / 2E 约定换算。
+
+    vel_freq  : 输入速度时程（基底入射 SV 波幅值 E）的频谱（复数数组，长度 N_fft//2+1）
     freq_arr  : 对应的频率数组 (Hz)
     p_horiz   : 水平慢度 (s/m)
     h_overlying: 当前边界位置（左/右边界）对应的覆盖层厚度
@@ -1186,6 +1223,12 @@ def VAB_oblique(angle,
     log_step(logger, '%s 水平慢度 p = %.8f s/m', model_name, p_horiz)  # 记录水平慢度
 
     # ============ 读取加速度时程并积分 ============
+    # [输入幅值约定（#5）] 输入加速度记录积分得到的速度，被当作"基底入射上行 SV 波"
+    #   幅值 E（见 _compute_freefield_at_node）。自由岩面对应 2E（自由面效应），
+    #   故模型地表运动 ≈ 2×输入记录，属正确物理而非误差。
+    #   TAF = PGA_slope / PGA_flat 相对平坦自由场取比值，线性分析下此归一化在比值中
+    #   抵消、对 TAF 无影响；仅"绝对 PGA"引用时需按 E / 2E 约定换算（如视记录为
+    #   基岩露头 2E，则应取入射 = 记录/2）。当前实现按"记录 = 入射波 E"。
     if not acc_file:  # 判断加速度文件是否为空
         raise ValueError('acc_file 不能为空')  # 抛出参数缺失异常
     ACC = np.loadtxt(acc_file)  # 读取加速度时程
@@ -1198,12 +1241,8 @@ def VAB_oblique(angle,
         raise ValueError('加速度 dt 必须 > 0')  # 抛出步长异常
 
     # 积分得到速度时程（梯形积分 + 基线校正，抑制低频漂移）
-    acc = acc - np.mean(acc)  # 去除加速度零频偏移，避免积分后速度产生线性漂移
-    vel = np.zeros_like(acc)  # 初始化速度数组
-    vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 通过梯形积分计算速度
-    _vel_trend = np.polyfit(time_arr, vel, 1)  # 最小二乘拟合速度的线性趋势项
-    vel = vel - (_vel_trend[0] * time_arr + _vel_trend[1])  # 扣除线性趋势完成基线校正（位移=速度/(iω) 会放大低频误差）
-    log_step(logger, '%s 速度基线校正完成: 去趋势斜率=%.3e', model_name, _vel_trend[0])  # 记录基线校正日志
+    vel, _vel_slope = _integrate_acc_to_velocity(acc, dt, time_arr)  # 调用纯函数完成积分与基线校正
+    log_step(logger, '%s 速度基线校正完成: 去趋势斜率=%.3e', model_name, _vel_slope)  # 记录基线校正日志
 
     N_orig = len(vel)  # 原始速度时程长度
 
@@ -1250,8 +1289,9 @@ def VAB_oblique(angle,
             h_ov_local = max(0.0, ymax_l - bedrock_thickness)  # 左边界覆盖层厚度
         elif prefix == 'r':  # 右边界
             h_ov_local = max(0.0, ymax_r - bedrock_thickness)  # 右边界覆盖层厚度
-        else:  # 底边界
-            h_ov_local = max(0.0, ymax - bedrock_thickness)  # 底边界覆盖层厚度
+        else:  # 底边界（v6 #2 修正：按节点 x 取其正上方柱子的厚度，而非一刀切用最厚）
+            surf_y = _surface_y_at(x0, H_upper, H_lower, left_flat, w_slope)  # 该底节点正上方地表高度
+            h_ov_local = max(0.0, surf_y - bedrock_thickness)  # 对应覆盖层厚度（坡顶侧厚、坡脚侧薄、坡面过渡）
 
         h_br_local = bedrock_thickness  # 基岩层厚度（固定）
 
@@ -1308,6 +1348,12 @@ def VAB_oblique(angle,
         field_data['{}-{}-fx'.format(node_id, prefix)] = fx_arr  # 缓存 x 向力时程
         field_data['{}-{}-fy'.format(node_id, prefix)] = fy_arr  # 缓存 y 向力时程
 
+    # 角点处理说明（v6）：左下/右下角点同时属于侧边界与底边界两个节点集，
+    # 故会分别在两遍中各计算一次等效力（面力 + 弹簧 + 阻尼）并叠加。
+    # 这是粘弹性人工边界在角点的标准且正确处理：角点形函数支撑横跨侧边与底边
+    # 两个边界单元，等效力 = ∮(σ·n)·N_i dΓ 本就应叠加两段（法向不同）的贡献；
+    # Abaqus 中同节点多个 ConcentratedForce 相加、多个 SpringDashpotToGround 并联相加。
+    # 因此此处不做折半，叠加即为正确结果（折半反而引入误差）。
     # 逐边界逐节点计算等效节点力
     for boundary in BOUNDARY_SEQUENCE:  # 遍历每个边界
         nd = boundary_node_data[boundary]  # 获取当前边界的节点数据
