@@ -18,3 +18,6 @@ build/
 .vscode/
 *.swp
 *.swo
+
+# PDF 文件
+*.pdf
