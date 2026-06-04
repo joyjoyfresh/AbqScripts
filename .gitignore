@@ -21,3 +21,6 @@ build/
 
 # PDF 文件
 *.pdf
+
+# 自定义
+test/

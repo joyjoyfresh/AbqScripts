@@ -3,16 +3,16 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
 set "PSHELPER=%~dp0Delete_filetype_helper.ps1"
-set "EXTS_DEFAULT=inp odb jnl"
+set "EXTS_DEFAULT=inp odb jnl msg prt dat sta sim com"
 set "EXTS_INPUT="
 
-echo Default extensions: .inp  .odb  .jnl
+echo Default extensions: .inp  .odb  .jnl  .msg  .prt  .dat  .sta  .sim  .com
 echo Leave blank to use defaults, or enter space-separated extensions (e.g.: odb sta msg):
 set /p "EXTS_INPUT=Extensions to delete: "
 
 if not defined EXTS_INPUT (
     set "EXTS_INPUT=%EXTS_DEFAULT%"
-    echo Using defaults: .inp  .odb  .jnl
+    echo Using defaults: .inp  .odb  .jnl  .msg  .prt  .dat  .sta  .sim  .com
 )
 
 rem Strip leading dots from each extension

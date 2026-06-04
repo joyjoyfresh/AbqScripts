@@ -22,7 +22,7 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_double_v5.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
+    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_double_v7.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_PGA_v7.py", "parameter_target": False},  # 定义后处理脚本完整路径
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Compute_Multi_TAF_v1.py", "parameter_target": False},  # 定义分布脚本完整路径
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Plot_Multi_TAF_v3.py", "parameter_target": False},  # 定义分布脚本完整路径

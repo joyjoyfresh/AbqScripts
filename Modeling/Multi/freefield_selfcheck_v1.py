@@ -34,7 +34,7 @@ def _load_engine():  # 定义加载 v6 自由场引擎的函数
     here = os.path.dirname(os.path.abspath(__file__))  # 取当前脚本所在目录
     if here not in sys.path:  # 判断目录是否已在搜索路径中
         sys.path.insert(0, here)  # 将目录加入模块搜索路径
-    mod = importlib.import_module('VAB_oblique_TAF_double_v6')  # 动态导入 v6 模块
+    mod = importlib.import_module('VAB_oblique_TAF_double_v7')  # 动态导入 v7 模块（纯物理函数与 v6 一致）
     return mod  # 返回模块对象
 
 
@@ -207,6 +207,67 @@ def run_selfcheck():  # 定义自检主函数
     print('旧做法 角点不一致度 (越大越坏): %.3f' % rel_old)  # 打印旧不一致度
     print('修正后 角点不一致度 (应≈0):     %.3e' % rel_fix)  # 打印修正后不一致度
 
+    # ===================== 检验 E：v7 重构等价性（建模层行为不变） =====================
+    print('\n========== E. v7 重构等价性（建模层） ==========')  # 打印分节标题
+    # E-1：make_geometry 派生量与公式一致
+    g = eng.make_geometry(total_L=1800.0, H_minus_h=200.0, i=45.0,
+                          h_over_H=0.5, left_flat=1000.0, bedrock_thickness=200.0)  # 构建几何对象
+    geom_ok2 = (abs(g.H - 400.0) < 1e-9 and abs(g.h - 200.0) < 1e-9 and
+                abs(g.H_upper - 600.0) < 1e-9 and abs(g.H_lower - 400.0) < 1e-9 and
+                abs(g.H_flat - 600.0) < 1e-9 and abs(g.w_slope - 200.0) < 1e-9)  # 校验派生量
+    print('make_geometry 派生量 (H/h/上/下/平/坡宽): %.0f/%.0f/%.0f/%.0f/%.0f/%.0f' %
+          (g.H, g.h, g.H_upper, g.H_lower, g.H_flat, g.w_slope))  # 打印派生量
+
+    # E-2：_build_equivalent_forces 输出与 v6 显式公式逐点一致
+    bt = g.bedrock_thickness  # 基岩厚度
+    ymax_l = g.H_upper  # 左边界顶高
+    ymax_r = g.H_lower  # 右边界顶高
+    nodes_by_boundary = {  # 构造三条边界各一个测试节点
+        'l': [eng.BoundaryNode(label=101, x=0.0, y=300.0, influence=4.0, kn=1.0, cn=2.0, kt=3.0, ct=4.0)],
+        'r': [eng.BoundaryNode(label=202, x=1800.0, y=250.0, influence=4.0, kn=1.5, cn=2.5, kt=3.5, ct=4.5)],
+        'b': [eng.BoundaryNode(label=303, x=1800.0, y=0.0, influence=4.0, kn=1.2, cn=2.2, kt=3.2, ct=4.2)],
+    }
+    ctx = eng.FreeFieldCtx(mat_bedrock=mat, mat_overlying=mat_ov, geom=g,
+                           ymax_l=ymax_l, ymax_r=ymax_r, ymin=0.0,
+                           p_horiz=p_horiz, vel_freq=vel_freq, freq_arr=freq_arr, dt=dt,
+                           N_fft=n_fft, N_orig=n_orig, time_arr=t_arr)  # 打包上下文
+    fd = eng._build_equivalent_forces(nodes_by_boundary, ctx)  # 调用 v7 重构函数
+
+    def _ref_force(bn, boundary):  # 用 v6 显式公式独立复算等效力
+        if boundary == 'l':
+            h_ov = max(0.0, ymax_l - bt)
+        elif boundary == 'r':
+            h_ov = max(0.0, ymax_r - bt)
+        else:
+            h_ov = max(0.0, eng._surface_y_at(bn.x, g.H_upper, g.H_lower, g.left_flat, g.w_slope) - bt)
+        ff = eng._compute_freefield_at_node(y_target=bn.y, x_target=bn.x,
+                                            mat_bedrock=mat, mat_overlying=mat_ov,
+                                            h_bedrock=bt, h_overlying=h_ov, y_bottom=0.0,
+                                            p_horiz=p_horiz, vel_freq=vel_freq, freq_arr=freq_arr,
+                                            dt=dt, N_fft=n_fft)
+        ux = ff['ux'][:n_orig]; uy = ff['uy'][:n_orig]
+        dux = ff['dotux'][:n_orig]; duy = ff['dotuy'][:n_orig]
+        sxx = ff['sxx'][:n_orig]; syy = ff['syy'][:n_orig]; sxy = ff['sxy'][:n_orig]
+        if boundary == 'l':
+            fx = bn.kn * ux + bn.cn * dux + bn.influence * (-sxx)
+            fy = bn.kt * uy + bn.ct * duy + bn.influence * (-sxy)
+        elif boundary == 'r':
+            fx = bn.kn * ux + bn.cn * dux + bn.influence * sxx
+            fy = bn.kt * uy + bn.ct * duy + bn.influence * sxy
+        else:
+            fx = bn.kt * ux + bn.ct * dux + bn.influence * (-sxy)
+            fy = bn.kn * uy + bn.cn * duy + bn.influence * (-syy)
+        return fx, fy
+
+    max_diff = 0.0  # 记录最大逐点偏差
+    for boundary in ('l', 'r', 'b'):  # 遍历三条边界
+        bn = nodes_by_boundary[boundary][0]  # 取该边界测试节点
+        fx_ref, fy_ref = _ref_force(bn, boundary)  # 独立复算
+        fx_new = fd['{}-{}-fx'.format(bn.label, boundary)][:, 1]  # v7 输出 fx
+        fy_new = fd['{}-{}-fy'.format(bn.label, boundary)][:, 1]  # v7 输出 fy
+        max_diff = max(max_diff, np.max(np.abs(fx_new - fx_ref)), np.max(np.abs(fy_new - fy_ref)))  # 更新最大偏差
+    print('等效力 v7 重构 vs v6 公式 最大逐点偏差 (应=0): %.3e' % max_diff)  # 打印等价性偏差
+
     # ===================== 判定 =====================
     print('\n========== 判定 ==========')  # 打印判定标题
     ok_amp = abs(amp_ratio - 2.0) < 0.05  # 放大比是否接近 2
@@ -223,6 +284,9 @@ def run_selfcheck():  # 定义自检主函数
     print('C  速度基线校正:       %s' % ('通过' if ok_baseline else '不通过'))  # 打印基线校正判定
     print('D1 地表高度函数:      %s' % ('通过' if ok_geom else '不通过'))  # 打印几何函数判定
     print('D2 底边厚度一致性:    %s' % ('通过' if ok_consist else '不通过'))  # 打印底边一致性判定
+    ok_equiv = geom_ok2 and (max_diff < 1e-9)  # 几何派生量正确且等效力逐点一致
+    print('E1 几何派生量:        %s' % ('通过' if geom_ok2 else '不通过'))  # 打印几何派生判定
+    print('E2 重构等效力等价:    %s' % ('通过' if (max_diff < 1e-9) else '不通过'))  # 打印等效力等价判定
 
 
 if __name__ == '__main__':  # 判断是否直接运行
