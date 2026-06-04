@@ -1046,8 +1046,8 @@ def VAB_oblique(site, geom, angle,
     cycle_sv = free_sv_2['A1'] * interface_21['Rss']  # 覆盖层内一次 SV 混响的幅值因子
     cycle_p = free_p_2['B2'] * interface_21['Rss']  # 覆盖层内一次 P 混响的幅值因子
     order_count = max(0, int(MAX_REFLECT_ORDER))  # 几何级数截断阶数
-    sum_cycle_sv = sum(cycle_sv ** k for k in range(order_count + 1))  # SV 混响幅值几何级数和
-    sum_cycle_p = sum(cycle_p ** k for k in range(order_count + 1))  # P 混响幅值几何级数和
+    sum_cycle_sv = sum([cycle_sv ** k for k in range(order_count + 1)])  # SV 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
+    sum_cycle_p = sum([cycle_p ** k for k in range(order_count + 1)])  # P 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
     Rss_eff = interface_12['Rss'] + interface_12['Tss'] * free_sv_2['A1'] * interface_21['Tss'] * sum_cycle_sv  # 等效 SV 反射系数
     Rsp_eff = interface_12['Rsp'] + interface_12['Tss'] * free_sv_2['A2'] * interface_21['Tss'] * sum_cycle_p  # 等效 SV->P 转换系数
     log_step(logger, '%s 射线法反射参数: Rss_eff=%.4f, Rsp_eff=%.4f, alpha2=%.4f, beta2=%.4f',  # 记录系数日志
