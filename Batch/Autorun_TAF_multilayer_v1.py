@@ -11,28 +11,32 @@ import ctypes  # 导入 ctypes 模块用于调用 Windows 系统 API
 from ctypes import wintypes  # 从 ctypes 中导入 wintypes 以使用 Windows 的标准数据类型
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根目录
-FOLDER_PREFIX = "double-"  # 设置目标文件夹前缀
+FOLDER_PREFIX = "multi-"  # 设置目标文件夹前缀（复现论文图15 三层模型）
 DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".com"]  # 设置每个文件夹脚本执行后要删除的文件类型列表，例如 [".odb", ".lck"]。若为空则不删除。
 USE_RECYCLE_BIN = False  # 设置删除文件时是放入回收站（True）还是直接永久删除（False）
 
+# 图15 输入波：a0=2.0 → fc=a0·Vs2/(2·(H−h))=2.0·800/400=4 Hz，故只用 4 Hz Ricker。
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 定义 El_Centro 文件完整路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_6Hz.txt",  # 定义 Loma_Prieta 文件完整路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_8Hz.txt",  # 定义 Northridge 文件完整路径
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 图15 输入波：4 Hz Ricker（a0=2.0）
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_double_v4.py", "parameter_target": True},  # 定义建模脚本完整路径与是否作为参数替换目标（原 v7 已重命名为 v4）
+    {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v2.py", "parameter_target": True},  # 三层建模脚本（图15 参数），作为参数替换目标
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_PGA_v7.py", "parameter_target": False},  # 定义后处理脚本完整路径
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Compute_Multi_TAF_v1.py", "parameter_target": False},  # 定义分布脚本完整路径
     {"path": r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Plot_Multi_TAF_v3.py", "parameter_target": False},  # 定义分布脚本完整路径
 ]  # 结束脚本顺序配置定义
 
-PARAMETER_CASES = [  # 定义参数方案列表
-    {"params": { "i": 30,  "angle": 0}},  # 定义第一组参数方案：角度为30度和0度
-    {"params": { "i": 30, "angle": 15}},  # 定义第二组参数方案：角度为30度和15度
-    {"params": { "i": 60, "angle": 0}},  # 定义第五组参数方案：角度为60度和0度
-    {"params": { "i": 60, "angle": 15}},  # 定义第六组参数方案：角度为60度和15度
+# 图15 共 2(厚度)×2(软/硬)×2(角度)=8 工况；i=45、Vr/Vs2=2.5、h/H=0.50 在 v2 脚本中已固定，无需扫描。
+# 被替换的三个参数（均替换脚本中"首次出现"的同名键，故依赖 v2 中 surface 层排在 overlying 之前）：
+#   velocity_ratio → 表层 V_S1（软=5.0 即 Vs1/Vs2=0.5；硬=1.25 即 Vs1/Vs2=2.0）；
+#   thickness      → 表层厚度 h1（50.0=h1/(H−h)=0.25；150.0=0.75）；
+#   angle          → SV 入射角（0 或 15）。
+PARAMETER_CASES = [  # 定义参数方案列表（图15 全部 8 工况）
+    {"folder_tag": "soft-t25-a0",  "params": {"velocity_ratio": 5.0,  "thickness": 50.0,  "angle": 0}},   # 软表层 Vs1/Vs2=0.5, h1/(H−h)=0.25, 0°
+    {"folder_tag": "soft-t25-a15", "params": {"velocity_ratio": 5.0,  "thickness": 50.0,  "angle": 15}},  # 软, 0.25, 15°
+    {"folder_tag": "hard-t25-a0",  "params": {"velocity_ratio": 1.25, "thickness": 50.0,  "angle": 0}},   # 硬表层 Vs1/Vs2=2.0, 0.25, 0°
+    {"folder_tag": "hard-t25-a15", "params": {"velocity_ratio": 1.25, "thickness": 50.0,  "angle": 15}},  # 硬, 0.25, 15°
 ]  # 结束参数方案列表定义
 
 class SHFILEOPSTRUCTW(ctypes.Structure):  # 定义 SHFILEOPSTRUCTW 结构体以匹配 Windows API
