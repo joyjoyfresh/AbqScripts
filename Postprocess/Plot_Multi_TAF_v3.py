@@ -2,6 +2,7 @@
 """
 真实坐标 TAF 曲线绘制脚本
 从已生成的 TAF-*.csv 文件中读取数据并绘制对比图，或由其他脚本导入调用。
+输出图片文件名包含入射角度信息（如 TAF-comparison-motion-horizontal-a30.png）。
 """
 
 import os  # 导入系统接口模块
@@ -193,7 +194,8 @@ def plot_taf_curves(taf_records, incident_angle, output_dir):  # 定义绘制不
             ax.set_title(r'入射角 $\theta_s = %g^\circ$' % incident_angle, fontsize=14, fontproperties=CN_FONT, pad=10)  # 设定图表标题包含入射角角度的 LaTeX 数学表达式
             ax.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='black', framealpha=1.0, prop=EN_FONT, fontsize=10.5)  # 设置图例在左上角显示并设置背景、黑框和英文字体
             plt.tight_layout()  # 调整子图布局以防止坐标轴标签和图表被遮挡裁剪
-            out_img_name = f"TAF-comparison-{motion_name}-{direction}.png"  # 构建输出的 PNG 图像文件名
+            angle_tag = f"a{int(incident_angle)}" if incident_angle == int(incident_angle) else f"a{incident_angle}"  # 将入射角度格式化为 a30 或 a30.5 形式的字符串标签
+            out_img_name = f"TAF-comparison-{motion_name}-{direction}-{angle_tag}.png"  # 构建包含入射角度标签的输出 PNG 图像文件名
             out_img_path = os.path.join(output_dir, out_img_name)  # 拼装包含保存目录的完整图像输出绝对路径
             plt.savefig(out_img_path, dpi=300, bbox_inches='tight')  # 保存当前绘制的图像并去除多余白边
             plt.close()  # 销毁当前图表对象释放内存
