@@ -75,27 +75,32 @@ BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 定义边界处理顺序
 MAX_REFLECT_ORDER = 3  # 射线法覆盖层内多次反射/透射的几何级数截断阶数（v3 默认 3）
 
 
+_REFL_COEFF_CACHE = {}  # 等效反射/转换系数缓存：键为柱地表高度+入射角+层结构指纹，值为 (Rss_eff, Rsp_eff)
+
+
 # ============================================================
 #  参数打包对象（v7：用结构化对象取代散标量，缩短函数签名、便于阅读）
 # ============================================================
-# Material：单层材料的基本输入（剪切波速、泊松比、密度）；
+# Material：单层材料的基本输入（剪切波速、泊松比、密度、固定厚度、名称）；
 #   派生量 GG/lam/cp/EE 仍由物理核心函数按需计算，故此处只存输入。
-Material = namedtuple('Material', ['cs', 'vv', 'density'])  # 单层材料输入
-# Site：场地两层材料 + 基岩层厚度
-Site = namedtuple('Site', ['bedrock', 'overlying', 'bedrock_thickness'])  # 双层场地
+#   thickness=None 表示：基岩半空间，或最底有限层（覆盖层，厚度由几何决定）。
+Material = namedtuple('Material', ['cs', 'vv', 'density', 'thickness', 'name'])  # 单层材料输入
+# Site：基岩半空间 + 有限层列表（layers 从上到下）+ 基岩层厚度
+Site = namedtuple('Site', ['bedrock', 'layers', 'bedrock_thickness'])  # 多层场地（支持 0/1/2... 个有限层）
 # Geometry：斜坡几何（输入项 + 一次算好的派生项）
 Geometry = namedtuple('Geometry', [
     'total_L', 'i', 'left_flat', 'H_minus_h', 'h_over_H', 'bedrock_thickness',  # 输入项
-    'H', 'h', 'H_upper', 'H_lower', 'H_flat', 'w_slope'])  # 派生项
+    'H', 'h', 'H_upper', 'H_lower', 'H_flat', 'w_slope',  # 派生项
+    'layer_interfaces'])  # 派生项：固定层间界面 y（从下到上，不含基岩界面），用于切分与材料分配
 # BoundaryNode：单个边界节点的几何与粘弹性边界参数（取代裸 numpy 列索引）
 BoundaryNode = namedtuple('BoundaryNode',
                           ['label', 'x', 'y', 'influence', 'kn', 'cn', 'kt', 'ct'])  # 边界节点
 # FreeFieldCtx：射线法等效力计算所需的上下文（一次打包，避免长参数列表）
+#   推广要点：自由场按每个节点"所在水平成层柱"逐层计算，故携带场地分层(strat)而非单一覆盖层。
 FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
-    'mat_bedrock', 'mat_overlying', 'geom', 'ymax_l', 'ymax_r', 'ymin',  # 两层材料、几何、各边界高度信息
-    'alpha', 'beta_p', 'alpha2', 'beta2',  # 基岩 SV 入射角/P 反射角、覆盖层 SV/P 角
-    'A1', 'A2', 'cycle_sv', 'cycle_p',  # 等效自由面反射/转换系数 + 覆盖层混响幅值因子
-    'GG', 'lam', 'cs', 'cp', 'cs2', 'cp2',  # 基岩剪切模量/拉梅常数/波速 + 覆盖层波速
+    'site', 'geom', 'strat', 'ymax_l', 'ymax_r', 'ymin',  # 场地、几何、分层带、各边界高度信息
+    'alpha', 'beta_p', 'p_horiz',  # 基岩 SV 入射角、基岩 P 反射角、水平慢度（Snell 守恒）
+    'GG', 'lam', 'cs', 'cp',  # 基岩剪切模量/拉梅常数/波速（投影与应力公式沿用 v4 用基岩标量）
     'VEL', 'DIS', 'dt', 'time_arr', 'max_reflect_order'])  # 速度/位移时程、步长、时间轴、反射阶数
 
 
@@ -264,22 +269,59 @@ def _surface_y_at(x, H_upper, H_lower, left_flat, w_slope):  # 定义按横坐�
     return H_lower  # 其余位于坡脚平台，返回坡脚高度
 
 
+def _build_stratigraphy(site, geom, ymin=0.0):  # 定义场地分层带构造函数
+    """把场地分层展开为"从下到上"的标称材料带列表，供建模与自由场逐层取用。
+
+    返回 list，每项 dict：{'name','mat'(Material),'y0','y1'}，y0/y1 为该带的标称下/上界 y。
+    顺序：基岩带在前（最底），向上依次为覆盖层(最底有限层)…表层(最顶有限层)。
+    单层(site.layers 为空)时只返回基岩带（其上界取坡顶 H_upper，即全场均质基岩）。
+    """  # 说明函数用途与返回结构
+    H_upper = geom.H_upper  # 坡顶地表高度（最顶有限层的上界）
+    bt = geom.bedrock_thickness  # 基岩界面 y
+    layers_td = list(site.layers)  # 有限层（从上到下）
+    if not layers_td:  # 处理单层情况（无有限层）
+        return [{'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': H_upper}]  # 全场均质基岩带
+    bands_td = []  # 初始化"从上到下"的有限层带列表
+    y_top = H_upper  # 从坡顶开始向下推各层上界
+    for L in layers_td:  # 自上而下遍历有限层
+        if L.thickness is not None:  # 固定厚度层（表层等）
+            bands_td.append({'name': L.name, 'mat': L, 'y0': y_top - L.thickness, 'y1': y_top})  # 记录该层带
+            y_top -= L.thickness  # 上界下移一个固定厚度
+        else:  # 最底有限层（覆盖层，厚度由几何决定，填充至基岩界面）
+            bands_td.append({'name': L.name, 'mat': L, 'y0': bt, 'y1': y_top})  # 覆盖层带：基岩界面到剩余高度
+    bedrock_band = {'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': bt}  # 基岩带
+    bands_bt = list(reversed(bands_td))  # 反转为"从下到上"
+    return [bedrock_band] + bands_bt  # 基岩带在前 + 有限层带（从下到上）
+
+
 # ==========================================================
 #  几何构造与命名
 # ==========================================================
 
 
-def make_geometry(total_L, H_minus_h, i, h_over_H, left_flat, bedrock_thickness):  # 定义斜坡几何构造函数
-    """根据斜坡几何输入计算全部派生量并打包为 Geometry。"""  # 说明函数用途
+def make_geometry(total_L, H_minus_h, i, h_over_H, left_flat, bedrock_thickness, fixed_thicknesses=None):  # 定义斜坡几何构造函数
+    """根据斜坡几何输入计算全部派生量并打包为 Geometry。
+
+    fixed_thicknesses: 顶部各有限层的固定厚度列表（从上到下，不含最底覆盖层），
+        用于推算固定层间界面 y。空/None 表示双层或单层（无固定层间界面）。
+    """  # 说明函数用途与参数
     H = H_minus_h / (1.0 - h_over_H)  # 计算总覆盖层厚度
     h = H - H_minus_h  # 计算下部覆盖层高度
     H_upper = bedrock_thickness + H  # 计算坡顶地表高度
     H_lower = bedrock_thickness + h  # 计算坡脚地表高度
     H_flat = bedrock_thickness + H  # 计算平坦场地总高度（= 坡顶高度）
     w_slope = H_minus_h / math.tan(math.radians(i))  # 计算坡面水平长度
+    fixed = list(fixed_thicknesses or [])  # 规范化固定厚度列表（默认空）
+    layer_interfaces = []  # 初始化固定层间界面 y 列表（从下到上）
+    cum = 0.0  # 初始化从顶部累计的固定厚度
+    for t in fixed:  # 自上而下遍历各固定层厚度
+        cum += t  # 累加固定层厚度
+        layer_interfaces.append(H_upper - cum)  # 该层底界面 y = 坡顶 - 累计固定厚度
+    layer_interfaces = sorted(layer_interfaces)  # 由下到上排序（便于切分与材料分配）
     return Geometry(total_L=total_L, i=i, left_flat=left_flat, H_minus_h=H_minus_h,  # 组装并返回几何对象（填入输入项）
                     h_over_H=h_over_H, bedrock_thickness=bedrock_thickness,  # 继续填入输入项
-                    H=H, h=h, H_upper=H_upper, H_lower=H_lower, H_flat=H_flat, w_slope=w_slope)  # 填入派生项
+                    H=H, h=h, H_upper=H_upper, H_lower=H_lower, H_flat=H_flat, w_slope=w_slope,  # 填入派生项
+                    layer_interfaces=layer_interfaces)  # 填入固定层间界面 y 列表
 
 
 def make_flat_geometry(geom):  # 定义平坦自由场几何派生函数
@@ -339,12 +381,21 @@ def find_acc_txt(logger=None):  # 定义加速度文件检索函数
 
 
 # ============================================================
-#  双层自由场核心实现（射线法 / 到时延迟叠加，移植自 v3 并保留 v7 改良）：
-#  基岩入射 SV → 界面反/透射（阻抗近似，忽略 SV<->P 转换 Rsp=Tsp=0）
-#  → 覆盖层内自由面多次混响（按 max_reflect_order 截断的几何级数）。
-#  时域实现：对每个边界节点按几何到时延迟速度/位移时程后线性叠加。
+#  多层自由场核心实现（射线法 / 到时延迟叠加，由 v4 双层推广为 1/2/3... 层层栈）：
+#  基岩入射 SV → 各界面反/透射（阻抗近似，忽略界面 SV<->P 转换 Rsp=Tsp=0）
+#  → 各有限层内自由面/界面多次混响（按 max_reflect_order 截断的几何级数）。
+#  时域实现：对每个边界节点按其"所在水平成层柱"的几何到时延迟速度/位移时程后线性叠加。
+#
+#  推广要点（M=有限层数）：
+#   ①等效反射系数 Rss_eff/Rsp_eff 由"自顶向下递归的层栈反射"求得（_effective_refl_coeffs），
+#     M=1 时严格退化为 v4 的单腔几何级数；
+#   ②混响在时域按"各有限层独立腔"叠加（_column_cavities + _superpose_paths 的腔积枚举），
+#     M=1 时严格退化为 v4 单腔；M>=2 为截断近似（忽略跨腔耦合与界面 SV<->P）；
+#   ③Rsp_eff 仅取顶层腔 P 混响 + 各层直透（顶面转换），M=1 时退化为 v4；
+#   ④基岩/均质节点沿用 v4 到时公式；有限层节点用穿层走时累加（M=1 与 v4 一致）；
+#   ⑤投影与应力沿用 v4：用基岩角度与基岩材料标量（继承 v4 近似）。
 #  保留 v7 改良：①输入速度用基线校正积分 _integrate_acc_to_velocity；
-#               ②覆盖层混响厚度按各柱（侧边用该侧最高点、底边按 x）取值，而非全场统一最厚。
+#               ②各柱厚度/层组成按节点取（侧边用该侧最高点、底边按 x）。
 # ============================================================
 
 
@@ -411,65 +462,202 @@ def _calc_node_delay(boundary, x0, y0, Ly, Lx,
         raise ValueError("boundary must be 'l', 'r', or 'b'")  # 抛出异常
 
 
-def _superpose_paths(get_delayed, tA, tB, tC,
-                     cycle_sv, cycle_p, cdelay_sv, cdelay_p, order_count, dt):
-    """对一个节点叠加主路径与覆盖层多次混响，返回 (时间轴, A路径值, B路径累加, C路径累加)。
+def _column_seg(cs, vv, density, alpha_p, y0, y1, name):  # 定义构造单个柱内层段的函数
+    """根据材料与水平慢度构造柱内一层段（含派生波速、角度、垂直慢度因子、上下界）。"""  # 说明函数用途
+    params = _compute_material_params(cs, vv, density)  # 计算该层材料派生参数（GG/lam/cp 等）
+    alpha = _safe_arcsin(alpha_p * cs)  # 由 Snell 守恒求该层 SV 角
+    beta = _safe_arcsin(alpha_p * params['cp'])  # 由 Snell 守恒求该层 P 角
+    return {'name': name, 'mat': params, 'cs': cs, 'cp': params['cp'],  # 打包层段：名称、材料参数、波速
+            'GG': params['GG'], 'lam': params['lam'], 'density': density,  # 剪切模量/拉梅常数/密度
+            'alpha': alpha, 'beta': beta,  # SV/P 角
+            'cos_alpha': math.cos(alpha), 'cos_beta': math.cos(beta),  # 垂直慢度用余弦
+            'y0': y0, 'y1': y1}  # 该层段下界与上界 y
 
-    A：主到时 tA 的延迟信号；B：反射 SV 路径在 tB + k·cdelay_sv 的各阶混响（幅值 cycle_sv^k）；
-    C：反射/转换 P 路径在 tC + k·cdelay_p 的各阶混响（幅值 cycle_p^k）。所有数组补零到统一长度。
-    """
+
+def _build_column(strat, ymax_col, alpha_p, ymin):  # 定义构造节点所在成层柱的函数
+    """由场地分层带 strat 与该柱地表高度 ymax_col 构造"从下到上"的柱层段列表。
+
+    只保留与 [ymin, ymax_col] 相交的材料带，顶部带上界截断到 ymax_col（地表）。
+    单层场地（strat 仅一条基岩带）返回单层段柱（全 bedrock 至地表）。
+    """  # 说明函数用途
+    tol = 1e-6  # 设置带相交容差
+    column = []  # 初始化柱层段列表
+    for band in strat:  # 从下到上遍历各标称材料带
+        if band['y0'] >= ymax_col - tol:  # 该带整体位于地表之上
+            continue  # 跳过（该柱无此带）
+        y0 = band['y0']  # 该带下界
+        y1 = min(band['y1'], ymax_col)  # 该带上界截断到地表
+        if y1 <= y0 + tol:  # 截断后无有效厚度
+            continue  # 跳过
+        mat = band['mat']  # 取该带材料输入
+        column.append(_column_seg(mat.cs, mat.vv, mat.density, alpha_p, y0, y1, band['name']))  # 追加层段
+    return column  # 返回从下到上的柱层段列表
+
+
+def _effective_refl_coeffs(column, oc):  # 定义层栈等效反射/转换系数计算函数
+    """自顶向下递归求基岩中上行 SV 的等效自由面反射 Rss_eff 与 SV->P 转换 Rsp_eff。
+
+    沿用 v4 的界面 SV 阻抗近似与自由面完整 SV 反射/转换；M=1 时严格退化为 v4 的单腔几何级数。
+    column：从下到上的柱层段（column[0]=基岩，column[-1]=最顶有限层或均质介质）。
+    """  # 说明函数用途
+    topL = column[-1]  # 取最顶层段
+    free_sv = _compute_free_surface_sv_coeff(topL['alpha'], topL['cp'], topL['cs'])  # 顶面 SV 反射/转换系数
+    if len(column) == 1:  # 均质柱（无有限层覆盖）
+        return free_sv['A1'], free_sv['A2']  # 直接返回自由面 SV 反射与 SV->P 转换
+    free_p = _compute_free_surface_p_coeff(topL['beta'], topL['cp'], topL['cs'])  # 顶面 P 反射/转换系数
+    nseg = len(column)  # 柱层段总数
+    Rtop = free_sv['A1']  # 当前层顶反射（从最顶层的自由面 A1 起）
+    A2_top = free_sv['A2']  # 顶面 SV->P 转换系数
+    B2_top = free_p['B2']  # 顶面 P->P 反射系数
+    T_up = 1.0  # SV 自下而上穿过各界面的累计透射
+    T_down = 1.0  # P（用 SV 近似）自上而下穿过各界面的累计透射
+    Rbot_top_layer = None  # 顶层腔底界面反射（P 混响用）
+    for k in range(nseg - 1, 0, -1):  # 自顶层向下遍历各界面（column[k] 上、column[k-1] 下）
+        upper = column[k]  # 界面上方层段
+        lower = column[k - 1]  # 界面下方层段
+        intf_lo = _compute_interface_sv_coeff(lower['alpha'], lower['mat'], upper['mat'])  # 下方入射：反射回下方 Rss + 上透 Tss
+        intf_hi = _compute_interface_sv_coeff(upper['alpha'], upper['mat'], lower['mat'])  # 上方下行：反射回上方 Rss + 下透 Tss
+        Rbot = intf_hi['Rss']  # 本层底界面反射（下行反射回上行）
+        if k == nseg - 1:  # 记录顶层腔底反射
+            Rbot_top_layer = Rbot  # 供 P 混响使用
+        cyc = Rtop * Rbot  # 本层腔一次 SV 混响幅值因子
+        sum_cyc = sum([cyc ** j for j in range(oc + 1)])  # 截断几何级数和（用列表避免通配 sum 拒收生成器）
+        Rbottom = intf_lo['Rss'] + intf_lo['Tss'] * Rtop * intf_hi['Tss'] * sum_cyc  # 本层底界面等效反射
+        T_up *= intf_lo['Tss']  # 累计上行透射
+        T_down *= intf_hi['Tss']  # 累计下行透射
+        Rtop = Rbottom  # 该等效反射成为下一层（更低层）看到的顶反射
+    Rss_eff = Rtop  # 递归至基岩界面：基岩中上行 SV 的等效反射
+    cyc_p = B2_top * Rbot_top_layer  # 顶层腔一次 P 混响幅值因子
+    sum_cyc_p = sum([cyc_p ** j for j in range(oc + 1)])  # P 混响截断几何级数和
+    Rsp_eff = T_up * A2_top * T_down * sum_cyc_p  # 等效 SV->P 转换（上透→顶面转换→下透→顶腔混响）
+    return Rss_eff, Rsp_eff  # 返回等效反射与转换系数
+
+
+def _column_cavities(column, oc):  # 定义柱内各混响腔（用于时域延迟叠加）的计算函数
+    """返回 (cavities_sv, cavities_p)：各有限层 SV 混响腔 (cycle, cdelay) 列表 + 顶层 P 混响腔。
+
+    cycle = 该层腔顶反射×底反射（幅值）；cdelay = 该层往返垂直走时。M=1 时退化为 v4 单腔。
+    """  # 说明函数用途
+    nseg = len(column)  # 柱层段总数
+    cavities_sv = []  # 初始化 SV 混响腔列表
+    cavities_p = []  # 初始化 P 混响腔列表（仅顶层腔）
+    for k in range(1, nseg):  # 遍历各有限层（column[1..nseg-1]）
+        layer = column[k]  # 当前有限层段
+        lower = column[k - 1]  # 其下方层段
+        thick = layer['y1'] - layer['y0']  # 该层厚度
+        if thick <= 0:  # 厚度无效则跳过
+            continue  # 跳过该层
+        Rbot = _compute_interface_sv_coeff(layer['alpha'], layer['mat'], lower['mat'])['Rss']  # 底界面反射（下行反射回上行）
+        if k == nseg - 1:  # 顶层：顶反射取自由面 SV 反射
+            Rtop = _compute_free_surface_sv_coeff(layer['alpha'], layer['cp'], layer['cs'])['A1']  # 自由面 SV 反射
+        else:  # 内层：顶反射取上界面反射
+            upper = column[k + 1]  # 其上方层段
+            Rtop = _compute_interface_sv_coeff(layer['alpha'], layer['mat'], upper['mat'])['Rss']  # 上界面反射
+        cdelay_sv = 2.0 * thick * layer['cos_alpha'] / layer['cs']  # 该层 SV 往返垂直走时
+        cavities_sv.append((Rtop * Rbot, cdelay_sv))  # 记录该层 SV 混响腔
+        if k == nseg - 1:  # 顶层腔额外贡献 P 混响（转换在顶面发生）
+            B2 = _compute_free_surface_p_coeff(layer['beta'], layer['cp'], layer['cs'])['B2']  # 自由面 P 反射
+            cdelay_p = 2.0 * thick * layer['cos_beta'] / layer['cp']  # 该层 P 往返垂直走时
+            cavities_p.append((B2 * Rbot, cdelay_p))  # 记录顶层 P 混响腔
+    return cavities_sv, cavities_p  # 返回 SV/P 混响腔列表
+
+
+def _tt(column, y_lo, y_hi, wave):  # 定义柱内 y_lo→y_hi 垂直走时累加函数
+    """逐层累加从 y_lo 到 y_hi（y_lo<y_hi）的垂直走时；wave='SV' 用 cos_alpha/cs，'P' 用 cos_beta/cp。"""  # 说明函数用途
+    t = 0.0  # 初始化走时
+    for seg in column:  # 遍历柱内各层段
+        lo = max(y_lo, seg['y0'])  # 本层段内的下限
+        hi = min(y_hi, seg['y1'])  # 本层段内的上限
+        if hi > lo:  # 区间有效时累加
+            if wave == 'SV':  # SV 波
+                t += (hi - lo) * seg['cos_alpha'] / seg['cs']  # 累加 SV 垂直走时
+            else:  # P 波
+                t += (hi - lo) * seg['cos_beta'] / seg['cp']  # 累加 P 垂直走时
+    return t  # 返回总走时
+
+
+def _superpose_paths(get_delayed, tA, tB, tC, cavities_sv, cavities_p, order_count, dt):  # 定义多腔混响叠加函数
+    """对一个节点叠加主路径与各有限层混响，返回 (时间轴, A路径值, B路径累加, C路径累加)。
+
+    A：主到时 tA 的延迟信号；B：反射 SV 路径在各腔往返组合下的混响累加；
+    C：反射/转换 P 路径在顶层腔混响下的累加。各腔几何级数按 order_count 截断，腔间取乘积枚举。
+    单腔（M=1）时严格退化为 v4 的 Σ_k cycle^k·delayed(t + k·cdelay)。
+    """  # 说明函数用途
+    def _combos(cavities):  # 定义将一组腔展开为 (幅值, 附加延迟) 组合的内函数
+        combo = [(1.0, 0.0)]  # 初始组合：无混响（幅值1、零延迟）
+        for (cyc, cd) in cavities:  # 逐腔做几何级数与已有组合的乘积
+            new = []  # 新组合容器
+            for (amp, dl) in combo:  # 遍历已有组合
+                for j in range(order_count + 1):  # 该腔的截断阶数
+                    new.append((amp * (cyc ** j), dl + j * cd))  # 叠加该腔第 j 阶（幅值相乘、延迟相加）
+            combo = new  # 更新组合
+        return combo  # 返回全部组合
+    combo_b = _combos(cavities_sv)  # B 路径各腔组合
+    combo_c = _combos(cavities_p)  # C 路径各腔组合（仅顶层 P 腔）
+    sig_b = [(amp, get_delayed(tB + dl)) for amp, dl in combo_b]  # B 路径各组合的延迟信号
+    sig_c = [(amp, get_delayed(tC + dl)) for amp, dl in combo_c]  # C 路径各组合的延迟信号
     u0_tA = get_delayed(tA)  # 主到时延迟信号
-    b_list = []  # B 路径各阶信号
-    c_list = []  # C 路径各阶信号
-    for k in range(order_count + 1):  # 遍历反射阶数
-        b_list.append(get_delayed(tB + k * cdelay_sv))  # B 路径第 k 阶
-        c_list.append(get_delayed(tC + k * cdelay_p))  # C 路径第 k 阶
     max_len = u0_tA.shape[0]  # 统计统一长度
-    for arr in b_list + c_list:  # 遍历所有路径信号
+    for _amp, arr in sig_b + sig_c:  # 遍历所有路径信号
         max_len = max(max_len, arr.shape[0])  # 更新最大长度
     u0_tA = _pad_to(u0_tA, max_len, dt)  # 补齐主路径
     sumB = np.zeros(max_len)  # B 路径累加器
     sumC = np.zeros(max_len)  # C 路径累加器
-    for k in range(order_count + 1):  # 按阶叠加
-        ab = _pad_to(b_list[k], max_len, dt)  # 补齐 B 路径第 k 阶
-        ac = _pad_to(c_list[k], max_len, dt)  # 补齐 C 路径第 k 阶
-        sumB += (cycle_sv ** k) * ab[:, 1]  # 累加 B 路径（带几何级数幅值）
-        sumC += (cycle_p ** k) * ac[:, 1]  # 累加 C 路径（带几何级数幅值）
+    for amp, arr in sig_b:  # 叠加 B 路径各组合
+        sumB += amp * _pad_to(arr, max_len, dt)[:, 1]  # 累加（带组合幅值）
+    for amp, arr in sig_c:  # 叠加 C 路径各组合
+        sumC += amp * _pad_to(arr, max_len, dt)[:, 1]  # 累加（带组合幅值）
     return u0_tA[:, 0], u0_tA[:, 1], sumB, sumC  # 返回时间轴与三路结果
 
 
 def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis):
     """射线法计算单节点自由场时程，返回 dict：time/ux/uy/dotux/dotuy/sigmax/sigmay。
 
-    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度（决定覆盖层厚与反射到时）；
-    ctx      : FreeFieldCtx（含角度、等效系数、混响幅值因子、材料、VEL/DIS、dt 等）；
+    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度（决定层组成、层厚与到时）；
+    ctx      : FreeFieldCtx（含基岩角度、水平慢度、场地分层、基岩材料标量、VEL/DIS、dt 等）；
     get_vel/get_dis：速度/位移时程的延迟缓存访问器（跨节点复用）。
-    应力按 v3 公式由速度场叠加得到，且各边界公式已内嵌外法向符号。
+    多层推广：按该柱层栈求等效系数与各腔混响；投影/应力沿用 v4（基岩角度 + 基岩材料标量）。
     """
     geom = ctx.geom  # 取几何对象
-    Ly = geom.bedrock_thickness - ctx.ymin  # 界面相对底边高度
     Lx = geom.total_L  # 模型横向跨度（xmin=0）
-    h2 = max(0.0, ymax_col - geom.bedrock_thickness)  # 该柱覆盖层厚度（v7 改良：按柱取值）
-    cdelay_sv = (2.0 * h2 * math.cos(ctx.alpha2) / ctx.cs2) if h2 > 0 else 0.0  # 覆盖层 SV 混响往返延迟
-    cdelay_p = (2.0 * h2 * math.cos(ctx.beta2) / ctx.cp2) if h2 > 0 else 0.0  # 覆盖层 P 混响往返延迟
-
-    tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时
-                                  ctx.alpha, ctx.beta_p, ctx.cs, ctx.cp,  # 基岩角度/波速
-                                  ctx.alpha2, ctx.beta2, ctx.cs2, ctx.cp2, ymax_col)  # 覆盖层角度/波速
+    bt = geom.bedrock_thickness  # 基岩界面 y
     dt = ctx.dt  # 时间步长
     oc = max(0, int(ctx.max_reflect_order))  # 反射阶数上限
+    p = ctx.p_horiz  # 水平慢度
 
-    # 位移自由场：对位移时程 DIS 做延迟叠加
-    td, dA, dB, dC = _superpose_paths(get_dis, tA, tB, tC,  # 位移路径叠加
-                                      ctx.cycle_sv, ctx.cycle_p, cdelay_sv, cdelay_p, oc, dt)
-    # 速度自由场：对速度时程 VEL 做延迟叠加（速度与应力共用此叠加结果）
-    _tv, vA, vB, vC = _superpose_paths(get_vel, tA, tB, tC,  # 速度路径叠加
-                                       ctx.cycle_sv, ctx.cycle_p, cdelay_sv, cdelay_p, oc, dt)
+    column = _build_column(ctx.strat, ymax_col, p, ctx.ymin)  # 构造该节点所在成层柱
+    nseg = len(column)  # 柱层段数
+    key = (round(ymax_col, 4), round(p, 12))  # 等效系数缓存键（同一柱地表高度+入射角复用）
+    cached = _REFL_COEFF_CACHE.get(key)  # 查缓存
+    if cached is None:  # 未命中
+        cached = _effective_refl_coeffs(column, oc)  # 计算等效反射/转换系数
+        _REFL_COEFF_CACHE[key] = cached  # 写入缓存
+    Rss_eff, Rsp_eff = cached  # 取等效系数
+    cavities_sv, cavities_p = _column_cavities(column, oc)  # 计算该柱各混响腔
 
-    a = ctx.alpha  # 入射 SV 角
+    if boundary == 'b' or y0 <= bt + 1e-6:  # 基岩节点或均质节点：沿用 v4 到时公式
+        Ly = bt if nseg >= 2 else ymax_col  # 反射点：有基岩界面取界面，否则（均质）取自由面
+        col0 = column[0]  # 最底层段（基岩或均质介质）
+        tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时（v4 公式）
+                                      ctx.alpha, ctx.beta_p, ctx.cs, ctx.cp,  # 基岩角度/波速
+                                      col0['alpha'], col0['beta'], col0['cs'], col0['cp'], ymax_col)  # 占位（基岩分支不用）
+    else:  # 有限层节点：穿层走时累加（反射点为自由面）
+        tA = _tt(column, ctx.ymin, y0, 'SV')  # 入射 SV：自底到节点
+        tB = _tt(column, ctx.ymin, ymax_col, 'SV') + _tt(column, y0, ymax_col, 'SV')  # 反射 SV：自底到自由面 + 自由面回节点
+        tC = _tt(column, ctx.ymin, bt, 'SV') + _tt(column, bt, y0, 'P')  # 转换 P：基岩段 SV + 覆盖段 P 上行到节点
+        if boundary == 'r':  # 右边界叠加横向传播延迟
+            shift = Lx * math.sin(ctx.alpha) / ctx.cs  # 横向传播延迟量（基岩角度）
+            tA += shift; tB += shift; tC += shift  # 三段同时叠加
+
+    # 位移自由场：对位移时程 DIS 做多腔混响叠加
+    td, dA, dB, dC = _superpose_paths(get_dis, tA, tB, tC, cavities_sv, cavities_p, oc, dt)  # 位移路径叠加
+    # 速度自由场：对速度时程 VEL 做多腔混响叠加（速度与应力共用此叠加结果）
+    _tv, vA, vB, vC = _superpose_paths(get_vel, tA, tB, tC, cavities_sv, cavities_p, oc, dt)  # 速度路径叠加
+
+    a = ctx.alpha  # 入射 SV 角（基岩）
     bp = ctx.beta_p  # 基岩 P 反射角
-    A1 = ctx.A1  # 等效自由面 SV 反射系数
-    A2 = ctx.A2  # 等效自由面 SV->P 转换系数
+    A1 = Rss_eff  # 等效自由面 SV 反射系数（该柱）
+    A2 = Rsp_eff  # 等效自由面 SV->P 转换系数（该柱）
 
     ux = dA * np.cos(a) - A1 * dB * np.cos(a) + A2 * dC * np.sin(bp)  # x 向位移
     uy = -dA * np.sin(a) - A1 * dB * np.sin(a) - A2 * dC * np.cos(bp)  # y 向位移
@@ -508,11 +696,76 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
 # ==========================================================
 
 
+def _interface_y_list(strat):  # 定义从分层带提取材料界面 y 的函数
+    """返回各相邻材料带之间的界面 y（从下到上），即每个带的上界（除最顶带）。
+
+    单层（仅一条带）返回空列表（无需水平切分）；双层返回 [基岩界面]；三层返回 [基岩界面, 表层底界面]。
+    """  # 说明函数用途
+    return [band['y1'] for band in strat[:-1]]  # 取每个带（除最顶带）的上界作为界面
+
+
+def _create_band_materials_sections(model, strat):  # 定义逐带创建材料与截面的函数
+    """为分层带（从下到上）逐带创建材料与均质截面，返回 [(band, sec_name), ...]。"""  # 说明函数用途
+    band_sections = []  # 初始化带-截面映射列表
+    for band in strat:  # 从下到上遍历每条材料带
+        mat = band['mat']  # 取该带材料输入
+        EE = _compute_elastic_modulus_from_wave_speed(mat.cs, mat.vv, mat.density)  # 由波速反算弹性模量
+        mat_name = _next_available_name('Material-%s' % band['name'], model.materials)  # 生成材料名（含层名）
+        m = model.Material(name=mat_name)  # 创建材料
+        m.Elastic(table=((EE, mat.vv),))  # 定义弹性参数
+        m.Density(table=((mat.density,),))  # 定义密度
+        sec_name = _next_available_name('Section-%s' % band['name'], model.sections)  # 生成截面名（含层名）
+        model.HomogeneousSolidSection(name=sec_name, material=mat_name, thickness=1.0)  # 创建均质实体截面
+        band_sections.append((band, sec_name))  # 记录该带与其截面名
+    return band_sections  # 返回带-截面映射
+
+
+def _partition_horizontal(model, part, geom, y_list, name_prefix):  # 定义按一组水平界面切分面的函数
+    """对 y_list 中每条水平界面逐条 PartitionFaceBySketch 切分（切线自动裁剪到实体内）。"""  # 说明函数用途
+    for idx, y in enumerate(y_list):  # 遍历每条水平界面 y
+        part_faces = part.faces  # 获取当前面集合
+        sk_name = '__%s_%d__' % (name_prefix, idx)  # 生成临时草图名
+        sk = model.ConstrainedSketch(name=sk_name, sheetSize=max(geom.total_L, geom.H_upper) * 2)  # 创建水平切分草图
+        sk.Line(point1=(0.0, y), point2=(geom.total_L, y))  # 绘制该界面水平切线
+        part.PartitionFaceBySketch(faces=part_faces, sketch=sk)  # 按草图切分面
+        del model.sketches[sk_name]  # 删除临时草图
+
+
+def _assign_sections_by_band(part, band_sections):  # 定义按质心 y 落带分配截面的函数
+    """按面质心 y 落入哪条材料带分配对应截面，返回 [(层名, 面数), ...]。"""  # 说明函数用途
+    def _to_face_sequence(face_list):  # 定义面序列转换内函数
+        face_seq = part.faces[0:0]  # 创建空面序列
+        for face in face_list:  # 遍历面列表
+            face_seq = face_seq + part.faces[face.index:face.index + 1]  # 逐个拼接面对象
+        return face_seq  # 返回面序列
+    tol = 1e-6  # 设置带边界容差
+    buckets = [[] for _ in band_sections]  # 为每条带准备面桶
+    for face in part.faces:  # 遍历所有面
+        centroid = face.getCentroid()  # 获取面质心
+        yc = centroid[1] if len(centroid) >= 2 else centroid[0][1]  # 读取质心纵坐标
+        placed = False  # 标记是否已归带
+        for bi, (band, _sec) in enumerate(band_sections):  # 从下到上遍历各带
+            if band['y0'] - tol <= yc < band['y1'] + tol:  # 判断质心是否落入该带 [y0, y1)
+                buckets[bi].append(face)  # 归入该带
+                placed = True  # 置归带标记
+                break  # 跳出带循环
+        if not placed:  # 处理未落入任何带的兜底情况
+            buckets[-1].append(face)  # 归入最顶带
+    counts = []  # 初始化面数统计
+    for (band, sec_name), face_list in zip(band_sections, buckets):  # 遍历每带及其面桶
+        if face_list:  # 该带存在面时分配截面
+            part.SectionAssignment(region=Region(faces=_to_face_sequence(face_list)),  # 为该带分配截面
+                                   sectionName=sec_name, offset=0.0, offsetType=MIDDLE_SURFACE,  # 指定截面参数
+                                   offsetField='', thicknessAssignment=FROM_SECTION)  # 结束截面分配
+        counts.append((band['name'], len(face_list)))  # 记录该带面数
+    return counts  # 返回各带面数统计
+
+
 def create_model(site, geom, mesh_size, cae_name=None, logger=None):
     """创建二维平面应变斜坡模型：几何、材料、截面、装配、网格（不含分析步）。
 
-    site: Site 对象（两层材料 + 基岩厚度）
-    geom: Geometry 对象（斜坡几何，含派生量）
+    site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
+    geom: Geometry 对象（斜坡几何，含派生量与固定层间界面）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-1'  # 设置基础模型名称
@@ -550,24 +803,10 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None):
     del model.sketches['__profile__']  # 删除临时草图
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
-    EE_bedrock = _compute_elastic_modulus_from_wave_speed(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩弹性模量
-    EE_overlying = _compute_elastic_modulus_from_wave_speed(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层弹性模量
-
-    mat_bedrock_name = _next_available_name('Material-Bedrock', model.materials)  # 生成基岩材料名
-    mat_bedrock = model.Material(name=mat_bedrock_name)  # 创建基岩材料
-    mat_bedrock.Elastic(table=((EE_bedrock, site.bedrock.vv),))  # 定义基岩弹性参数
-    mat_bedrock.Density(table=((site.bedrock.density,),))  # 定义基岩密度
-
-    mat_overlying_name = _next_available_name('Material-Overlying', model.materials)  # 生成覆盖层材料名
-    mat_overlying = model.Material(name=mat_overlying_name)  # 创建覆盖层材料
-    mat_overlying.Elastic(table=((EE_overlying, site.overlying.vv),))  # 定义覆盖层弹性参数
-    mat_overlying.Density(table=((site.overlying.density,),))  # 定义覆盖层密度
-
-    sec_bedrock_name = _next_available_name('Section-Bedrock', model.sections)  # 生成基岩截面名
-    model.HomogeneousSolidSection(name=sec_bedrock_name, material=mat_bedrock_name, thickness=1.0)  # 创建基岩截面
-
-    sec_overlying_name = _next_available_name('Section-Overlying', model.sections)  # 生成覆盖层截面名
-    model.HomogeneousSolidSection(name=sec_overlying_name, material=mat_overlying_name, thickness=1.0)  # 创建覆盖层截面
+    # ============ 逐层创建材料与截面（支持 1/2/3... 层）============
+    strat = _build_stratigraphy(site, geom)  # 构造从下到上的分层带（基岩 + 各有限层）
+    band_sections = _create_band_materials_sections(model, strat)  # 逐带创建材料与截面
+    log_step(logger, '%s 已创建 %d 个材料带的材料与截面', model_name, len(strat))  # 记录材料/截面创建日志
 
     # 装配
     assembly = model.rootAssembly  # 获取装配体对象
@@ -585,54 +824,30 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None):
     del model.sketches['__vert_partition__']  # 删除临时切分草图
     log_step(logger, '%s 几何垂直切分完成', model_name)  # 记录切分完成日志
 
-    # 2. 水平切分基岩界面 (y = bedrock_thickness)
-    part_faces = part.faces  # 获取当前面集合
-    partition_sketch = model.ConstrainedSketch(name='__bedrock_partition__', sheetSize=max(total_L, H_upper) * 2)  # 创建水平切分草图
-    partition_sketch.Line(point1=(0.0, bedrock_thickness), point2=(total_L, bedrock_thickness))  # 绘制基岩界面
-    part.PartitionFaceBySketch(faces=part_faces, sketch=partition_sketch)  # 按基岩界面切分面
-    del model.sketches['__bedrock_partition__']  # 删除临时切分草图
-    log_step(logger, '%s 基岩水平面切分完成', model_name)  # 记录切分完成日志
+    # 2. 水平切分各材料界面（基岩界面 + 各固定层间界面；切线自动裁剪到实体内）
+    interfaces = _interface_y_list(strat)  # 从分层带提取各材料界面 y（从下到上）
+    _partition_horizontal(model, part, geom, interfaces, 'hpartition')  # 逐条水平切分
+    log_step(logger, '%s 水平界面切分完成: 界面数=%d', model_name, len(interfaces))  # 记录切分完成日志
 
-    # 设置网格控制：四边形 + 结构化
+    # 设置网格控制：默认结构化四边形；若有界面切过坡面（形成表层楔形三角区）则退为自由四边形为主
+    cuts_slope = any(H_lower + 1e-6 < y < H_upper - 1e-6 for y in interfaces)  # 是否存在界面切过坡面
     pickedRegions = part.faces  # 选取全部面作为网格区域
-    part.setMeshControls(regions=pickedRegions, elemShape=QUAD, technique=STRUCTURED)  # 设置四边形结构化网格
+    if cuts_slope:  # 坡面被切出表层楔形（无法结构化）
+        part.setMeshControls(regions=pickedRegions, elemShape=QUAD_DOMINATED, technique=FREE)  # 自由四边形为主网格（容许少量三角）
+        log_step(logger, '%s 检测到界面切过坡面（表层楔形），网格采用 FREE QUAD_DOMINATED', model_name)  # 记录网格策略
+    else:  # 无楔形（M<=1 或界面在坡脚以下）
+        part.setMeshControls(regions=pickedRegions, elemShape=QUAD, technique=STRUCTURED)  # 结构化四边形（同 v4）
     part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设置全局网格尺寸
     elemType1 = mesh.ElemType(elemCode=CPE4, elemLibrary=STANDARD)  # 定义平面应变四节点单元
-    part.setElementType(regions=(pickedRegions,), elemTypes=(elemType1,))  # 分配单元类型
+    elemType2 = mesh.ElemType(elemCode=CPE3, elemLibrary=STANDARD)  # 定义平面应变三节点单元（自由网格过渡用）
+    part.setElementType(regions=(pickedRegions,), elemTypes=(elemType1, elemType2))  # 分配单元类型（四+三节点）
     part.generateMesh()  # 生成网格
     log_step(logger, '%s 已生成网格: CPE4 单元，尺寸=%.2f', model_name, mesh_size)  # 记录网格生成日志
 
-    # ============ 按质心坐标分配截面 ============
-    sec_assignments = {  # 初始化截面分配容器
-        'bedrock': [],  # 保存基岩面
-        'overlying': []  # 保存覆盖层面
-    }  # 结束截面分配容器
-
-    for face in part.faces:  # 遍历所有面
-        centroid = face.getCentroid()  # 获取面质心
-        yc = centroid[1] if len(centroid) >= 2 else centroid[0][1]  # 读取质心纵坐标
-
-        if yc < bedrock_thickness:  # 判断是否位于基岩层
-            sec_assignments['bedrock'].append(face)  # 归入基岩截面
-        else:  # 其余部分归入覆盖层
-            sec_assignments['overlying'].append(face)  # 归入覆盖层截面
-
-    def _to_face_sequence(face_list):  # 定义面序列转换函数
-        face_seq = part.faces[0:0]  # 创建空面序列
-        for face in face_list:  # 遍历面列表
-            face_seq = face_seq + part.faces[face.index:face.index + 1]  # 逐个拼接面对象
-        return face_seq  # 返回面序列
-
-    if sec_assignments['bedrock']:  # 判断是否存在基岩面
-        part.SectionAssignment(region=Region(faces=_to_face_sequence(sec_assignments['bedrock'])),  # 为基岩分配截面
-                               sectionName=sec_bedrock_name, offset=0.0, offsetType=MIDDLE_SURFACE,  # 指定基岩截面参数
-                               offsetField='', thicknessAssignment=FROM_SECTION)  # 结束基岩截面分配
-    if sec_assignments['overlying']:  # 判断是否存在覆盖层面
-        part.SectionAssignment(region=Region(faces=_to_face_sequence(sec_assignments['overlying'])),  # 为覆盖层分配截面
-                               sectionName=sec_overlying_name, offset=0.0, offsetType=MIDDLE_SURFACE,  # 指定覆盖层截面参数
-                               offsetField='', thicknessAssignment=FROM_SECTION)  # 结束覆盖层截面分配
-    log_step(logger, '%s 截面属性分配完成: Bedrock=%d, Overlying=%d',  # 记录截面分配日志
-             model_name, len(sec_assignments['bedrock']), len(sec_assignments['overlying']))  # 输出各区域面数
+    # ============ 按质心 y 落带分配截面 ============
+    counts = _assign_sections_by_band(part, band_sections)  # 逐带按质心分配截面
+    log_step(logger, '%s 截面属性分配完成: %s', model_name,  # 记录截面分配日志
+             ', '.join('%s=%d' % (n, c) for n, c in counts))  # 输出各带面数
 
     # 重新生成装配体以同步网格
     assembly.regenerate()
@@ -695,8 +910,8 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None):
 def create_flat_model(site, geom, mesh_size, logger=None):
     """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。
 
-    site: Site 对象（两层材料 + 基岩厚度）
-    geom: Geometry 对象（取其总长、平坦总高 H_flat、基岩厚度）
+    site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
+    geom: Geometry 对象（取其总长、平坦总高 H_flat、基岩厚度；全场各层带齐全）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-2'  # 设置平坦自由场模型名称
@@ -719,24 +934,10 @@ def create_flat_model(site, geom, mesh_size, logger=None):
     del model.sketches['__flat_profile__']  # 删除临时草图
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
-    EE_bedrock = _compute_elastic_modulus_from_wave_speed(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩弹性模量
-    EE_overlying = _compute_elastic_modulus_from_wave_speed(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层弹性模量
-
-    mat_bedrock_name = _next_available_name('Material-Bedrock', model.materials)  # 生成基岩材料名
-    mat_bedrock = model.Material(name=mat_bedrock_name)  # 创建基岩材料
-    mat_bedrock.Elastic(table=((EE_bedrock, site.bedrock.vv),))  # 定义基岩弹性参数
-    mat_bedrock.Density(table=((site.bedrock.density,),))  # 定义基岩密度
-
-    mat_overlying_name = _next_available_name('Material-Overlying', model.materials)  # 生成覆盖层材料名
-    mat_overlying = model.Material(name=mat_overlying_name)  # 创建覆盖层材料
-    mat_overlying.Elastic(table=((EE_overlying, site.overlying.vv),))  # 定义覆盖层弹性参数
-    mat_overlying.Density(table=((site.overlying.density,),))  # 定义覆盖层密度
-
-    sec_bedrock_name = _next_available_name('Section-Bedrock', model.sections)  # 生成基岩截面名
-    model.HomogeneousSolidSection(name=sec_bedrock_name, material=mat_bedrock_name, thickness=1.0)  # 创建基岩截面
-
-    sec_overlying_name = _next_available_name('Section-Overlying', model.sections)  # 生成覆盖层截面名
-    model.HomogeneousSolidSection(name=sec_overlying_name, material=mat_overlying_name, thickness=1.0)  # 创建覆盖层截面
+    # ============ 逐层创建材料与截面（平坦自由场，全场各带齐全）============
+    strat = _build_stratigraphy(site, geom)  # 构造从下到上的分层带（平坦模型高度=H_upper，各带齐全）
+    band_sections = _create_band_materials_sections(model, strat)  # 逐带创建材料与截面
+    log_step(logger, '%s 已创建 %d 个材料带的材料与截面（平坦自由场）', model_name, len(strat))  # 记录材料/截面创建日志
 
     # 装配
     assembly = model.rootAssembly  # 获取装配体对象
@@ -744,13 +945,10 @@ def create_flat_model(site, geom, mesh_size, logger=None):
     inst_name = _next_available_name(part_name, assembly.instances)  # 生成实例名称
     assembly.Instance(name=inst_name, part=part, dependent=ON)  # 创建零件实例
 
-    # ============ 水平切分面 ============
-    part_faces = part.faces  # 获取当前面集合
-    partition_sketch = model.ConstrainedSketch(name='__flat_bedrock_partition__', sheetSize=max(total_L, H_flat) * 2)  # 创建基岩界面草图
-    partition_sketch.Line(point1=(total_L, bedrock_thickness), point2=(0.0, bedrock_thickness))  # 绘制基岩界面
-    part.PartitionFaceBySketch(faces=part_faces, sketch=partition_sketch)  # 按界面切分面
-    del model.sketches['__flat_bedrock_partition__']  # 删除临时草图
-    log_step(logger, '%s 平坦自由场网格前切割完成', model_name)  # 记录切分日志
+    # ============ 水平切分各材料界面 ============
+    interfaces = _interface_y_list(strat)  # 从分层带提取各材料界面 y（从下到上）
+    _partition_horizontal(model, part, geom, interfaces, 'flat_hpartition')  # 逐条水平切分
+    log_step(logger, '%s 平坦自由场水平界面切分完成: 界面数=%d', model_name, len(interfaces))  # 记录切分日志
 
     picked_regions = part.faces  # 选取全部面作为网格区域
     part.setMeshControls(regions=picked_regions, elemShape=QUAD, technique=STRUCTURED)  # 设置结构化四边形网格
@@ -760,36 +958,10 @@ def create_flat_model(site, geom, mesh_size, logger=None):
     part.generateMesh()  # 生成网格
     log_step(logger, '%s 平坦模型网格已生成: 尺寸=%.2f', model_name, mesh_size)  # 记录网格日志
 
-    # ============ 截面分配 ============
-    sec_assignments = {
-        'bedrock': [],
-        'overlying': []
-    }
-
-    for face in part.faces:
-        centroid = face.getCentroid()
-        yc = centroid[1] if len(centroid) >= 2 else centroid[0][1]
-
-        if yc < bedrock_thickness:
-            sec_assignments['bedrock'].append(face)
-        else:
-            sec_assignments['overlying'].append(face)
-
-    def _to_face_sequence(face_list):
-        face_seq = part.faces[0:0]
-        for face in face_list:
-            face_seq = face_seq + part.faces[face.index:face.index + 1]
-        return face_seq
-
-    if sec_assignments['bedrock']:
-        part.SectionAssignment(region=Region(faces=_to_face_sequence(sec_assignments['bedrock'])),
-                               sectionName=sec_bedrock_name, offset=0.0, offsetType=MIDDLE_SURFACE,
-                               offsetField='', thicknessAssignment=FROM_SECTION)
-    if sec_assignments['overlying']:
-        part.SectionAssignment(region=Region(faces=_to_face_sequence(sec_assignments['overlying'])),
-                               sectionName=sec_overlying_name, offset=0.0, offsetType=MIDDLE_SURFACE,
-                               offsetField='', thicknessAssignment=FROM_SECTION)
-    log_step(logger, '%s 截面属性分配完成（平坦自由场）', model_name)
+    # ============ 按质心 y 落带分配截面 ============
+    counts = _assign_sections_by_band(part, band_sections)  # 逐带按质心分配截面
+    log_step(logger, '%s 截面属性分配完成（平坦自由场）: %s', model_name,  # 记录截面分配日志
+             ', '.join('%s=%d' % (n, c) for n, c in counts))  # 输出各带面数
 
     assembly.regenerate()
 
@@ -966,9 +1138,10 @@ def VAB_oblique(site, geom, angle,
                 acc_file=None, step_name=None, logger=None):
     """为二维模型施加粘弹性人工边界（弹簧-阻尼器）与斜入射 SV 波等效节点力。
 
-    site: Site 对象（两层材料 + 基岩厚度）
-    geom: Geometry 对象（几何，含 H_upper/H_lower/left_flat/w_slope/bedrock_thickness）
+    site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
+    geom: Geometry 对象（几何，含 H_upper/H_lower/left_flat/w_slope/bedrock_thickness/layer_interfaces）
     angle: SV 波入射角（度）
+    多层推广：自由场按各节点"所在成层柱"逐层射线法计算（见 _compute_freefield_at_node）。
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     t0 = time.time()  # 记录函数开始时间
@@ -998,9 +1171,10 @@ def VAB_oblique(site, geom, angle,
             raise ValueError('%s Part节点集 %s 为空' % (model_name, set_name))  # 抛出空节点集异常
         return instance.nodes.sequenceFromLabels(labels)  # 按标签获取实例节点序列
 
-    # 材料参数计算
+    # 材料参数计算与场地分层
     mat_bedrock = _compute_material_params(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩材料参数
-    mat_overlying = _compute_material_params(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层材料参数
+    strat = _build_stratigraphy(site, geom, ymin=0.0)  # 构造从下到上的场地分层带（基岩 + 各有限层）
+    _strat_params = [_compute_material_params(b['mat'].cs, b['mat'].vv, b['mat'].density) for b in strat]  # 各带材料派生参数（弹簧系数用）
 
     # 获取模型尺寸（左/右边界最高点与底边 y）
     l_nodes = get_instance_nodes_from_part_set('Left_boundary')  # 获取左边界节点
@@ -1014,11 +1188,12 @@ def VAB_oblique(site, geom, angle,
 
     ymax = max(ymax_l, ymax_r)  # 取左右边界最高点中的较大值（弹簧刚度参考长度 R）
 
-    # 按节点所在材质层选择材料参数（基岩/覆盖层）
+    # 按节点所在材质层选择材料参数（按分层带 y 落带，支持任意层数）
     def pick_material(x_coord, y_coord):  # 定义按节点坐标选择材料的函数
-        if y_coord < geom.bedrock_thickness + 1e-4:  # 判断节点是否位于基岩层
-            return mat_bedrock  # 返回基岩材料参数
-        return mat_overlying  # 否则返回覆盖层材料参数
+        for band, params in zip(strat, _strat_params):  # 从下到上遍历各材料带
+            if band['y0'] - 1e-4 <= y_coord < band['y1'] + 1e-4:  # 判断节点 y 是否落入该带
+                return params  # 返回该带材料参数
+        return _strat_params[-1]  # 兜底返回最顶带材料参数
 
     # 构建三条边界的节点列表（含影响长度与弹簧-阻尼系数）
     nodes_by_boundary = {  # 各边界 -> BoundaryNode 列表
@@ -1030,36 +1205,21 @@ def VAB_oblique(site, geom, angle,
 
     _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logger)  # 施加接地弹簧-阻尼器
 
-    # ============ 入射角处理 ============
+    # ============ 入射角处理与水平慢度 ============
     if angle == 0:  # 判断入射角是否为零
         angle = 1e-10  # 用极小角度替代零角度
     else:  # 处理非零角度
         angle = round(angle, 4)  # 保留四位小数
-    alpha1 = math.radians(angle)  # 将角度转换为弧度
+    alpha1 = math.radians(angle)  # 将角度转换为弧度（基岩 SV 入射角）
 
-    # ============ 射线法等效反射/转换系数（全局，与节点厚度无关）============
     cs1 = mat_bedrock['cs']  # 基岩剪切波速
     cp1 = mat_bedrock['cp']  # 基岩纵波波速
-    cs2 = mat_overlying['cs']  # 覆盖层剪切波速
-    cp2 = mat_overlying['cp']  # 覆盖层纵波波速
-
-    interface_12 = _compute_interface_sv_coeff(alpha1, mat_bedrock, mat_overlying)  # 界面 1->2 系数（基岩入射）
-    alpha2 = interface_12['alpha2']  # 覆盖层内 SV 透射角
+    p_horiz = math.sin(alpha1) / cs1  # 水平慢度（Snell 守恒，全场不变）
     beta1 = _safe_arcsin(cp1 * math.sin(alpha1) / cs1)  # 基岩 P 波反射角
-    beta2 = _safe_arcsin(cp2 * math.sin(alpha2) / cs2) if abs(math.sin(alpha2)) > 0 else 1e-10  # 覆盖层 P 波角
-    free_sv_2 = _compute_free_surface_sv_coeff(alpha2, cp2, cs2)  # 覆盖层自由面 SV 反射/转换系数
-    free_p_2 = _compute_free_surface_p_coeff(beta2, cp2, cs2)  # 覆盖层自由面 P 反射/转换系数
-    interface_21 = _compute_interface_sv_coeff(alpha2, mat_overlying, mat_bedrock)  # 界面 2->1 系数（下行回基岩）
-
-    cycle_sv = free_sv_2['A1'] * interface_21['Rss']  # 覆盖层内一次 SV 混响的幅值因子
-    cycle_p = free_p_2['B2'] * interface_21['Rss']  # 覆盖层内一次 P 混响的幅值因子
     order_count = max(0, int(MAX_REFLECT_ORDER))  # 几何级数截断阶数
-    sum_cycle_sv = sum([cycle_sv ** k for k in range(order_count + 1)])  # SV 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
-    sum_cycle_p = sum([cycle_p ** k for k in range(order_count + 1)])  # P 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
-    Rss_eff = interface_12['Rss'] + interface_12['Tss'] * free_sv_2['A1'] * interface_21['Tss'] * sum_cycle_sv  # 等效 SV 反射系数
-    Rsp_eff = interface_12['Rsp'] + interface_12['Tss'] * free_sv_2['A2'] * interface_21['Tss'] * sum_cycle_p  # 等效 SV->P 转换系数
-    log_step(logger, '%s 射线法反射参数: Rss_eff=%.4f, Rsp_eff=%.4f, alpha2=%.4f, beta2=%.4f',  # 记录系数日志
-             model_name, Rss_eff, Rsp_eff, alpha2, beta2)  # 输出关键系数
+    _REFL_COEFF_CACHE.clear()  # 清空等效系数缓存（不同模型/入射角不可复用）
+    log_step(logger, '%s 多层射线法: 入射角=%.4f°, 水平慢度 p=%.6e, 层数(含基岩)=%d',  # 记录多层射线法参数
+             model_name, angle, p_horiz, len(strat))  # 输出入射角/慢度/层数
 
     # ============ 读取加速度时程并积分（保留 v7 基线校正）============
     # [输入幅值约定（#5）] 加速度记录积分得到的速度被当作"基底入射上行 SV 波"幅值 E；
@@ -1085,11 +1245,10 @@ def VAB_oblique(site, geom, angle,
 
     # ============ 逐节点用射线法计算自由场并组装等效力 ============
     ctx = FreeFieldCtx(  # 打包射线法等效力计算所需上下文
-        mat_bedrock=mat_bedrock, mat_overlying=mat_overlying, geom=geom,  # 材料与几何
-        ymax_l=ymax_l, ymax_r=ymax_r, ymin=ymin,  # 边界高度信息
-        alpha=alpha1, beta_p=beta1, alpha2=alpha2, beta2=beta2,  # 各波传播角
-        A1=Rss_eff, A2=Rsp_eff, cycle_sv=cycle_sv, cycle_p=cycle_p,  # 等效系数与混响幅值因子
-        GG=mat_bedrock['GG'], lam=mat_bedrock['lam'], cs=cs1, cp=cp1, cs2=cs2, cp2=cp2,  # 材料标量
+        site=site, geom=geom, strat=strat,  # 场地、几何、分层带
+        ymax_l=ymax_l, ymax_r=ymax_r, ymin=ymin,  # 各边界高度信息
+        alpha=alpha1, beta_p=beta1, p_horiz=p_horiz,  # 基岩入射角/P 反射角、水平慢度
+        GG=mat_bedrock['GG'], lam=mat_bedrock['lam'], cs=cs1, cp=cp1,  # 基岩材料标量（投影/应力用）
         VEL=VEL, DIS=DIS, dt=dt, time_arr=time_arr, max_reflect_order=order_count)  # 时程、步长、阶数
     field_data = _build_equivalent_forces(nodes_by_boundary, ctx)  # 计算所有边界节点等效力时程
     log_step(logger, '%s 所有边界等效节点力计算完成', model_name)  # 记录计算完成日志
@@ -1159,7 +1318,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
              job_name, num_cpus, memory_percent)  # 输出 CPU 和内存配置
 
     mdb.Job(name=job_name, model=model_name,  # 创建 Abaqus 作业
-            description='VAB oblique SV-wave analysis (Two-layered slope)',  # 设置作业描述
+            description='VAB oblique SV-wave analysis (Multi-layered slope)',  # 设置作业描述
             type=ANALYSIS, atTime=None, waitMinutes=0, waitHours=0,  # 设置作业调度参数
             queue=None, memory=memory_percent, memoryUnits=PERCENTAGE,  # 设置内存参数
             getMemoryFromAnalysis=True, explicitPrecision=SINGLE,  # 设置精度参数
@@ -1180,31 +1339,52 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
 # ==========================================================
 
 
+def build_site(material_cfg, geometry_cfg):
+    """由配置构建 Site 对象（基岩 + 从上到下的有限层列表），并校验层厚约束。
+
+    单层(layers 为空)→ 仅基岩；双层 → 基岩 + 覆盖层；三层 → 基岩 + 表层 + 覆盖层。
+    返回 (site, fixed_thicknesses)，fixed_thicknesses 为顶部各固定层厚度（从上到下，供 make_geometry 用）。
+    """  # 说明函数用途与返回
+    cs_bedrock = _compute_wave_speed_from_elastic_modulus(  # 由基岩弹性模量反算剪切波速
+        material_cfg['bedrock']['elastic_modulus'],  # 基岩杨氏模量
+        material_cfg['bedrock']['poisson_ratio'],  # 基岩泊松比
+        material_cfg['bedrock']['density'])  # 基岩密度
+    bedrock = Material(cs=cs_bedrock, vv=material_cfg['bedrock']['poisson_ratio'],  # 构建基岩材料（半空间）
+                       density=material_cfg['bedrock']['density'], thickness=None, name='Bedrock')  # 基岩无固定厚度
+    layers_cfg = material_cfg.get('layers', [])  # 读取有限层列表（从上到下）
+    layers = []  # 初始化有限层 Material 列表
+    fixed_thicknesses = []  # 初始化顶部固定层厚度列表（从上到下）
+    nL = len(layers_cfg)  # 有限层数量
+    for idx, lc in enumerate(layers_cfg):  # 自上而下遍历各有限层配置
+        cs = cs_bedrock / lc['velocity_ratio']  # 由相对基岩波速比计算该层剪切波速
+        is_bottom = (idx == nL - 1)  # 是否为最底有限层（覆盖层，厚度由几何决定）
+        thickness = None if is_bottom else lc['thickness']  # 最底层厚度为 None，其余取固定厚度
+        if not is_bottom:  # 非最底层须有固定厚度
+            fixed_thicknesses.append(lc['thickness'])  # 记录固定厚度
+        layers.append(Material(cs=cs, vv=lc['poisson_ratio'], density=lc['density'],  # 构建该有限层材料
+                               thickness=thickness, name=lc['name']))  # 填入厚度与名称
+    site = Site(bedrock=bedrock, layers=layers, bedrock_thickness=geometry_cfg['bedrock_thickness'])  # 组装场地对象
+    # 层厚约束校验：覆盖层须有正厚度（坡顶 H - 顶部固定厚度之和 > 0）
+    H = geometry_cfg['H_minus_h'] / (1.0 - geometry_cfg['h_over_H'])  # 总覆盖厚度 H
+    if sum(fixed_thicknesses) >= H - 1e-6 and nL >= 1:  # 顶部固定层之和不得吃光覆盖层厚度
+        raise ValueError('顶部固定层厚度之和(%.2f) >= 总覆盖厚 H(%.2f)，覆盖层无正厚度' %  # 抛出层厚错误
+                         (sum(fixed_thicknesses), H))  # 输出冲突数值
+    return site, fixed_thicknesses  # 返回场地对象与固定厚度列表
+
+
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
-    logger = log_step('VAB_oblique_TAF_double.log')  # 初始化日志并写入当前版本日志文件
+    logger = log_step('VAB_oblique_TAF_multilayer.log')  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
 
     try:
         log_step(logger, '脚本开始执行')  # 写入脚本启动日志
 
-        # 波动参数计算
-        cs_bedrock = _compute_wave_speed_from_elastic_modulus(
-            material_cfg['bedrock']['elastic_modulus'],
-            material_cfg['bedrock']['poisson_ratio'],
-            material_cfg['bedrock']['density']
-        )
-        cs_overlying = cs_bedrock / material_cfg['overlying']['velocity_ratio']  # 计算覆盖层剪切波速
-
-        # 打包场地材料与斜坡几何为结构化对象（取代散标量透传）
-        site = Site(  # 构建双层场地对象
-            bedrock=Material(cs=cs_bedrock,  # 基岩剪切波速
-                             vv=material_cfg['bedrock']['poisson_ratio'],  # 基岩泊松比
-                             density=material_cfg['bedrock']['density']),  # 基岩密度（构成基岩材料）
-            overlying=Material(cs=cs_overlying,  # 覆盖层剪切波速
-                               vv=material_cfg['overlying']['poisson_ratio'],  # 覆盖层泊松比
-                               density=material_cfg['overlying']['density']),  # 覆盖层密度（构成覆盖层材料）
-            bedrock_thickness=geometry_cfg['bedrock_thickness'])  # 基岩层厚度
+        # 构建场地材料（基岩 + 有限层列表）并校验层厚
+        site, fixed_thicknesses = build_site(material_cfg, geometry_cfg)  # 由配置构建场地对象与固定层厚度
+        n_total_layers = 1 + len(site.layers)  # 总层数（含基岩）
+        log_step(logger, '场地分层构建完成: 总层数(含基岩)=%d, 有限层=%s',  # 记录分层信息
+                 n_total_layers, [L.name for L in site.layers])  # 输出层名
 
         geom = make_geometry(  # 构建斜坡几何对象（含全部派生量）
             total_L=geometry_cfg['total_L'],  # 模型总长度
@@ -1212,10 +1392,12 @@ def main():
             i=geometry_cfg['i'],  # 斜坡倾角
             h_over_H=geometry_cfg['h_over_H'],  # 深度比 h/H
             left_flat=geometry_cfg['left_flat'],  # 上平台长度
-            bedrock_thickness=geometry_cfg['bedrock_thickness'])  # 基岩层厚度
+            bedrock_thickness=geometry_cfg['bedrock_thickness'],  # 基岩层厚度
+            fixed_thicknesses=fixed_thicknesses)  # 顶部固定层厚度（推算固定层间界面）
         geom_flat = make_flat_geometry(geom)  # 派生平坦自由场几何
 
-        cae_name = 'h{}_i{}_a{}.cae'.format(int(geom.H_minus_h), int(geom.i), int(material_cfg['angle']))  # 生成工程文件名
+        cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),  # 生成工程文件名（含层数）
+                                                int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数
         acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
 
         base_model, part_name, inst_name = create_model(  # 创建斜坡基础几何与网格模型
