@@ -38,7 +38,20 @@ import matplotlib.pyplot as plt  # 导入绘图子模块
 import matplotlib.font_manager as fm  # 导入字体管理器
 import matplotlib.ticker as mticker  # 导入刻度定位器（主/次刻度、网格）
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 确保同目录的 case_meta.py 可被导入
+def _locate_case_meta_dir():  # 在仓库内健壮定位 case_meta.py 所在目录（兼容目录整理/改名）
+    """从本脚本出发，尝试同目录、相邻 General/、并向上各级查找 General/case_meta.py；返回首个命中目录。"""
+    here = os.path.dirname(os.path.abspath(__file__))  # 本脚本所在目录
+    cands = [here, os.path.join(here, '..', 'General'), os.path.join(here, '..', '..', 'Postprocess', 'General')]  # 常见候选位置
+    d = here  # 自当前目录向上逐级回溯
+    for _ in range(6):  # 最多上溯 6 级
+        cands.append(os.path.join(d, 'Postprocess', 'General'))  # 任一祖先下的 Postprocess/General
+        d = os.path.dirname(d)  # 上移一级
+    for c in cands:  # 逐个候选检查
+        if os.path.isfile(os.path.join(c, 'case_meta.py')):  # 命中 case_meta.py
+            return os.path.abspath(c)  # 返回其目录
+    return here  # 兜底返回本目录（同目录拷贝场景）
+
+sys.path.insert(0, _locate_case_meta_dir())  # 把 case_meta.py 所在目录加入导入路径
 import case_meta as cm  # 导入统一元数据模块（a0 换算等）
 
 # ==============================================================================
