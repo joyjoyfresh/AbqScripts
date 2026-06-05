@@ -33,12 +33,8 @@ SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
 #   thickness      → 表层厚度 h1（50.0=h1/(H−h)=0.25；150.0=0.75）；
 #   angle          → SV 入射角（0 或 15）。
 PARAMETER_CASES = [  # 定义参数方案列表（图15 全部 8 工况：2 厚度 × 2 软硬 × 2 角度）
-    {"folder_tag": "soft-t25-a0",  "params": {"velocity_ratio": 5.0,  "thickness": 50.0,  "angle": 0}},   # 软 Vs1/Vs2=0.5, h1/(H-h)=0.25, 0°
-    {"folder_tag": "soft-t25-a15", "params": {"velocity_ratio": 5.0,  "thickness": 50.0,  "angle": 15}},  # 软, 0.25, 15°
     {"folder_tag": "soft-t75-a0",  "params": {"velocity_ratio": 5.0,  "thickness": 150.0, "angle": 0}},   # 软, h1/(H-h)=0.75, 0°
     {"folder_tag": "soft-t75-a15", "params": {"velocity_ratio": 5.0,  "thickness": 150.0, "angle": 15}},  # 软, 0.75, 15°
-    {"folder_tag": "hard-t25-a0",  "params": {"velocity_ratio": 1.25, "thickness": 50.0,  "angle": 0}},   # 硬 Vs1/Vs2=2.0, 0.25, 0°
-    {"folder_tag": "hard-t25-a15", "params": {"velocity_ratio": 1.25, "thickness": 50.0,  "angle": 15}},  # 硬, 0.25, 15°
     {"folder_tag": "hard-t75-a0",  "params": {"velocity_ratio": 1.25, "thickness": 150.0, "angle": 0}},   # 硬, 0.75, 0°
     {"folder_tag": "hard-t75-a15", "params": {"velocity_ratio": 1.25, "thickness": 150.0, "angle": 15}},  # 硬, 0.75, 15°
 ]  # 结束参数方案列表定义
