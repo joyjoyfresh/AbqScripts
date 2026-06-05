@@ -1392,6 +1392,32 @@ def build_site(material_cfg, geometry_cfg):
     return site, fixed_thicknesses  # 返回场地对象与固定厚度列表
 
 
+def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger):  # 写出统一工况元数据
+    """把本工况参数固化为 case_meta.json（依赖随脚本拷入工况文件夹的 case_meta.py）。失败仅告警、不中断建模。"""
+    try:  # 元数据写出不应影响建模主流程
+        _here = os.path.dirname(os.path.abspath(__file__))  # 脚本所在目录（工况文件夹）
+        import sys  # 导入 sys 以补充导入路径
+        if _here not in sys.path:  # 确保同目录的 case_meta.py 可被导入
+            sys.path.insert(0, _here)  # 将脚本目录加入搜索路径
+        import case_meta as _cm  # 导入统一元数据模块
+        bedrock_mat = _cm.material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料规范字典
+                                   site.bedrock.density, site.bedrock.thickness)  # 填入密度与厚度
+        layer_mats = [_cm.material(L.name, L.cs, L.vv, L.density, L.thickness) for L in site.layers]  # 各有限层（从上到下）
+        meta = _cm.build_meta(  # 构建规范元数据
+            model_script=script_name, incident_angle=material_cfg['angle'],  # 建模脚本名与入射角
+            geometry={'i': geom.i, 'total_L': geom.total_L, 'left_flat': geom.left_flat,  # 几何输入项
+                      'H_minus_h': geom.H_minus_h, 'h_over_H': geom.h_over_H,  # 斜坡高度差与深度比
+                      'bedrock_thickness': geom.bedrock_thickness, 'H': geom.H, 'h': geom.h,  # 基岩厚度与派生覆盖厚度
+                      'w_slope': geom.w_slope},  # 坡面水平长度
+            bedrock=bedrock_mat, layers=layer_mats, mesh_size=mesh_size)  # 基岩、有限层与网格
+        path = _cm.write_case_meta(os.getcwd(), meta)  # 写入当前工况文件夹
+        if logger:  # 有日志器时记录
+            log_step(logger, 'case_meta.json 已写出: %s', path)  # 输出成功日志
+    except Exception as _e:  # 捕获任何写出异常
+        if logger:  # 有日志器时记录告警
+            log_step(logger, 'case_meta.json 写出失败(不影响建模): %s', str(_e))  # 输出失败告警
+
+
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
     logger = log_step('VAB_oblique_TAF_multilayer_v2.log')  # 初始化日志并写入当前版本日志文件
@@ -1415,6 +1441,8 @@ def main():
             bedrock_thickness=geometry_cfg['bedrock_thickness'],  # 基岩层厚度
             fixed_thicknesses=fixed_thicknesses)  # 顶部固定层厚度（推算固定层间界面）
         geom_flat = make_flat_geometry(geom)  # 派生平坦自由场几何
+
+        _write_case_meta(material_cfg, geom, site, mesh_size, os.path.basename(__file__), logger)  # 写出统一工况元数据 case_meta.json
 
         cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),  # 生成工程文件名（含层数）
                                                 int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数

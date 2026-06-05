@@ -14,22 +14,20 @@
 
 数据来源（仅集中 results/ 模式，与 Plot_Fig15_compare_v3 同口径）：
   先用 Collect_TAF_results_v1.py 把各工况 CSV 汇到 results/，本脚本读取：
-    - results/index.csv：每个 TAF 文件的工况属性（source_folder、record、angle=θs 入射角 等）；
+    - results/index.csv：每个 TAF 文件的统一规范列（由 Collect_TAF_results_v2 据 case_meta.json 写出，
+      含 slope_i 坡角、incident_angle 入射角 θs、a0_base 无量纲频率换算基数、各层 Vs、Vr/Vs2 等）；
     - results/ 下 TAF-*.csv：地表 TAF 曲线数据；
     - results/ 内任一 PGA-*-slope.csv：坡顶/坡脚(#1/#2)位置。
-  注意：index.csv 不直接含【坡角 i】与【无量纲频率 a0】，本脚本按下述规则推导：
-    · 坡角 i：从 source_folder 文件夹名解析（默认匹配 i30/i60，见 SLOPE_ANGLE_REGEX）；
-    · a0：从 record 中的频率 fc(Hz) 按 a0 = fc·2·(H−h)/Vs2 计算（默认 Vs2=800、H−h=200 → a0=fc/2）。
-  若你的命名/参数不同，请直接改下方配置常量。
+  坡角 i、入射角 θs 直接取自 index.csv 规范列；无量纲频率 a0 由 record 主频 fc(Hz) 与该工况 a0_base
+    按 a0 = fc·a0_base 计算（a0_base=2·(H−h)/Vs2，逐工况随 case_meta 给定，无需在此猜 Vs2/几何）。
 
 运行：
-  先 `python Postprocess/Collect_TAF_results_v1.py <工况根目录>` 生成 results/，再
+  先 `python Postprocess/Collect_TAF_results_v2.py <工况根目录>` 生成 results/index.csv，再
   `python Postprocess/Plot_Multi_TAF_v4.py <工况根目录>`（自动找其下 results/）
   或直接 `python Postprocess/Plot_Multi_TAF_v4.py <results 目录>`；不传参数取当前目录。
 """
 
 import os  # 导入系统接口模块
-import re  # 导入正则表达式模块
 import sys  # 导入系统参数模块
 import glob  # 导入文件匹配模块
 import numpy as np  # 导入数值计算库
@@ -40,13 +38,12 @@ import matplotlib.pyplot as plt  # 导入绘图子模块
 import matplotlib.font_manager as fm  # 导入字体管理器
 import matplotlib.ticker as mticker  # 导入刻度定位器（主/次刻度、网格）
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 确保同目录的 case_meta.py 可被导入
+import case_meta as cm  # 导入统一元数据模块（a0 换算等）
+
 # ==============================================================================
 #  配置与常量
 # ==============================================================================
-SLOPE_ANGLE_REGEX = r'(?:^|[^a-z0-9])i[-_]?(\d+(?:\.\d+)?)'  # 从文件夹名解析坡角 i 的正则（默认匹配 i30 / i_60 等）
-A0_VS2 = 800.0  # 计算无量纲频率 a0 用的覆盖层剪切波速 Vs2 (m/s)
-A0_H_MINUS_H = 200.0  # 计算无量纲频率 a0 用的斜坡高差 (H−h) (m)
-FREQ_HZ_TO_A0 = None  # 频率→a0 的直接映射字典（如 {2.0:1.0,3.0:1.5,4.0:2.0}）；为 None 时用公式 a0=fc·2·(H−h)/Vs2
 A0_DECIMALS = 1  # a0 数值四舍五入保留的小数位（用于分组与样式匹配）
 
 # 各 a0 对应的曲线样式（论文图8：1.0 虚线、1.5 点划线、2.0 实线，配不同颜色便于区分）
@@ -131,42 +128,22 @@ def read_crest_toe_any(data_dir):  # 从目录内任一 PGA-*-slope.csv 读取�
 
 
 # ==============================================================================
-#  坡角 i 与无量纲频率 a0 的推导
+#  坡角 i 与无量纲频率 a0 的读取（直接用 index.csv 规范列，不再解析文件夹名）
 # ==============================================================================
-def parse_slope_angle(row):  # 从 index 行推导坡角 i
-    """优先用 index.csv 中的 slope_angle/i 列；否则从 source_folder 文件夹名按正则解析；失败返回 None。"""
-    for col in ('slope_angle', 'i', 'slope_i'):  # 依次尝试可能直接给出坡角的列名
-        if col in row and pd.notna(row.get(col)):  # 该列存在且非空
-            try:  # 尝试转为浮点
-                return float(row[col])  # 返回坡角数值
-            except (TypeError, ValueError):  # 非数值
-                pass  # 继续回退到文件夹名解析
-    folder = str(row.get('source_folder', ''))  # 取来源文件夹名
-    m = re.search(SLOPE_ANGLE_REGEX, folder, re.IGNORECASE)  # 按配置正则匹配坡角标签（如 i30）
-    if m:  # 匹配成功
-        return float(m.group(1))  # 返回解析到的坡角
-    return None  # 无法识别坡角
+def _num(row, col):  # 从 index 行安全取数值列
+    """取 row[col] 并转 float；列缺失/空/非数值返回 None。"""
+    if col not in row or pd.isna(row.get(col)):  # 列不存在或为空
+        return None  # 返回空
+    try:  # 尝试转换
+        return float(row[col])  # 返回浮点
+    except (TypeError, ValueError):  # 非数值
+        return None  # 返回空
 
 
-def parse_freq_hz(record):  # 从记录名解析输入波频率 fc(Hz)
-    """匹配 record 中的频率字段（如 ricker_4Hz → 4.0）；失败返回 None。"""
-    m = re.search(r'(\d+(?:\.\d+)?)\s*Hz', str(record), re.IGNORECASE)  # 匹配数字+Hz
-    if m:  # 匹配成功
-        return float(m.group(1))  # 返回频率数值
-    return None  # 无频率信息
-
-
-def compute_a0(record):  # 由记录名推导无量纲频率 a0
-    """先解析频率 fc(Hz)；若配置了 FREQ_HZ_TO_A0 字典则查表，否则按 a0=fc·2·(H−h)/Vs2 计算。失败返回 None。"""
-    fc = parse_freq_hz(record)  # 解析输入波频率
-    if fc is None:  # 无频率
-        return None  # 无法推导 a0
-    if isinstance(FREQ_HZ_TO_A0, dict):  # 若配置了直接映射表
-        for k, v in FREQ_HZ_TO_A0.items():  # 遍历映射表
-            if abs(float(k) - fc) < 1e-6:  # 频率匹配
-                return round(float(v), A0_DECIMALS)  # 返回映射的 a0
-        return None  # 映射表中无此频率
-    a0 = fc * 2.0 * A0_H_MINUS_H / A0_VS2 if A0_VS2 > 0 else None  # 按物理公式计算 a0
+def compute_a0(row):  # 由 index 行推导无量纲频率 a0
+    """用该工况规范列 a0_base 与 record 主频按 a0=fc·a0_base 计算（逐工况自洽）；失败返回 None。"""
+    a0_base = _num(row, 'a0_base')  # 该工况的 a0 换算基数（来自 case_meta）
+    a0 = cm.record_to_a0(row.get('record'), a0_base)  # 由记录名主频 × a0_base 得 a0
     return round(a0, A0_DECIMALS) if a0 is not None else None  # 四舍五入返回
 
 
@@ -196,12 +173,9 @@ def collect_cases_from_index(results_dir):  # 读取集中结果并整理为工�
         fpath = os.path.join(results_dir, fname)  # 完整路径
         if not os.path.isfile(fpath):  # 文件缺失
             print('  跳过(文件不存在): %s' % fname); continue  # 提示并跳过
-        slope_i = parse_slope_angle(r)  # 推导坡角 i
-        a0 = compute_a0(r.get('record', fname))  # 推导无量纲频率 a0
-        try:  # 解析入射角 θs
-            theta = float(r['angle'])  # index 的 angle 列即 SV 入射角
-        except (TypeError, ValueError):  # 缺失/非数值
-            theta = None  # 记为未知
+        slope_i = _num(r, 'slope_i')  # 坡角 i（index 规范列）
+        theta = _num(r, 'incident_angle')  # 入射角 θs（index 规范列）
+        a0 = compute_a0(r)  # 无量纲频率 a0（a0_base × 记录主频）
         if slope_i is None or a0 is None or theta is None:  # 关键分组属性缺失
             print('  跳过(无法识别 i/a0/θs): %s (i=%s, a0=%s, θs=%s)' % (fname, slope_i, a0, theta)); continue  # 提示并跳过
         try:  # 读取 TAF 曲线数据

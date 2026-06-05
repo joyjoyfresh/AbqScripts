@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-  # 声明源码编码为 UTF-8
-"""批量创建文件夹并按顺序执行脚本。
-
-【本版 = 验证用】复刻 Autorun_TAF_double_v2.py 的"模型情况"（同样的 4/6/8Hz Ricker 输入、
-同样的 i=30/60 × angle=0/15 四组工况），但把建模脚本换成双层配置的
-VAB_oblique_TAF_multilayer_v3.py（layers 仅一层覆盖层，与 double_v4 完全对齐）。
-配合原 Autorun_TAF_double_v2.py（跑 double_v4）分别产出 verify-* 与 double-* 文件夹，
-对比同名工况的 TAF 输出即可验证 multilayer 引擎与 double_v4 结果是否一致。
-"""
+"""批量创建文件夹并按顺序执行脚本。"""
 
 import os  # 导入操作系统路径与目录模块
 import re  # 导入正则模块用于替换参数
@@ -26,6 +19,7 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 定义 El_Centro 文件完整路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_6Hz.txt",  # 定义 Loma_Prieta 文件完整路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_8Hz.txt",  # 定义 Northridge 文件完整路径
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\case_meta.py",  # 统一工况元数据模块（随脚本拷入工况文件夹，供建模脚本写 case_meta.json）
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表

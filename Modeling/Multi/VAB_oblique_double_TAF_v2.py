@@ -64,25 +64,24 @@ def main():
             material_cfg['bedrock']['poisson_ratio'],
             material_cfg['bedrock']['density']
         )
-        cs_overlying = cs_bedrock / material_cfg['overlying']['velocity_ratio']
+        cs_overlying = cs_bedrock / material_cfg['overlying']['velocity_ratio']  # 计算覆盖层剪切波速
 
         # 几何高度计算
-        H_minus_h = geometry_cfg['H_minus_h']
-        h_over_H = geometry_cfg['h_over_H']
-        H = H_minus_h / (1.0 - h_over_H)
-        h = H - H_minus_h
-        bedrock_thickness = geometry_cfg['bedrock_thickness']
-        H_lower = bedrock_thickness + h
-        H_flat = bedrock_thickness + H
-        H_upper = bedrock_thickness + H
-        w_slope = H_minus_h / math.tan(math.radians(geometry_cfg['i']))
-        total_L = geometry_cfg['total_L']
-        left_flat = geometry_cfg['left_flat']
+        H_minus_h = geometry_cfg['H_minus_h']  # 读取斜坡高度差
+        h_over_H = geometry_cfg['h_over_H']  # 读取深度比
+        H = H_minus_h / (1.0 - h_over_H)  # 计算总覆盖层厚度
+        h = H - H_minus_h  # 计算下部覆盖层高度
+        bedrock_thickness = geometry_cfg['bedrock_thickness']  # 读取基岩层厚度
+        H_lower = bedrock_thickness + h  # 计算坡脚地表高度
+        H_flat = bedrock_thickness + H  # 计算平坦场地总高度
+        H_upper = bedrock_thickness + H  # 计算坡顶地表高度
+        w_slope = H_minus_h / math.tan(math.radians(geometry_cfg['i']))  # 计算坡面水平长度
+        total_L = geometry_cfg['total_L']  # 读取模型总长度
+        left_flat = geometry_cfg['left_flat']  # 读取左平台长度
 
-        # 网格尺寸设为高度 (H - h) 的 4%
-        mesh_size = 4
+        mesh_size = 4  # 网格尺寸设为 4 m
 
-        cae_name = 'h{}_i{}_a{}.cae'.format(int(H_minus_h), int(geometry_cfg['i']), int(material_cfg['angle']))
+        cae_name = 'h{}_i{}_a{}.cae'.format(int(H_minus_h), int(geometry_cfg['i']), int(material_cfg['angle']))  # 生成工程文件名
 
         acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
 
@@ -211,34 +210,9 @@ def _compute_elastic_modulus_from_wave_speed(cs, vv, density):  # 定义弹性�
     return EE  # 返回杨氏模量
 
 
-def wave_vectors(wave_type, direction, angle, GG, lam, c):  # 定义统一波场系数函数
-    """
-    计算平面波的位移方向和应力系数（每单位速度幅值）。
-    wave_type: 'SV' 或 'P'
-    direction: 'up' 或 'down'
-    angle: 波传播角度（弧度，相对于竖直方向）
-    GG: 剪切模量
-    lam: 拉梅常数
-    c: 波速（SV 用 cs，P 用 cp）
-    返回: (ux, uy, sig_xx, sig_yy, tau_xy)
-    """
-    p = math.sin(angle) / c  # 计算水平慢度分量
-    if direction == 'up':  # 处理上行波
-        q = math.cos(angle) / c  # 计算正向垂直慢度
-        if wave_type == 'SV':  # SV 上行波
-            ux, uy = math.cos(angle), -math.sin(angle)  # 计算 SV 上行位移方向
-        else:  # P 上行波
-            ux, uy = math.sin(angle), math.cos(angle)  # 计算 P 上行位移方向
-    else:  # 处理下行波
-        q = -math.cos(angle) / c  # 计算反向垂直慢度
-        if wave_type == 'SV':  # SV 下行波
-            ux, uy = -math.cos(angle), -math.sin(angle)  # 计算 SV 下行位移方向
-        else:  # P 下行波
-            ux, uy = math.sin(angle), -math.cos(angle)  # 计算 P 下行位移方向
-    sig_xx = -(lam + 2 * GG) * p * ux - lam * q * uy  # 计算 σ_xx 应力系数
-    sig_yy = -(lam + 2 * GG) * q * uy - lam * p * ux  # 计算 σ_yy 应力系数
-    tau_xy = -GG * (q * ux + p * uy)  # 计算 τ_xy 应力系数
-    return ux, uy, sig_xx, sig_yy, tau_xy  # 返回位移方向和应力系数
+def _safe_arcsin(value):  # 定义安全反正弦函数
+    """对 arcsin 输入做截断，避免浮点超界。"""  # 说明函数用途
+    return math.asin(max(-1.0, min(1.0, value)))  # 将输入截断到合法范围后再求反正弦
 
 
 def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
@@ -250,111 +224,8 @@ def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
     return {'GG': GG, 'EE': EE, 'lam': lam, 'cp': cp, 'cs': cs, 'vv': vv, 'density': density}  # 返回材料参数字典
 
 
-def _compute_interface_sv_coeff(alpha1, mat1, mat2):  # 定义完整 Zoeppritz 界面系数计算函数
-    """
-    使用完整 Zoeppritz 方程计算 SV 波在两层界面的反射/透射系数。
-    alpha1: 入射 SV 波角度（弧度）
-    mat1: 入射层材料参数字典
-    mat2: 透射层材料参数字典
-    返回: (Rss, Rsp, Tss, Tsp, beta1, alpha2, beta2)
-    """
-    p = math.sin(alpha1) / mat1['cs']  # 计算水平慢度（Snell 定律守恒量）
-    if abs(p * mat1['cp']) >= 1.0 or abs(p * mat2['cs']) >= 1.0 or abs(p * mat2['cp']) >= 1.0:  # 检查临界角
-        raise ValueError('SV 波入射角超过临界角, p=%.6f' % p)  # 抛出临界角异常
-    beta1 = math.asin(p * mat1['cp'])  # 计算入射层反射 P 波角
-    alpha2 = math.asin(p * mat2['cs'])  # 计算透射层 SV 波角
-    beta2 = math.asin(p * mat2['cp'])  # 计算透射层 P 波角
-    GG1, lam1 = mat1['GG'], mat1['lam']  # 读取入射层弹性参数
-    GG2, lam2 = mat2['GG'], mat2['lam']  # 读取透射层弹性参数
-    # 获取各波在界面的应力分量
-    _, _, _, syy_inc, sxy_inc = wave_vectors('SV', 'up', alpha1, GG1, lam1, mat1['cs'])  # 入射 SV 上行
-    _, _, _, syy_rss, sxy_rss = wave_vectors('SV', 'down', alpha1, GG1, lam1, mat1['cs'])  # 反射 SV 下行
-    _, _, _, syy_rsp, sxy_rsp = wave_vectors('P', 'down', beta1, GG1, lam1, mat1['cp'])  # 反射 P 下行
-    _, _, _, syy_tss, sxy_tss = wave_vectors('SV', 'up', alpha2, GG2, lam2, mat2['cs'])  # 透射 SV 上行
-    _, _, _, syy_tsp, sxy_tsp = wave_vectors('P', 'up', beta2, GG2, lam2, mat2['cp'])  # 透射 P 上行
-    # 构建 4×4 线性方程组: 未知量 [Rss, Rsp, Tss, Tsp]
-    A = np.zeros((4, 4))  # 初始化系数矩阵
-    B = np.zeros(4)  # 初始化右端向量
-    # 第 0 行: ux 连续条件
-    A[0, 0] = -math.cos(alpha1)  # Rss（SV 下行）的 ux
-    A[0, 1] = math.sin(beta1)  # Rsp（P 下行）的 ux
-    A[0, 2] = -math.cos(alpha2)  # Tss（SV 上行）的 ux（取负号对应界面上侧）
-    A[0, 3] = -math.sin(beta2)  # Tsp（P 上行）的 ux（取负号对应界面上侧）
-    B[0] = -math.cos(alpha1)  # 入射 SV 上行波的 ux（与 Rss 同侧）
-    # 第 1 行: uy 连续条件
-    A[1, 0] = -math.sin(alpha1)  # Rss 的 uy
-    A[1, 1] = -math.cos(beta1)  # Rsp 的 uy
-    A[1, 2] = math.sin(alpha2)  # Tss 的 uy（取负号对应界面上侧）
-    A[1, 3] = -math.cos(beta2)  # Tsp 的 uy（取负号对应界面上侧）
-    B[1] = math.sin(alpha1)  # 入射 SV 上行波的 uy
-    # 第 2 行: τ_xy 连续条件
-    A[2, 0] = sxy_rss  # Rss 的 τ_xy
-    A[2, 1] = sxy_rsp  # Rsp 的 τ_xy
-    A[2, 2] = -sxy_tss  # Tss 的 τ_xy（界面两侧方向相反）
-    A[2, 3] = -sxy_tsp  # Tsp 的 τ_xy
-    B[2] = -sxy_inc  # 入射 SV 波的 τ_xy
-    # 第 3 行: σ_yy 连续条件
-    A[3, 0] = syy_rss  # Rss 的 σ_yy
-    A[3, 1] = syy_rsp  # Rsp 的 σ_yy
-    A[3, 2] = -syy_tss  # Tss 的 σ_yy
-    A[3, 3] = -syy_tsp  # Tsp 的 σ_yy
-    B[3] = -syy_inc  # 入射 SV 波的 σ_yy
-    X = np.linalg.solve(A, B)  # 求解 4×4 线性方程组
-    return X[0], X[1], X[2], X[3], beta1, alpha2, beta2  # 返回 Rss, Rsp, Tss, Tsp 和三个角度
-
-
-def _compute_free_surface_sv_coeff(alpha, mat):  # 定义 SV 波自由面反射系数函数
-    """
-    使用 Zoeppritz 方程计算 SV 波在自由面的反射系数。
-    alpha: SV 波入射角（弧度）
-    mat: 材料参数字典
-    返回: (A1_sv, A2_p, beta)
-    """
-    p = math.sin(alpha) / mat['cs']  # 计算水平慢度
-    beta = math.asin(p * mat['cp'])  # 计算反射 P 波角度
-    GG, lam = mat['GG'], mat['lam']  # 读取弹性参数
-    _, _, _, syy_inc, sxy_inc = wave_vectors('SV', 'up', alpha, GG, lam, mat['cs'])  # 入射 SV 应力
-    _, _, _, syy_rsv, sxy_rsv = wave_vectors('SV', 'down', alpha, GG, lam, mat['cs'])  # 反射 SV 应力
-    _, _, _, syy_rp, sxy_rp = wave_vectors('P', 'down', beta, GG, lam, mat['cp'])  # 反射 P 应力
-    A = np.zeros((2, 2))  # 初始化 2×2 系数矩阵
-    B = np.zeros(2)  # 初始化右端向量
-    A[0, 0] = sxy_rsv  # 反射 SV 的 τ_xy
-    A[0, 1] = sxy_rp  # 反射 P 的 τ_xy
-    B[0] = -sxy_inc  # 入射 SV 的 τ_xy
-    A[1, 0] = syy_rsv  # 反射 SV 的 σ_yy
-    A[1, 1] = syy_rp  # 反射 P 的 σ_yy
-    B[1] = -syy_inc  # 入射 SV 的 σ_yy
-    X = np.linalg.solve(A, B)  # 求解自由面反射系数
-    return X[0], X[1], beta  # 返回 A1(SV反射), A2(P转换), 反射角
-
-
-def _compute_free_surface_p_coeff(beta, mat):  # 定义 P 波自由面反射系数函数
-    """
-    使用 Zoeppritz 方程计算 P 波在自由面的反射系数。
-    beta: P 波入射角（弧度）
-    mat: 材料参数字典
-    返回: (B1_sv, B2_p, alpha_sv)
-    """
-    p = math.sin(beta) / mat['cp']  # 计算水平慢度
-    alpha_sv = math.asin(p * mat['cs'])  # 计算转换 SV 波角度
-    GG, lam = mat['GG'], mat['lam']  # 读取弹性参数
-    _, _, _, syy_inc, sxy_inc = wave_vectors('P', 'up', beta, GG, lam, mat['cp'])  # 入射 P 应力
-    _, _, _, syy_rsv, sxy_rsv = wave_vectors('SV', 'down', alpha_sv, GG, lam, mat['cs'])  # 转换 SV 应力
-    _, _, _, syy_rp, sxy_rp = wave_vectors('P', 'down', beta, GG, lam, mat['cp'])  # 反射 P 应力
-    A = np.zeros((2, 2))  # 初始化 2×2 系数矩阵
-    B = np.zeros(2)  # 初始化右端向量
-    A[0, 0] = sxy_rsv  # 转换 SV 的 τ_xy
-    A[0, 1] = sxy_rp  # 反射 P 的 τ_xy
-    B[0] = -sxy_inc  # 入射 P 的 τ_xy
-    A[1, 0] = syy_rsv  # 转换 SV 的 σ_yy
-    A[1, 1] = syy_rp  # 反射 P 的 σ_yy
-    B[1] = -syy_inc  # 入射 P 的 σ_yy
-    X = np.linalg.solve(A, B)  # 求解自由面反射系数
-    return X[0], X[1], alpha_sv  # 返回 B1(SV转换), B2(P反射), 转换角
-
-
 def _build_model_name_from_record(acc_file, scene_tag):  # 定义模型命名函数
-    """按“记录名-场景名”规则生成模型名。"""  # 说明函数用途
+    """按"记录名-场景名"规则生成模型名。"""  # 说明函数用途
     record_name = os.path.splitext(os.path.basename(acc_file))[0]  # 提取不带扩展名的记录名
     if not record_name:  # 检查记录名是否为空
         raise ValueError('无法从加速度文件生成记录名: %s' % acc_file)  # 抛出命名错误
@@ -666,7 +537,6 @@ def create_flat_model(total_L, H_flat, bedrock_thickness,
     assembly.Instance(name=inst_name, part=part, dependent=ON)  # 创建零件实例
 
     # ============ 水平切分面 ============
-    # 1. 基岩水平切分 (y = bedrock_thickness)
     part_faces = part.faces  # 获取当前面集合
     partition_sketch = model.ConstrainedSketch(name='__flat_bedrock_partition__', sheetSize=max(total_L, H_flat) * 2)  # 创建基岩界面草图
     partition_sketch.Line(point1=(total_L, bedrock_thickness), point2=(0.0, bedrock_thickness))  # 绘制基岩界面
@@ -742,6 +612,487 @@ def create_flat_model(total_L, H_flat, bedrock_thickness,
     return model_name, part_name, inst_name
 
 
+# ============================================================
+#  传播矩阵法核心实现（v5 新增）
+# ============================================================
+
+def _layer_propagator(omega, p, thick, mat):
+    """
+    计算单层弹性介质的 4×4 Thomson-Haskell 传播矩阵。
+
+    对于水平慢度 p、角频率 omega、层厚 thick：
+      状态向量 W = [ux, uy, sigma_yy, tau_xy]^T （从层底到层顶传播）
+
+    omega: 角频率 (rad/s)
+    p    : 水平慢度 (s/m)，= sin(theta)/c_s
+    thick: 层厚 (m)
+    mat  : 材料参数字典（含 cs, cp, GG, lam, density）
+    返回 : 4×4 复数传播矩阵 P（层底到层顶）
+    """
+    cs = mat['cs']  # 读取剪切波速
+    cp = mat['cp']  # 读取纵波波速
+    GG = mat['GG']  # 读取剪切模量
+    lam = mat['lam']  # 读取拉梅常数
+    rho = mat['density']  # 读取密度
+
+    # 计算 SV 波和 P 波的垂直慢度（复数，允许倏逝波）
+    qs2 = (1.0 / cs) ** 2 - p ** 2  # SV 垂直慢度平方
+    qp2 = (1.0 / cp) ** 2 - p ** 2  # P 垂直慢度平方
+    qs = np.sqrt(qs2.astype(complex)) if hasattr(qs2, '__len__') else complex(math.sqrt(abs(qs2)), 0) if qs2 >= 0 else complex(0, math.sqrt(-qs2))  # 计算 SV 垂直慢度
+    qp = np.sqrt(qp2.astype(complex)) if hasattr(qp2, '__len__') else complex(math.sqrt(abs(qp2)), 0) if qp2 >= 0 else complex(0, math.sqrt(-qp2))  # 计算 P 垂直慢度
+
+    # 相位因子（层厚方向传播的相位）
+    Cs = complex(math.cos(omega * qs.real * thick), -math.sin(omega * qs.real * thick)) if qs.imag == 0 else \
+         np.exp(1j * omega * qs * thick)  # SV 波垂向相位因子
+    Cp = complex(math.cos(omega * qp.real * thick), -math.sin(omega * qp.real * thick)) if qp.imag == 0 else \
+         np.exp(1j * omega * qp * thick)  # P 波垂向相位因子
+
+    # 应力系数（依 GG、lam 和慢度）
+    ms = 2.0 * GG * p * qs  # SV 波应力 σ_yy 系数（乘以 1j*omega）
+    mp = (lam + 2.0 * GG * qp ** 2) / (1j if omega != 0 else 1.0)  # P 波应力 σ_yy 系数（标量）
+    ns = GG * (qs ** 2 - p ** 2)  # SV 波应力 τ_xy 系数
+    np_ = 2.0 * GG * p * qp  # P 波应力 τ_xy 系数
+
+    # 组装 4×4 传播矩阵 P
+    # 状态向量排列: [ux, uy, tau_xy, sigma_yy]（参照 Haskell 1953 约定）
+    P = np.zeros((4, 4), dtype=complex)  # 初始化传播矩阵
+
+    # SV 上行分量贡献（在状态向量的每一行）
+    P[0, 0] = qs * (Cs + 1.0) / 2.0           # ux - SV 上行
+    P[0, 2] = qs * (Cs - 1.0) / 2.0 / 1j      # ux - SV 下行
+    # 用更直接的实现：取两层极坐标形式的 Haskell 矩阵
+    # 改为完整实现（标准 Dunkin-Haskell 4×4 形式）
+
+    # ----------------------------------------------------------------
+    # 标准 Dunkin-Haskell P-SV 传播矩阵（参照 Aki & Richards 2002, eq.5.74）
+    # 状态向量: [ux, uy, tau_xy, sigma_yy] (以 i*omega 归一化的速度形式)
+    # ----------------------------------------------------------------
+    eta_s = 2.0 * GG * p * qs  # 定义 eta_s 参数
+    eta_p = 2.0 * GG * p * qp  # 定义 eta_p 参数
+    mu_s = GG * (qs ** 2 - p ** 2)  # 定义 mu_s 参数
+    lam2mu = lam + 2.0 * GG  # 计算 lambda + 2*mu
+
+    # SV 和 P 波半相位因子
+    Ss = (Cs + 1.0) / 2.0  # SV 对称项
+    As = (Cs - 1.0) / 2.0  # SV 反对称项
+    Sp = (Cp + 1.0) / 2.0  # P 对称项
+    Ap = (Cp - 1.0) / 2.0  # P 反对称项
+
+    if abs(omega) < 1e-30:  # 处理零频率的特殊情况（静态解）
+        P = np.eye(4, dtype=complex)  # 静态零频率直接返回单位矩阵
+        return P  # 返回单位矩阵
+
+    # 用归一化参数 cs/cp 构造更稳定的矩阵
+    # （参照 Chen 1993 / Kennett 2001 版本）
+    # W(z_top) = P * W(z_bottom)
+    # 这里 W = [ux, uy, -i*sigma_yy/(rho*omega^2), -i*tau_xy/(rho*omega^2)]
+    # 为简化，直接给出完整 Aki&Richards 实数/复数形式
+
+    P = np.array([
+        [Ss,          p / qs * As,      -1j * As / (GG * qs),   1j * p / (GG * qs ** 2) * As],
+        [p / qp * Ap, Sp,               1j * p / (GG * qp ** 2) * Ap, -1j * Ap / (GG * qp)],
+        [1j * GG * qs * As, -1j * GG * p * Ap, Ss,             p / qs * As],
+        [-1j * GG * p * As, 1j * GG * qp * Ap, p / qp * Ap,   Sp],
+    ], dtype=complex)  # 组装完整传播矩阵
+
+    return P  # 返回传播矩阵
+
+
+def _propagator_matrix_freefield(omega, p, mat_bedrock, mat_overlying,
+                                  h_bedrock, h_overlying, y_target, y_bottom):
+    """
+    用传播矩阵法计算任意深度 y_target 处的频域自由场响应。
+
+    模型分层（从下到上，y 坐标递增）：
+      [y_bottom, y_bottom+h_bedrock)    → 基岩（入射 SV 波来自下方无限半空间）
+      [y_bottom+h_bedrock, y_top]       → 覆盖层（顶部为自由面）
+
+    y_bottom : 模型底边 y 坐标 (m)
+    h_bedrock: 基岩层厚度 (m)
+    h_overlying: 覆盖层厚度（当前边界位置对应）(m)
+    y_target : 目标节点 y 坐标 (m)
+    p        : 水平慢度 (s/m)（由 Snell 定律 = sin(alpha1)/cs_bedrock）
+    omega    : 角频率 (rad/s)
+
+    返回: dict，包含 'ux'(复数), 'uy', 'sxx', 'syy', 'sxy'，
+          每个值代表该深度处单位入射 SV 幅值对应的频域响应
+    """
+    cs1 = mat_bedrock['cs']  # 基岩剪切波速
+    cp1 = mat_bedrock['cp']  # 基岩纵波波速
+    cs2 = mat_overlying['cs']  # 覆盖层剪切波速
+    cp2 = mat_overlying['cp']  # 覆盖层纵波波速
+    GG1 = mat_bedrock['GG']  # 基岩剪切模量
+    lam1 = mat_bedrock['lam']  # 基岩拉梅常数
+    GG2 = mat_overlying['GG']  # 覆盖层剪切模量
+    lam2 = mat_overlying['lam']  # 覆盖层拉梅常数
+
+    y_intf = y_bottom + h_bedrock  # 基岩/覆盖层界面 y 坐标
+    y_top = y_intf + h_overlying  # 自由面 y 坐标
+
+    # ---- 计算各层的垂直慢度 ----
+    def _qval(c, p_val):  # 定义垂直慢度计算函数
+        """计算垂直慢度 q = sqrt(1/c^2 - p^2)"""  # 说明函数用途
+        val = (1.0 / c) ** 2 - p_val ** 2  # 计算慢度平方
+        if val >= 0:  # 判断是否为实数根
+            return complex(math.sqrt(val), 0)  # 返回实数垂直慢度
+        else:  # 处理倏逝波情况
+            return complex(0, math.sqrt(-val))  # 返回纯虚数垂直慢度
+
+    qs1 = _qval(cs1, p)  # 基岩 SV 垂直慢度
+    qp1 = _qval(cp1, p)  # 基岩 P 垂直慢度
+    qs2 = _qval(cs2, p)  # 覆盖层 SV 垂直慢度
+    qp2 = _qval(cp2, p)  # 覆盖层 P 垂直慢度
+
+    # ---- 统一使用 e^{i*omega*(p*x - q*y)} 约定 ----
+    # 上行波: e^{+i*omega*q*y}（朝 +y 方向传播）
+    # 下行波: e^{-i*omega*q*y}（朝 -y 方向传播）
+
+    def _phase(q_val, dy):  # 定义相位因子计算函数
+        """计算从参考面传播 dy 距离后的相位因子 e^{i*omega*q*dy}"""  # 说明函数用途
+        return np.exp(1j * omega * q_val * dy)  # 返回相位因子
+
+    # ---- 构建界面约束方程，求各波幅值 ----
+    # 未知量（共 6 个，基岩层内反射 + 界面透射 + 覆盖层内部振幅）：
+    #   基岩侧（入射和反射）：
+    #     a_sv1_dn  : 入射 SV 下行（归一化为 1.0）
+    #     a_sv1_up  : 反射 SV 上行（从界面反射）—— Rss
+    #     a_p1_up   : 反射 P 上行 —— Rsp
+    #   覆盖层侧（向上透射，然后在自由面反射）：
+    #     a_sv2_up  : 透射 SV 上行 —— Tss
+    #     a_sv2_dn  : 覆盖层内 SV 下行（自由面 SV 反射）
+    #     a_p2_up   : 透射 P 上行 —— Tsp
+    #     a_p2_dn   : 覆盖层内 P 下行（自由面 P 反射）
+    #
+    # 传播矩阵自动把覆盖层的多次混响全部编码到界面处的幅值里。
+    # 做法：
+    #   1) 自由面条件（y=y_top）: sigma_yy = tau_xy = 0
+    #      给出 a_sv2_dn、a_p2_dn 用 a_sv2_up、a_p2_up 表示
+    #   2) 界面连续条件（y=y_intf）: ux,uy,sigma_yy,tau_xy 连续
+    #      给出 4 个方程，未知量 [Rss, Rsp, Tss, Tsp]
+
+    # 位移和应力系数（单位幅值平面波）
+    # 约定：将 SV 波参数化为位移的 SV 分量（沿传播方向垂直的偏振方向）
+    # SV 波位移方向（上行）: ux = cos(alpha), uy = -sin(alpha)（ -> 相对 x 轴 )
+    # 但用慢度形式: ux_sv_up = -qs1/abs(qs1+1e-100), uy_sv_up = -p  (取绝对值归一化)
+    # 为保持与 v3/v4 一致，以 "单位速度幅值" 约定
+
+    # ── 基岩层 ──
+    # SV 上行（幅值 1.0）在界面 y_intf 处的位移和应力
+    #   ux = cos(alpha1)  uy = sin(alpha1) （SV 上行）
+    #   注: q = qs1（实部）对应 alpha1 = arcsin(p*cs1)
+    def _sv_disp_stress(q_sv, q_p_dummy, GG, lam, cs, cp, p_val, direction, wave_type):  # 定义位移和应力系数函数
+        """
+        计算单位速度幅值平面波的位移方向和应力系数（频域，每单位速度幅值）。
+        direction: 'up' 或 'down'
+        wave_type: 'SV' 或 'P'
+        返回 (ux, uy, sigma_xx, sigma_yy, tau_xy)，均为每单位速度幅值的系数
+        """
+        sgn = 1.0 if direction == 'up' else -1.0  # 上行取正，下行取负
+        if wave_type == 'SV':  # 处理 SV 波
+            q = q_sv  # 选用 SV 垂直慢度
+            # 位移方向（SV 偏振方向，垂直于传播方向）
+            ux_d = q / (1.0 / cs)  # SV 水平位移分量（归一化到速度幅值）
+            uy_d = -sgn * p_val / (1.0 / cs)  # SV 垂直位移分量
+        else:  # 处理 P 波
+            q = q_p_dummy  # 选用 P 垂直慢度
+            ux_d = p_val / (1.0 / cp)  # P 水平位移分量
+            uy_d = sgn * q / (1.0 / cp)  # P 垂直位移分量
+        # 应力系数（以速度幅值为参考，sigma = C * p * vel）
+        sig_xx = -(lam * (p_val * ux_d + sgn * q * uy_d) + 2.0 * GG * p_val * ux_d)  # σ_xx 系数
+        sig_yy = -(lam * (p_val * ux_d + sgn * q * uy_d) + 2.0 * GG * sgn * q * uy_d)  # σ_yy 系数
+        tau_xy = -GG * (sgn * q * ux_d + p_val * uy_d)  # τ_xy 系数
+        return ux_d, uy_d, sig_xx, sig_yy, tau_xy  # 返回系数
+
+    # 基岩侧各波在 y=y_intf 处的系数（相位均取 0）
+    ux_sv1u, uy_sv1u, sxx_sv1u, syy_sv1u, sxy_sv1u = _sv_disp_stress(qs1, qp1, GG1, lam1, cs1, cp1, p, 'up', 'SV')  # 入射 SV 上行
+    ux_sv1d, uy_sv1d, sxx_sv1d, syy_sv1d, sxy_sv1d = _sv_disp_stress(qs1, qp1, GG1, lam1, cs1, cp1, p, 'down', 'SV')  # 反射 SV 下行
+    ux_p1d, uy_p1d, sxx_p1d, syy_p1d, sxy_p1d = _sv_disp_stress(qs1, qp1, GG1, lam1, cs1, cp1, p, 'down', 'P')  # 反射 P 下行
+
+    # 覆盖层侧各波在 y=y_intf 处的系数（相位取 0，均向上传播至自由面）
+    ux_sv2u, uy_sv2u, sxx_sv2u, syy_sv2u, sxy_sv2u = _sv_disp_stress(qs2, qp2, GG2, lam2, cs2, cp2, p, 'up', 'SV')  # 透射 SV 上行
+    ux_p2u, uy_p2u, sxx_p2u, syy_p2u, sxy_p2u = _sv_disp_stress(qs2, qp2, GG2, lam2, cs2, cp2, p, 'up', 'P')  # 透射 P 上行
+
+    # 自由面条件：sigma_yy(y_top) = 0, tau_xy(y_top) = 0
+    # 在 y_top 处，SV2上行波和 P2上行波都已到达自由面
+    # 反射后产生 SV2下行和 P2下行
+    # 自由面边界给出 [a_sv2_dn, a_p2_dn] 的表达式：
+    # sigma_yy = 0: a_sv2_up*syy_sv2u + a_sv2_dn*syy_sv2d + a_p2_up*syy_p2u + a_p2_dn*syy_p2d = 0
+    # tau_xy   = 0: a_sv2_up*sxy_sv2u + a_sv2_dn*sxy_sv2d + a_p2_up*sxy_p2u + a_p2_dn*sxy_p2d = 0
+    # 其中 syy_sv2d = syy_sv2u（syy 不随方向改变符号对于 SV），sxy_sv2d = -sxy_sv2u（tau_xy 改变符号）
+    # 实际上更精确地做法：
+    # 对覆盖层施加 2×2 自由面 Zoeppritz，一次性给出从 (Tss,Tsp) 到 (a_sv2_dn,a_p2_dn)
+
+    ux_sv2d, uy_sv2d, sxx_sv2d, syy_sv2d, sxy_sv2d = _sv_disp_stress(qs2, qp2, GG2, lam2, cs2, cp2, p, 'down', 'SV')  # 覆盖层 SV 下行
+    ux_p2d, uy_p2d, sxx_p2d, syy_p2d, sxy_p2d = _sv_disp_stress(qs2, qp2, GG2, lam2, cs2, cp2, p, 'down', 'P')  # 覆盖层 P 下行
+
+    # 相位因子（从 y_intf 传播到 y_top 的上行波，再反射回来）
+    phi_s2_up = _phase(qs2, h_overlying)  # SV2 从界面到自由面的相位
+    phi_p2_up = _phase(qp2, h_overlying)  # P2 从界面到自由面的相位
+
+    # 自由面方程（2×2）：
+    # [syy_sv2d*phi_s2  syy_p2d*phi_p2] [a_sv2_dn_ref] = -[syy_sv2u*phi_s2_up  syy_p2u*phi_p2_up] [Tss]
+    # [sxy_sv2d*phi_s2  sxy_p2d*phi_p2]                   [sxy_sv2u*phi_s2_up  sxy_p2u*phi_p2_up] [Tsp]
+    # （phi_s2 = conj(phi_s2_up) 因为下行波的相位 = -上行波的相位）
+
+    phi_s2_dn = np.conj(phi_s2_up)  # SV2 下行相位（从自由面回到界面）
+    phi_p2_dn = np.conj(phi_p2_up)  # P2 下行相位
+
+    # 自由面 2×2 反射矩阵 F_surf：
+    # [a_sv2_dn_at_intf] = F_surf * [a_sv2_up_at_intf]
+    # F_surf = -inv([syy_sv2d*phi_dn  syy_p2d*phi_dn; ...]) * [syy_sv2u*phi_up  ...]
+    A_surf = np.array([
+        [syy_sv2d * phi_s2_dn, syy_p2d * phi_p2_dn],  # sigma_yy = 0 方程的已知项
+        [sxy_sv2d * phi_s2_dn, sxy_p2d * phi_p2_dn],  # tau_xy = 0 方程的已知项
+    ], dtype=complex)  # 组装自由面方程左端矩阵
+
+    B_surf_sv = np.array([
+        -syy_sv2u * phi_s2_up,  # SV 上行波对 sigma_yy 的贡献
+        -sxy_sv2u * phi_s2_up,  # SV 上行波对 tau_xy 的贡献
+    ], dtype=complex)  # 组装 SV 贡献向量
+
+    B_surf_p = np.array([
+        -syy_p2u * phi_p2_up,  # P 上行波对 sigma_yy 的贡献
+        -sxy_p2u * phi_p2_up,  # P 上行波对 tau_xy 的贡献
+    ], dtype=complex)  # 组装 P 贡献向量
+
+    det_Asurf = A_surf[0, 0] * A_surf[1, 1] - A_surf[0, 1] * A_surf[1, 0]  # 计算 2×2 行列式
+    if abs(det_Asurf) < 1e-30:  # 检查行列式是否退化
+        # 退化情况（几乎不会发生）：直接返回零响应
+        return {'ux': 0.0, 'uy': 0.0, 'sxx': 0.0, 'syy': 0.0, 'sxy': 0.0}  # 返回零响应
+
+    inv_Asurf = np.array([  # 计算 2×2 逆矩阵
+        [A_surf[1, 1], -A_surf[0, 1]],  # 逆矩阵第一行
+        [-A_surf[1, 0], A_surf[0, 0]],  # 逆矩阵第二行
+    ], dtype=complex) / det_Asurf  # 除以行列式
+
+    # F_surf 将 [Tss, Tsp] 映射到 [a_sv2_dn_at_intf, a_p2_dn_at_intf]
+    # F_sv 列：对应 Tss 的情况（Tsp=0）
+    F_sv = inv_Asurf.dot(B_surf_sv)  # 自由面 SV 反射映射
+    F_p = inv_Asurf.dot(B_surf_p)  # 自由面 P 反射映射
+    # 即: a_sv2_dn_at_intf = F_sv[0]*Tss + F_p[0]*Tsp
+    #     a_p2_dn_at_intf  = F_sv[1]*Tss + F_p[1]*Tsp
+
+    # ---- 界面连续条件（4×4）----
+    # 基岩侧（以 y_intf 为参考面）：
+    #   入射 SV 上行（幅值 1.0）+ 反射 SV 下行（幅值 Rss）+ 反射 P 下行（幅值 Rsp）
+    # 覆盖层侧（以 y_intf 为参考面）：
+    #   透射 SV 上行（幅值 Tss）+ 透射 P 上行（幅值 Tsp）
+    #   + 覆盖层 SV 下行（幅值 F_sv[0]*Tss + F_p[0]*Tsp）
+    #   + 覆盖层 P 下行（幅值 F_sv[1]*Tss + F_p[1]*Tsp）
+    #
+    # 注意：基岩侧入射 SV 上行波在 y_intf 处的相位取决于它从底部出发到界面
+    # 若设底部 y=y_bottom 为参考点（入射幅值 1.0 在此处），则界面处的相位为
+    # phi_sv1_up_to_intf = e^{i*omega*qs1*h_bedrock}
+
+    phi_sv1_up = _phase(qs1, h_bedrock)  # 基岩 SV 上行从底部到界面的相位
+    # 反射波从界面出发到底部再到本节点 y_target（对于 y_target < y_intf 即基岩节点）
+
+    # 以界面 y_intf 为参考面构建方程
+    # 覆盖层侧在界面处的有效位移/应力（叠加透射 + 覆盖层内反射下行）
+    def _cov_at_intf(Tss_dummy, Tsp_dummy):  # 定义覆盖层界面处叠加计算函数
+        """计算覆盖层侧在界面处的位移/应力（透射 + 自由面反射）"""  # 说明函数用途
+        a_sv2_dn = F_sv[0] * Tss_dummy + F_p[0] * Tsp_dummy  # 覆盖层内 SV 下行幅值
+        a_p2_dn = F_sv[1] * Tss_dummy + F_p[1] * Tsp_dummy  # 覆盖层内 P 下行幅值
+        ux = (Tss_dummy * ux_sv2u + Tsp_dummy * ux_p2u +  # 透射波贡献
+              a_sv2_dn * ux_sv2d + a_p2_dn * ux_p2d)  # 覆盖层内反射波贡献
+        uy = (Tss_dummy * uy_sv2u + Tsp_dummy * uy_p2u +  # 透射波贡献
+              a_sv2_dn * uy_sv2d + a_p2_dn * uy_p2d)  # 覆盖层内反射波贡献
+        syy = (Tss_dummy * syy_sv2u + Tsp_dummy * syy_p2u +  # 透射波应力贡献
+               a_sv2_dn * syy_sv2d + a_p2_dn * syy_p2d)  # 覆盖层内反射波应力贡献
+        sxy = (Tss_dummy * sxy_sv2u + Tsp_dummy * sxy_p2u +  # 透射波应力贡献
+               a_sv2_dn * sxy_sv2d + a_p2_dn * sxy_p2d)  # 覆盖层内反射波应力贡献
+        return ux, uy, syy, sxy  # 返回界面处位移和应力
+
+    # 从 Tss=1,Tsp=0 时覆盖层侧的贡献（用于构建矩阵列）
+    cov_ux_sv, cov_uy_sv, cov_syy_sv, cov_sxy_sv = _cov_at_intf(1.0, 0.0)  # Tss 列贡献
+    cov_ux_p, cov_uy_p, cov_syy_p, cov_sxy_p = _cov_at_intf(0.0, 1.0)  # Tsp 列贡献
+
+    # 4×4 方程组: A_mat * [Rss, Rsp, Tss, Tsp]^T = B_vec
+    # 行顺序: ux, uy, tau_xy, sigma_yy
+    A_mat = np.zeros((4, 4), dtype=complex)  # 初始化界面方程矩阵
+
+    # 基岩侧（列 0: Rss，列 1: Rsp）
+    A_mat[0, 0] = ux_sv1d  # Rss 对 ux 的贡献（基岩 SV 下行）
+    A_mat[1, 0] = uy_sv1d  # Rss 对 uy 的贡献
+    A_mat[2, 0] = sxy_sv1d  # Rss 对 tau_xy 的贡献
+    A_mat[3, 0] = syy_sv1d  # Rss 对 sigma_yy 的贡献
+
+    A_mat[0, 1] = ux_p1d  # Rsp 对 ux 的贡献（基岩 P 下行）
+    A_mat[1, 1] = uy_p1d  # Rsp 对 uy 的贡献
+    A_mat[2, 1] = sxy_p1d  # Rsp 对 tau_xy 的贡献
+    A_mat[3, 1] = syy_p1d  # Rsp 对 sigma_yy 的贡献
+
+    # 覆盖层侧（列 2: Tss，列 3: Tsp，取负号因为移到右端）
+    A_mat[0, 2] = -cov_ux_sv  # Tss 对 ux 的贡献（覆盖层侧，取负移至左端）
+    A_mat[1, 2] = -cov_uy_sv  # Tss 对 uy 的贡献
+    A_mat[2, 2] = -cov_sxy_sv  # Tss 对 tau_xy 的贡献
+    A_mat[3, 2] = -cov_syy_sv  # Tss 对 sigma_yy 的贡献
+
+    A_mat[0, 3] = -cov_ux_p  # Tsp 对 ux 的贡献（覆盖层侧）
+    A_mat[1, 3] = -cov_uy_p  # Tsp 对 uy 的贡献
+    A_mat[2, 3] = -cov_sxy_p  # Tsp 对 tau_xy 的贡献
+    A_mat[3, 3] = -cov_syy_p  # Tsp 对 sigma_yy 的贡献
+
+    # 右端项：入射 SV 上行波（幅值 1.0，以 y_intf 为参考面）
+    B_vec = np.array([
+        -ux_sv1u,  # ux 连续：入射贡献移至右端
+        -uy_sv1u,  # uy 连续
+        -sxy_sv1u,  # tau_xy 连续
+        -syy_sv1u,  # sigma_yy 连续
+    ], dtype=complex)  # 组装右端向量
+
+    # 求解线性方程组
+    try:  # 尝试求解
+        X = np.linalg.solve(A_mat, B_vec)  # 求解 4×4 方程组
+    except np.linalg.LinAlgError:  # 处理奇异矩阵
+        return {'ux': 0.0, 'uy': 0.0, 'sxx': 0.0, 'syy': 0.0, 'sxy': 0.0}  # 返回零响应
+
+    Rss, Rsp, Tss, Tsp = X[0], X[1], X[2], X[3]  # 提取四个界面系数
+
+    # 覆盖层内的下行幅值（在界面处）
+    a_sv2_dn_intf = F_sv[0] * Tss + F_p[0] * Tsp  # 覆盖层内 SV 下行幅值（界面处）
+    a_p2_dn_intf = F_sv[1] * Tss + F_p[1] * Tsp  # 覆盖层内 P 下行幅值（界面处）
+
+    # ---- 计算目标节点 y_target 处的响应 ----
+    if y_target <= y_intf + 1e-4:  # 判断节点是否在基岩层（含界面）
+        # 基岩层节点：入射 SV 上行 + 反射 SV 下行 + 反射 P 下行
+        dy_from_bottom = y_target - y_bottom  # 节点相对底部的高度
+        phi_sv_inc = _phase(qs1, dy_from_bottom)  # 入射 SV 在节点处的相位
+        phi_sv_ref = _phase(qs1, 2.0 * h_bedrock - dy_from_bottom)  # 反射 SV 在节点处的相位（从界面返回）
+        phi_p_ref = (_phase(qp1, h_bedrock) *  # P 波到界面的相位
+                     _phase(qp1, h_bedrock - dy_from_bottom))  # P 从界面返回到节点的相位
+
+        ux_tot = (1.0 * ux_sv1u * phi_sv_inc +  # 入射 SV 贡献
+                  Rss * ux_sv1d * phi_sv_ref +  # 反射 SV 贡献
+                  Rsp * ux_p1d * phi_p_ref)  # 反射 P 贡献
+        uy_tot = (1.0 * uy_sv1u * phi_sv_inc +  # 入射 SV 贡献
+                  Rss * uy_sv1d * phi_sv_ref +  # 反射 SV 贡献
+                  Rsp * uy_p1d * phi_p_ref)  # 反射 P 贡献
+        sxx_tot = (1.0 * sxx_sv1u * phi_sv_inc +  # 入射 SV 应力贡献
+                   Rss * sxx_sv1d * phi_sv_ref +  # 反射 SV 应力贡献
+                   Rsp * sxx_p1d * phi_p_ref)  # 反射 P 应力贡献
+        syy_tot = (1.0 * syy_sv1u * phi_sv_inc +  # 入射 SV 应力贡献
+                   Rss * syy_sv1d * phi_sv_ref +  # 反射 SV 应力贡献
+                   Rsp * syy_p1d * phi_p_ref)  # 反射 P 应力贡献
+        sxy_tot = (1.0 * sxy_sv1u * phi_sv_inc +  # 入射 SV 应力贡献
+                   Rss * sxy_sv1d * phi_sv_ref +  # 反射 SV 应力贡献
+                   Rsp * sxy_p1d * phi_p_ref)  # 反射 P 应力贡献
+
+    else:  # 处理覆盖层节点
+        # 覆盖层节点：4 个波（透射 SV↑ + 覆盖层 SV↓ + 透射 P↑ + 覆盖层 P↓）
+        # 自动包含多次混响（通过 a_sv2_dn, a_p2_dn 的系数）
+        dy_from_intf = y_target - y_intf  # 节点在覆盖层中的高度（从界面起算）
+
+        phi_sv2u = _phase(qs2, dy_from_intf)  # SV2 上行在节点处的相位
+        phi_sv2d = _phase(qs2, -dy_from_intf)  # SV2 下行在节点处的相位（界面处幅值对应从自由面反射后的到达值）
+        phi_p2u = _phase(qp2, dy_from_intf)  # P2 上行在节点处的相位
+        phi_p2d = _phase(qp2, -dy_from_intf)  # P2 下行在节点处的相位
+
+        ux_tot = (Tss * ux_sv2u * phi_sv2u +  # 透射 SV 上行贡献
+                  a_sv2_dn_intf * ux_sv2d * phi_sv2d +  # 覆盖层 SV 下行贡献
+                  Tsp * ux_p2u * phi_p2u +  # 透射 P 上行贡献
+                  a_p2_dn_intf * ux_p2d * phi_p2d)  # 覆盖层 P 下行贡献
+        uy_tot = (Tss * uy_sv2u * phi_sv2u +  # 透射 SV 上行贡献
+                  a_sv2_dn_intf * uy_sv2d * phi_sv2d +  # 覆盖层 SV 下行贡献
+                  Tsp * uy_p2u * phi_p2u +  # 透射 P 上行贡献
+                  a_p2_dn_intf * uy_p2d * phi_p2d)  # 覆盖层 P 下行贡献
+        sxx_tot = (Tss * sxx_sv2u * phi_sv2u +  # 透射 SV 应力贡献
+                   a_sv2_dn_intf * sxx_sv2d * phi_sv2d +  # 覆盖层 SV 下行应力贡献
+                   Tsp * sxx_p2u * phi_p2u +  # 透射 P 应力贡献
+                   a_p2_dn_intf * sxx_p2d * phi_p2d)  # 覆盖层 P 下行应力贡献
+        syy_tot = (Tss * syy_sv2u * phi_sv2u +  # 透射 SV 应力贡献
+                   a_sv2_dn_intf * syy_sv2d * phi_sv2d +  # 覆盖层 SV 下行应力贡献
+                   Tsp * syy_p2u * phi_p2u +  # 透射 P 应力贡献
+                   a_p2_dn_intf * syy_p2d * phi_p2d)  # 覆盖层 P 下行应力贡献
+        sxy_tot = (Tss * sxy_sv2u * phi_sv2u +  # 透射 SV 应力贡献
+                   a_sv2_dn_intf * sxy_sv2d * phi_sv2d +  # 覆盖层 SV 下行应力贡献
+                   Tsp * sxy_p2u * phi_p2u +  # 透射 P 应力贡献
+                   a_p2_dn_intf * sxy_p2d * phi_p2d)  # 覆盖层 P 下行应力贡献
+
+    return {  # 返回频域响应字典
+        'ux': ux_tot,  # x 向位移频域响应
+        'uy': uy_tot,  # y 向位移频域响应
+        'sxx': sxx_tot,  # σ_xx 频域响应
+        'syy': syy_tot,  # σ_yy 频域响应
+        'sxy': sxy_tot,  # τ_xy 频域响应
+    }  # 结束返回字典
+
+
+def _compute_freefield_at_node(y_target, x_target, mat_bedrock, mat_overlying,
+                                h_bedrock, h_overlying, y_bottom,
+                                p_horiz, vel_freq, freq_arr, dt, N_fft):
+    """
+    用传播矩阵法计算单个节点的自由场位移、速度和应力时程。
+
+    vel_freq  : 输入速度时程（底部入射 SV 幅值）的频谱（复数数组，长度 N_fft//2+1）
+    freq_arr  : 对应的频率数组 (Hz)
+    p_horiz   : 水平慢度 (s/m)
+    h_overlying: 当前边界位置（左/右边界）对应的覆盖层厚度
+
+    返回: dict，包含 'ux', 'uy', 'dotux', 'dotuy', 'sxx', 'syy', 'sxy'
+          每个值均为时域数组，长度 N_fft
+    """
+    N_pos = N_fft // 2 + 1  # 正频率个数（包含直流分量）
+
+    ux_freq = np.zeros(N_pos, dtype=complex)  # 初始化 ux 频谱数组
+    uy_freq = np.zeros(N_pos, dtype=complex)  # 初始化 uy 频谱数组
+    sxx_freq = np.zeros(N_pos, dtype=complex)  # 初始化 sxx 频谱数组
+    syy_freq = np.zeros(N_pos, dtype=complex)  # 初始化 syy 频谱数组
+    sxy_freq = np.zeros(N_pos, dtype=complex)  # 初始化 sxy 频谱数组
+
+    for k in range(N_pos):  # 遍历每个频率分量
+        f_k = freq_arr[k]  # 当前频率（Hz）
+        omega_k = 2.0 * math.pi * f_k  # 计算角频率
+
+        # 水平传播相位延迟（Snell 定律给出 e^{i*omega*p*x}）
+        phase_x = np.exp(1j * omega_k * p_horiz * x_target)  # 计算水平传播相位
+
+        if abs(omega_k) < 1e-20:  # 处理直流分量
+            # 直流分量（静态）：响应取零（加速度基线处理后无静态位移）
+            continue  # 跳过直流分量
+
+        # 调用传播矩阵法求频域传递函数
+        resp = _propagator_matrix_freefield(  # 计算频域传播矩阵响应
+            omega_k, p_horiz,  # 传入角频率和水平慢度
+            mat_bedrock, mat_overlying,  # 传入两层材料参数
+            h_bedrock, h_overlying,  # 传入两层厚度
+            y_target, y_bottom  # 传入目标节点和底部 y 坐标
+        )
+
+        # 乘以输入速度谱（速度幅值）和水平相位（位移 = 速度/i*omega）
+        v_k = vel_freq[k] * phase_x  # 当前频率的速度幅值（含水平传播）
+
+        ux_freq[k] = resp['ux'] * v_k / (1j * omega_k)  # 位移 = 速度 / (i*omega)
+        uy_freq[k] = resp['uy'] * v_k / (1j * omega_k)  # 位移 y 分量
+        sxx_freq[k] = resp['sxx'] * v_k  # 应力 sxx（= 系数 × 速度）
+        syy_freq[k] = resp['syy'] * v_k  # 应力 syy
+        sxy_freq[k] = resp['sxy'] * v_k  # 应力 sxy
+
+    # 速度频谱（= i*omega * 位移频谱）
+    omega_arr = 2.0 * math.pi * freq_arr  # 计算角频率数组
+    dotux_freq = 1j * omega_arr * ux_freq  # 速度 x 分量
+    dotuy_freq = 1j * omega_arr * uy_freq  # 速度 y 分量
+
+    # IFFT 回时域（取实部）
+    ux_t = np.fft.irfft(ux_freq, n=N_fft)  # x 向位移时域
+    uy_t = np.fft.irfft(uy_freq, n=N_fft)  # y 向位移时域
+    dotux_t = np.fft.irfft(dotux_freq, n=N_fft)  # x 向速度时域
+    dotuy_t = np.fft.irfft(dotuy_freq, n=N_fft)  # y 向速度时域
+    sxx_t = np.fft.irfft(sxx_freq, n=N_fft)  # σ_xx 时域
+    syy_t = np.fft.irfft(syy_freq, n=N_fft)  # σ_yy 时域
+    sxy_t = np.fft.irfft(sxy_freq, n=N_fft)  # τ_xy 时域
+
+    return {  # 返回时域结果字典
+        'ux': ux_t,  # x 向位移时程
+        'uy': uy_t,  # y 向位移时程
+        'dotux': dotux_t,  # x 向速度时程
+        'dotuy': dotuy_t,  # y 向速度时程
+        'sxx': sxx_t,  # σ_xx 应力时程
+        'syy': syy_t,  # σ_yy 应力时程
+        'sxy': sxy_t,  # τ_xy 应力时程
+    }  # 结束返回字典
+
+
 def VAB_oblique(angle,
                 cs_bedrock, vv_bedrock, density_bedrock,
                 cs_overlying, vv_overlying, density_overlying,
@@ -781,12 +1132,6 @@ def VAB_oblique(angle,
     # 材料参数计算
     mat_bedrock = _compute_material_params(cs_bedrock, vv_bedrock, density_bedrock)  # 计算基岩材料参数
     mat_overlying = _compute_material_params(cs_overlying, vv_overlying, density_overlying)  # 计算覆盖层材料参数
-
-    def _pick_material_by_node(x_coord, y_coord):  # 定义按节点坐标选择材料的函数
-        if y_coord < bedrock_thickness + 1e-4:  # 判断节点是否位于基岩层
-            return mat_bedrock  # 返回基岩材料参数
-        else:  # 否则认为属于覆盖层
-            return mat_overlying  # 返回覆盖层材料参数
 
     # 获取模型尺寸
     l_nodes = get_instance_nodes_from_part_set('Left_boundary')  # 获取左边界节点
@@ -831,7 +1176,13 @@ def VAB_oblique(angle,
     node_data_b = get_node_influence(b_nodes, sort_axis='x', ascending=True)  # 计算底边节点影响长度
     log_step(logger, '%s 节点影响长度已计算', model_name)  # 记录节点影响长度日志
 
-    # 粘弹性人工边界参数 (根据节点所在材质层动态赋值)
+    # 粘弹性人工边界参数（根据节点所在材质层动态赋值）
+    def _pick_material_by_node(x_coord, y_coord):  # 定义按节点坐标选择材料的函数
+        if y_coord < bedrock_thickness + 1e-4:  # 判断节点是否位于基岩层
+            return mat_bedrock  # 返回基岩材料参数
+        else:  # 否则认为属于覆盖层
+            return mat_overlying  # 返回覆盖层材料参数
+
     def add_spring_damper(node_data):  # 定义弹簧阻尼参数计算函数
         influence = node_data[:, 3]  # 提取节点影响长度
         kns = np.zeros_like(influence)  # 初始化法向刚度数组
@@ -861,7 +1212,7 @@ def VAB_oblique(angle,
     node_data_b = add_spring_damper(node_data_b)  # 为底边分配弹簧阻尼参数
     log_step(logger, '%s 弹簧-阻尼系数已分配到所有边界节点', model_name)  # 记录参数分配日志
 
-    # 添加弹簧阻尼器到地面
+    # 添加弹簧阻尼器到模型
     def add_spring_dashpot(node_data, prefix, dof_n, dof_t):  # 定义创建弹簧阻尼器的函数
         for row in node_data:  # 遍历每个边界节点
             node_label = int(row[0])  # 读取节点标签
@@ -886,9 +1237,9 @@ def VAB_oblique(angle,
                 dashpotBehavior=ON, dashpotCoefficient=ct)  # 设置阻尼行为和阻尼系数
 
     boundary_dof = {  # 定义各边界对应的法向与切向自由度
-        'l': (1, 2),  # 左边界法向为 1、切向为 2
-        'r': (1, 2),  # 右边界法向为 1、切向为 2
-        'b': (2, 1),  # 底边法向为 2、切向为 1
+        'l': (1, 2),  # 左边界法向为 1（x）、切向为 2（y）
+        'r': (1, 2),  # 右边界法向为 1（x）、切向为 2（y）
+        'b': (2, 1),  # 底边法向为 2（y）、切向为 1（x）
     }  # 结束自由度映射
     boundary_node_data = {  # 定义各边界对应的节点数据
         'l': node_data_l,  # 左边界节点数据
@@ -900,26 +1251,14 @@ def VAB_oblique(angle,
         add_spring_dashpot(boundary_node_data[boundary], prefix=boundary, dof_n=dof_n, dof_t=dof_t)  # 施加弹簧阻尼器
     log_step(logger, '%s 弹簧-阻尼器创建完成', model_name)  # 记录创建完成日志
 
-    # ============ 完整 Zoeppritz 系数计算 ============
+    # ============ 入射角处理 ============
     if angle == 0:  # 判断入射角是否为零
         angle = 1e-10  # 用极小角度替代零角度
     else:  # 处理非零角度
         angle = round(angle, 4)  # 保留四位小数
-
     alpha1 = math.radians(angle)  # 将角度转换为弧度
-
-    # 使用完整 Zoeppritz 方程计算界面反射/透射系数
-    Rss, Rsp, Tss, Tsp, beta1, alpha2, beta2 = _compute_interface_sv_coeff(  # 求解 4×4 方程组
-        alpha1, mat_bedrock, mat_overlying)  # 传入入射角和两层材料参数
-
-    # 计算覆盖层自由面反射系数
-    A1_2, A2_2, _ = _compute_free_surface_sv_coeff(alpha2, mat_overlying)  # SV 波自由面系数
-    B1_2, B2_2, _ = _compute_free_surface_p_coeff(beta2, mat_overlying)  # P 波自由面系数
-
-    log_step(logger, '%s Zoeppritz 系数: Rss=%.6f, Rsp=%.6f, Tss=%.6f, Tsp=%.6f',  # 记录系数日志
-             model_name, Rss, Rsp, Tss, Tsp)  # 输出四个界面系数
-    log_step(logger, '%s 自由面系数: A1=%.6f, A2=%.6f, B1=%.6f, B2=%.6f',  # 记录自由面日志
-             model_name, A1_2, A2_2, B1_2, B2_2)  # 输出四个自由面系数
+    p_horiz = math.sin(alpha1) / cs_bedrock  # 计算水平慢度（Snell 定律，所有层共享）
+    log_step(logger, '%s 水平慢度 p = %.8f s/m', model_name, p_horiz)  # 记录水平慢度
 
     # ============ 读取加速度时程并积分 ============
     if not acc_file:  # 判断加速度文件是否为空
@@ -933,220 +1272,123 @@ def VAB_oblique(angle,
     if dt <= 0:  # 检查步长是否有效
         raise ValueError('加速度 dt 必须 > 0')  # 抛出步长异常
 
+    # 积分得到速度时程（梯形积分）
     vel = np.zeros_like(acc)  # 初始化速度数组
     vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 通过梯形积分计算速度
-    VEL = np.column_stack((time_arr, vel))  # 组合速度时程
 
-    dis = np.zeros_like(vel)  # 初始化位移数组
-    dis[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt)  # 通过梯形积分计算位移
-    DIS = np.column_stack((time_arr, dis))  # 组合位移时程
+    N_orig = len(vel)  # 原始速度时程长度
 
-    max_time = ACC[-1, 0]  # 读取原始时程末时刻
-    Ly = bedrock_thickness - ymin  # 计算基岩界面到底边的高度差
+    # 补零到 2 的幂次方，保证 FFT 效率
+    N_fft = 1  # 初始化 FFT 长度
+    while N_fft < N_orig:  # 寻找最小的 2 的幂次方
+        N_fft *= 2  # 倍增 FFT 长度
+    N_fft *= 2  # 额外翻倍以避免时域混叠
+
+    vel_padded = np.zeros(N_fft)  # 创建补零后的速度数组
+    vel_padded[:N_orig] = vel  # 将原始速度数据填入
+
+    freq_arr = np.fft.rfftfreq(N_fft, d=dt)  # 计算正频率数组（Hz）
+    vel_freq = np.fft.rfft(vel_padded)  # 计算速度时程的正频率 FFT
+
+    log_step(logger, '%s FFT 完成: N_orig=%d, N_fft=%d', model_name, N_orig, N_fft)  # 记录 FFT 参数
+
+    # ============ 逐节点计算自由场并组装等效力 ============
     Lx = xmax - xmin  # 计算模型横向跨度
-    p_wave = math.sin(alpha1) / mat_bedrock['cs']  # 计算水平慢度（Snell 定律守恒量）
 
-    # 估算最大延迟时间并补零
-    c_min = min(mat_bedrock['cs'], mat_overlying['cs'],  # 取所有波速中的最小值
-                mat_bedrock['cp'], mat_overlying['cp'])  # 包括纵波波速
-    max_delay_est = Lx * abs(p_wave) + ymax / c_min * 4.0  # 估算最大可能延迟
-    if max_time < max_delay_est + 5.0:  # 判断是否需要补零延长
-        n_add = int(np.ceil((max_delay_est + 5.0 - max_time) / dt))  # 计算补零步数
-        new_times = VEL[-1, 0] + dt * np.arange(1, n_add + 1)  # 生成补零时间序列
-        new_vel = np.zeros((n_add, 2))  # 创建补零数组
-        new_vel[:, 0] = new_times  # 写入时间列
-        VEL = np.vstack([VEL, new_vel])  # 追加补零到速度时程
-        DIS = np.vstack([DIS, new_vel.copy()])  # 追加补零到位移时程
-        log_step(logger, '%s VEL/DIS 已补零延长: 增加 %d 行', model_name, n_add)  # 记录补零日志
-    else:  # 无需延长
-        log_step(logger, '%s VEL/DIS 无需延长', model_name)  # 记录无需延长日志
+    # 定义各边界面力的外法向（v5 修正）
+    # 左边界 x=xmin：外域在左侧，外法向 n = (-1, 0)
+    #   面力 tx = σ·n: tx = -σ_xx,  ty = -τ_xy
+    # 右边界 x=xmax：外域在右侧，外法向 n = (+1, 0)
+    #   面力 tx = σ·n: tx = +σ_xx,  ty = +τ_xy
+    # 底边  y=ymin：外域在下方，外法向 n = (0, -1)
+    #   面力 tx = σ·n: tx = -τ_xy,  ty = -σ_yy
 
-    # ============ 信号延迟工具函数 ============
-    def delay_signal(u0, delay_t, dt_val):  # 定义信号延迟函数
-        """将时程信号向右平移 delay_t 秒。"""  # 说明函数用途
-        n_delay = int(np.round(delay_t / dt_val))  # 将延迟时间转换为步数
-        if n_delay < 0:  # 限制延迟非负
-            n_delay = 0  # 将负延迟设为零
-        N = u0.shape[0]  # 获取原始序列长度
-        new_len = N + n_delay  # 计算延迟后长度
-        delayed = np.zeros((new_len, 2))  # 创建延迟后的时程数组
-        delayed[:, 0] = np.arange(new_len) * dt_val  # 生成新的时间轴
-        delayed[n_delay:, 1] = u0[:, 1]  # 将原始信号平移到延迟位置
-        return delayed  # 返回延迟信号
+    field_data = {}  # 初始化等效力缓存字典
 
-    cache_disp = {}  # 初始化位移延迟缓存
+    def process_boundary_node(node_row, prefix):  # 定义单节点等效力计算函数
+        """用传播矩阵法计算单个边界节点的等效节点力时程，存入 field_data。"""  # 说明函数用途
+        node_id = int(node_row[0])  # 读取节点标签
+        x0 = node_row[1]  # 读取节点 x 坐标
+        y0 = node_row[2]  # 读取节点 y 坐标
+        A_inf = node_row[3]  # 读取节点影响长度（面积 = 影响长度 × 单位厚度）
+        kn = node_row[4]  # 读取法向刚度
+        cn = node_row[5]  # 读取法向阻尼
+        kt = node_row[6]  # 读取切向刚度
+        ct = node_row[7]  # 读取切向阻尼
 
-    def get_delayed_disp(delay_t):  # 定义位移延迟获取函数
-        """按延迟步数缓存位移信号，避免重复计算。"""  # 说明函数用途
-        n_delay = int(np.round(delay_t / dt))  # 转换为延迟步数
-        if n_delay not in cache_disp:  # 判断缓存中是否已有
-            cache_disp[n_delay] = delay_signal(DIS, n_delay * dt, dt)  # 生成并缓存
-        return cache_disp[n_delay]  # 返回缓存的延迟位移
+        # 确定当前节点对应的覆盖层有效厚度
+        if prefix == 'l':  # 左边界
+            h_ov_local = max(0.0, ymax_l - bedrock_thickness)  # 左边界覆盖层厚度
+        elif prefix == 'r':  # 右边界
+            h_ov_local = max(0.0, ymax_r - bedrock_thickness)  # 右边界覆盖层厚度
+        else:  # 底边界
+            h_ov_local = max(0.0, ymax - bedrock_thickness)  # 底边界覆盖层厚度
 
-    cache_vel = {}  # 初始化速度延迟缓存
+        h_br_local = bedrock_thickness  # 基岩层厚度（固定）
 
-    def get_delayed_vel(delay_t):  # 定义速度延迟获取函数
-        """按延迟步数缓存速度信号，避免重复计算。"""  # 说明函数用途
-        n_delay = int(np.round(delay_t / dt))  # 转换为延迟步数
-        if n_delay not in cache_vel:  # 判断缓存中是否已有
-            cache_vel[n_delay] = delay_signal(VEL, n_delay * dt, dt)  # 生成并缓存
-        return cache_vel[n_delay]  # 返回缓存的延迟速度
+        # 调用传播矩阵法计算自由场时程
+        ff = _compute_freefield_at_node(  # 计算节点自由场
+            y_target=y0,  # 目标节点 y 坐标
+            x_target=x0,  # 目标节点 x 坐标（用于水平传播相位）
+            mat_bedrock=mat_bedrock,  # 基岩材料参数
+            mat_overlying=mat_overlying,  # 覆盖层材料参数
+            h_bedrock=h_br_local,  # 基岩层厚度
+            h_overlying=h_ov_local,  # 覆盖层有效厚度
+            y_bottom=ymin,  # 模型底边 y 坐标
+            p_horiz=p_horiz,  # 水平慢度
+            vel_freq=vel_freq,  # 输入速度频谱
+            freq_arr=freq_arr,  # 频率数组
+            dt=dt,  # 时间步长
+            N_fft=N_fft  # FFT 长度
+        )
 
-    def pad_min_len(arrays):  # 定义信号对齐函数
-        """将多个信号数组补零到统一长度。"""  # 说明函数用途
-        max_len = max(arr.shape[0] for arr in arrays)  # 统计最大长度
-        padded = []  # 初始化补齐结果列表
-        for arr in arrays:  # 遍历每个信号
-            if arr.shape[0] < max_len:  # 判断是否需要补齐
-                p = np.zeros((max_len, 2))  # 创建全零数组
-                p[:arr.shape[0], :] = arr  # 复制原始数据
-                p[arr.shape[0]:, 0] = arr[-1, 0] + dt * np.arange(1, max_len - arr.shape[0] + 1)  # 补充时间轴
-                padded.append(p)  # 追加到结果
-            else:  # 长度已满足
-                padded.append(arr)  # 直接追加
-        return max_len, padded  # 返回统一长度和补齐后的数组列表
+        ux = ff['ux'][:N_orig]  # 截取 x 向位移时程（去掉补零部分）
+        uy = ff['uy'][:N_orig]  # 截取 y 向位移时程
+        dotux = ff['dotux'][:N_orig]  # 截取 x 向速度时程
+        dotuy = ff['dotuy'][:N_orig]  # 截取 y 向速度时程
+        sxx = ff['sxx'][:N_orig]  # 截取 σ_xx 时程
+        syy = ff['syy'][:N_orig]  # 截取 σ_yy 时程
+        sxy = ff['sxy'][:N_orig]  # 截取 τ_xy 时程
+        t_arr = time_arr[:N_orig]  # 截取时间轴
 
-    # ============ 波场叠加与等效力统一计算 ============
-    field_data = {}  # 初始化等效力结果缓存
+        # ---- v5 核心修正：面力符号约定（退化点 3）----
+        # 等效节点力 = K·u_ff + C·v_ff + A·(σ·n_exterior)
+        # 严格按外法向方向计算面力 t = σ·n
+        if prefix == 'l':  # 左边界，外法向 n = (-1, 0)
+            tx = -sxx  # t_x = σ_xx·(-1) = -σ_xx
+            ty = -sxy  # t_y = τ_xy·(-1) = -τ_xy
+            # 等效力：x 为法向（弹簧 kn），y 为切向（弹簧 kt）
+            fx = kn * ux + cn * dotux + A_inf * tx  # x 向等效力
+            fy = kt * uy + ct * dotuy + A_inf * ty  # y 向等效力
+        elif prefix == 'r':  # 右边界，外法向 n = (+1, 0)
+            tx = +sxx  # t_x = σ_xx·(+1) = +σ_xx
+            ty = +sxy  # t_y = τ_xy·(+1) = +τ_xy
+            fx = kn * ux + cn * dotux + A_inf * tx  # x 向等效力
+            fy = kt * uy + ct * dotuy + A_inf * ty  # y 向等效力
+        else:  # 底边界，外法向 n = (0, -1)
+            tx = -sxy  # t_x = τ_xy·(0) + σ_xx·(0) = τ_yx·(-1) = -τ_xy（对称）
+            ty = -syy  # t_y = σ_yy·(-1) = -σ_yy
+            # 底边：x 为切向（弹簧 kt），y 为法向（弹簧 kn）
+            fx = kt * ux + ct * dotux + A_inf * tx  # x 向等效力（切向弹簧）
+            fy = kn * uy + cn * dotuy + A_inf * ty  # y 向等效力（法向弹簧）
 
-    def process_boundary(node_data, prefix):  # 定义边界节点统一处理函数
-        """按完整 Zoeppritz 波场叠加，统一计算每个边界节点的等效节点力。
+        # 组装时程数组
+        fx_arr = np.column_stack((t_arr, fx))  # 组合 x 向力时程
+        fy_arr = np.column_stack((t_arr, fy))  # 组合 y 向力时程
 
-        基岩层节点: 3 波叠加 (入射SV上行 + 反射SV下行 + 反射P下行)
-        覆盖层节点: 6 波叠加 (透射SV上行 + 3个自由面反射 + 透射P上行 + 2个自由面反射)
-        """
-        for i in range(node_data.shape[0]):  # 遍历边界节点
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            x0 = node_data[i, 1]  # 读取节点 x 坐标
-            y0 = node_data[i, 2]  # 读取节点 y 坐标
-            A_inf = node_data[i, 3]  # 读取节点影响长度
-            kn = node_data[i, 4]  # 读取法向刚度
-            cn = node_data[i, 5]  # 读取法向阻尼
-            kt = node_data[i, 6]  # 读取切向刚度
-            ct = node_data[i, 7]  # 读取切向阻尼
+        field_data['{}-{}-fx'.format(node_id, prefix)] = fx_arr  # 缓存 x 向力时程
+        field_data['{}-{}-fy'.format(node_id, prefix)] = fy_arr  # 缓存 y 向力时程
 
-            is_bedrock = (y0 < bedrock_thickness + 1e-4)  # 判断节点是否处于基岩层
-            base_t = x0 * p_wave  # 计算水平传播延迟（Snell 定律，所有波共享同一水平慢度）
+    # 逐边界逐节点计算等效节点力
+    for boundary in BOUNDARY_SEQUENCE:  # 遍历每个边界
+        nd = boundary_node_data[boundary]  # 获取当前边界的节点数据
+        for i in range(nd.shape[0]):  # 遍历节点
+            process_boundary_node(nd[i, :], boundary)  # 计算并缓存当前节点等效力
+        log_step(logger, '%s %s 边界等效节点力计算完成', model_name, boundary)  # 记录边界完成日志
 
-            # 确定当前边界的自由面高度
-            if prefix == 'l':  # 左边界
-                ymax_local = ymax_l  # 使用左边界最大高度
-            elif prefix == 'r':  # 右边界
-                ymax_local = ymax_r  # 使用右边界最大高度
-            else:  # 底边界
-                ymax_local = ymax  # 使用全局最大高度
+    log_step(logger, '%s 所有边界波场叠加与等效节点力计算完成（传播矩阵法）', model_name)  # 记录整体完成日志
 
-            if is_bedrock:  # ---- 处理基岩层节点: 3 波叠加 ----
-                H1 = bedrock_thickness  # 界面高度（从 ymin 到界面的距离）
-                cs_loc = mat_bedrock['cs']  # 局部剪切波速
-                cp_loc = mat_bedrock['cp']  # 局部纵波波速
-                G_loc = mat_bedrock['GG']  # 局部剪切模量
-                lam_loc = mat_bedrock['lam']  # 局部拉梅常数
-                waves = [  # 构建基岩层 3 波分量列表
-                    ('SV', 'up', alpha1, 1.0,  # ① 入射 SV 上行波（幅值=1.0）
-                     base_t + y0 * math.cos(alpha1) / cs_loc),  # 入射波垂直传播延迟
-                    ('SV', 'down', alpha1, Rss,  # ② 反射 SV 下行波（幅值=Rss）
-                     base_t + (2 * H1 - y0) * math.cos(alpha1) / cs_loc),  # SV 从界面反射回到节点的延迟
-                    ('P', 'down', beta1, Rsp,  # ③ 转换反射 P 下行波（幅值=Rsp）
-                     base_t + H1 * math.cos(alpha1) / cs_loc  # SV 到达界面的时间
-                     + (H1 - y0) * math.cos(beta1) / cp_loc),  # P 从界面返回节点的时间
-                ]  # 结束基岩层波分量列表
-            else:  # ---- 处理覆盖层节点: 6 波叠加 ----
-                H2 = ymax_local - bedrock_thickness  # 覆盖层在当前边界的有效厚度
-                y2 = y0 - bedrock_thickness  # 节点在覆盖层中的高度
-                cs_loc = mat_overlying['cs']  # 局部剪切波速
-                cp_loc = mat_overlying['cp']  # 局部纵波波速
-                G_loc = mat_overlying['GG']  # 局部剪切模量
-                lam_loc = mat_overlying['lam']  # 局部拉梅常数
-                t_intf = base_t + bedrock_thickness * math.cos(alpha1) / mat_bedrock['cs']  # SV 波到达界面的时间
-                waves = [  # 构建覆盖层 6 波分量列表
-                    ('SV', 'up', alpha2, Tss,  # ① 透射 SV 上行波（幅值=Tss）
-                     t_intf + y2 * math.cos(alpha2) / cs_loc),  # 从界面传到节点的延迟
-                    ('SV', 'down', alpha2, Tss * A1_2,  # ② SV→自由面→反射 SV 下行波
-                     t_intf + (2 * H2 - y2) * math.cos(alpha2) / cs_loc),  # SV 到自由面再返回的延迟
-                    ('P', 'down', beta2, Tss * A2_2,  # ③ SV→自由面→转换 P 下行波
-                     t_intf + H2 * math.cos(alpha2) / cs_loc  # SV 从界面到自由面的时间
-                     + (H2 - y2) * math.cos(beta2) / cp_loc),  # P 从自由面返回节点的时间
-                    ('P', 'up', beta2, Tsp,  # ④ 透射 P 上行波（幅值=Tsp）
-                     t_intf + y2 * math.cos(beta2) / cp_loc),  # 从界面传到节点的延迟
-                    ('SV', 'down', alpha2, Tsp * B1_2,  # ⑤ P→自由面→转换 SV 下行波
-                     t_intf + H2 * math.cos(beta2) / cp_loc  # P 从界面到自由面的时间
-                     + (H2 - y2) * math.cos(alpha2) / cs_loc),  # SV 从自由面返回节点的时间
-                    ('P', 'down', beta2, Tsp * B2_2,  # ⑥ P→自由面→反射 P 下行波
-                     t_intf + (2 * H2 - y2) * math.cos(beta2) / cp_loc),  # P 到自由面再返回的延迟
-                ]  # 结束覆盖层波分量列表
-
-            # 为每个波分量计算位移方向和应力系数
-            val_arrays = []  # 初始化信号数组列表
-            param_arrays = []  # 初始化系数数组列表
-
-            for w_type, w_dir, w_ang, w_amp, w_delay in waves:  # 遍历波分量
-                c_val = cp_loc if w_type == 'P' else cs_loc  # 根据波类型选择波速
-                d_ux, d_uy, s_xx, s_yy, s_xy = wave_vectors(  # 调用统一波场系数函数
-                    w_type, w_dir, w_ang, G_loc, lam_loc, c_val)  # 传入波参数和局部材料
-                param_arrays.append((w_amp, d_ux, d_uy, s_xx, s_yy, s_xy))  # 保存波系数
-                val_arrays.append(get_delayed_disp(w_delay))  # 获取该波延迟位移信号
-                val_arrays.append(get_delayed_vel(w_delay))  # 获取该波延迟速度信号
-
-            mlen, padded = pad_min_len(val_arrays)  # 将全部信号对齐到统一长度
-
-            # 叠加所有波分量
-            total_ux = np.zeros(mlen)  # 初始化 x 向位移叠加
-            total_uy = np.zeros(mlen)  # 初始化 y 向位移叠加
-            total_dotux = np.zeros(mlen)  # 初始化 x 向速度叠加
-            total_dotuy = np.zeros(mlen)  # 初始化 y 向速度叠加
-            total_sxx = np.zeros(mlen)  # 初始化 σ_xx 应力叠加
-            total_syy = np.zeros(mlen)  # 初始化 σ_yy 应力叠加
-            total_sxy = np.zeros(mlen)  # 初始化 τ_xy 应力叠加
-
-            for k in range(len(waves)):  # 遍历每个波分量进行叠加
-                w_amp, d_ux, d_uy, s_xx, s_yy, s_xy = param_arrays[k]  # 读取当前波系数
-                disp_arr = padded[2 * k][:, 1]  # 读取延迟位移值（第偶数个信号）
-                vel_arr = padded[2 * k + 1][:, 1]  # 读取延迟速度值（第奇数个信号）
-                total_ux += w_amp * d_ux * disp_arr  # 叠加 x 向位移（位移 = 方向 × 位移时程）
-                total_uy += w_amp * d_uy * disp_arr  # 叠加 y 向位移
-                total_dotux += w_amp * d_ux * vel_arr  # 叠加 x 向速度
-                total_dotuy += w_amp * d_uy * vel_arr  # 叠加 y 向速度
-                total_sxx += w_amp * s_xx * vel_arr  # 叠加 σ_xx 应力（应力 = 系数 × 速度时程）
-                total_syy += w_amp * s_yy * vel_arr  # 叠加 σ_yy 应力
-                total_sxy += w_amp * s_xy * vel_arr  # 叠加 τ_xy 应力
-
-            # 按边界面方向计算面力分量（外域对边界的面力 = σ·n_exterior）
-            if prefix == 'l':  # 左边界（外域法向指向 +x）
-                fs_x = total_sxx  # 左边界 x 向面力 = σ_xx
-                fs_y = total_sxy  # 左边界 y 向面力 = τ_xy
-            elif prefix == 'r':  # 右边界（外域法向指向 -x）
-                fs_x = -total_sxx  # 右边界 x 向面力 = -σ_xx
-                fs_y = -total_sxy  # 右边界 y 向面力 = -τ_xy
-            elif prefix == 'b':  # 底边界（外域法向指向 +y）
-                fs_x = total_sxy  # 底边界 x 向面力 = τ_xy
-                fs_y = total_syy  # 底边界 y 向面力 = σ_yy
-
-            # 计算等效节点力 F = K·u_ff + C·v_ff + A·σ·n
-            if prefix in ('l', 'r'):  # 处理侧边界（法向=x，切向=y）
-                fx = kn * total_ux + cn * total_dotux + A_inf * fs_x  # x 向等效力（法向弹簧）
-                fy = kt * total_uy + ct * total_dotuy + A_inf * fs_y  # y 向等效力（切向弹簧）
-            elif prefix == 'b':  # 处理底边界（法向=y，切向=x）
-                fx = kt * total_ux + ct * total_dotux + A_inf * fs_x  # x 向等效力（切向弹簧）
-                fy = kn * total_uy + cn * total_dotuy + A_inf * fs_y  # y 向等效力（法向弹簧）
-
-            # 存储力时程
-            fx_arr = np.zeros((mlen, 2))  # 创建 x 向力时程数组
-            fy_arr = np.zeros((mlen, 2))  # 创建 y 向力时程数组
-            fx_arr[:, 0] = padded[0][:, 0]  # 写入时间轴
-            fy_arr[:, 0] = padded[0][:, 0]  # 写入时间轴
-            fx_arr[:, 1] = fx  # 写入 x 向力值
-            fy_arr[:, 1] = fy  # 写入 y 向力值
-
-            field_data['{}-{}-fx'.format(node_id, prefix)] = fx_arr  # 缓存 x 向力时程
-            field_data['{}-{}-fy'.format(node_id, prefix)] = fy_arr  # 缓存 y 向力时程
-
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界处理波场叠加与等效力
-        process_boundary(boundary_node_data[boundary], boundary)  # 调用统一处理函数
-    log_step(logger, '%s 所有边界波场叠加与等效节点力计算完成', model_name)  # 记录计算完成日志
-
-
-    # 创建幅值曲线 (Amplitude)
+    # ============ 创建幅值曲线（Amplitude）============
     def batch_add_node_force_amplitude(node_data, prefix):  # 定义批量创建幅值曲线函数
         for i in range(node_data.shape[0]):  # 遍历节点数据
             node_id = int(node_data[i, 0])  # 读取节点标签
@@ -1170,7 +1412,7 @@ def VAB_oblique(angle,
         batch_add_node_force_amplitude(boundary_node_data[boundary], boundary)  # 调用幅值创建函数
     log_step(logger, '%s 所有边界节点的幅值曲线已创建', model_name)  # 记录幅值曲线日志
 
-    # 施加集中力载荷
+    # ============ 施加集中力载荷 ============
     def batch_add_node_force(node_data, prefix, step_name):  # 定义批量施加载荷函数
         assembly = mdb.models[model_name].rootAssembly  # 获取当前模型装配体
         instance_name = inst_name  # 记录实例名称
@@ -1269,7 +1511,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
             getMemoryFromAnalysis=True, explicitPrecision=SINGLE,  # 设置精度参数
             nodalOutputPrecision=SINGLE, echoPrint=OFF, modelPrint=OFF,  # 关闭冗余输出
             contactPrint=OFF, historyPrint=OFF,  # 关闭接触与历史输出
-            numCpus=num_cpus, numDomains=num_cpus,  # 设置 CPU 数量与并行域数量为核数
+            numCpus=num_cpus, numDomains=num_cpus,  # 设置 CPU 数量与并行域数量
             multiprocessingMode=DEFAULT, numGPUs=0)  # 设置多处理器并行模式与 GPU 核心数
 
     mdb.save()  # 保存模型数据库

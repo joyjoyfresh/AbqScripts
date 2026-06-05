@@ -18,6 +18,7 @@ USE_RECYCLE_BIN = False  # 设置删除文件时是放入回收站（True）还�
 # 图15 输入波：a0=2.0 → fc=a0·Vs2/(2·(H−h))=2.0·800/400=4 Hz，故只用 4 Hz Ricker。
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 图15 输入波：4 Hz Ricker（a0=2.0）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\case_meta.py",  # 统一工况元数据模块（随脚本拷入工况文件夹，供建模脚本写 case_meta.json）
 ]  # 结束固定源文件完整路径定义
 
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表

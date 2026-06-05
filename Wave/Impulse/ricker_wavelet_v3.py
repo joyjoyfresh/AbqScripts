@@ -7,7 +7,9 @@ from matplotlib.ticker import MultipleLocator
 plt.rcParams['font.family'] = 'serif'
 plt.rcParams['mathtext.fontset'] = 'dejavuserif'
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取脚本所在目录的绝对路径
+out_path = os.path.join(SCRIPT_DIR, "Acceleration")  # 构建输出子目录路径
+os.makedirs(out_path, exist_ok=True)  # 确保输出目录存在，若不存在则创建
 
 def generate_ricker_wavelet(f_m, duration, dt, amp_max=1.0, t_peak_shift=None):
     if t_peak_shift is None:
@@ -56,7 +58,7 @@ t, amplitude = generate_ricker_wavelet(f_center, time_duration, time_step, max_a
 velocity = numpy_cumtrapz(amplitude, t, initial=0)
 
 # --- Save to TXT ---
-out_filename = os.path.join(SCRIPT_DIR, f"ricker_wavelet_{f_center:.0f}Hz.txt")
+out_filename = os.path.join(out_path, f"ricker_wavelet_{f_center:.0f}Hz.txt")  # 输出到 Acceleration 子目录
 data = np.column_stack((t, amplitude))
 np.savetxt(out_filename, data, fmt='%.6f', delimiter='\t', comments='')
 print(f"Saved waveform to: {out_filename}")
@@ -94,7 +96,7 @@ ax.tick_params(which='minor', length=3)
 ax.legend(loc='upper right', bbox_to_anchor=(0.95, 0.95), frameon=False, fontsize=12)
 
 plt.tight_layout()
-out_png_acc = os.path.join(SCRIPT_DIR, f"ricker_wavelet_acc_{f_center:.0f}Hz.png")
+out_png_acc = os.path.join(out_path, f"ricker_wavelet_acc_{f_center:.0f}Hz.png")  # 输出到 Acceleration 子目录
 if save_plots:
     plt.savefig(out_png_acc, dpi=300)
     print(f"Saved acceleration plot to: {out_png_acc}")
@@ -132,7 +134,7 @@ ax.tick_params(which='minor', length=3)
 ax.legend(loc='upper right', bbox_to_anchor=(0.95, 0.95), frameon=False, fontsize=12)
 
 plt.tight_layout()
-out_png_vel = os.path.join(SCRIPT_DIR, f"ricker_wavelet_vel_{f_center:.0f}Hz.png")
+out_png_vel = os.path.join(out_path, f"ricker_wavelet_vel_{f_center:.0f}Hz.png")  # 输出到 Acceleration 子目录
 if save_plots:
     plt.savefig(out_png_vel, dpi=300)
     print(f"Saved velocity plot to: {out_png_vel}")

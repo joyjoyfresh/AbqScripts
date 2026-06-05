@@ -12,6 +12,51 @@ import os  # 导入操作系统接口
 import time  # 导入时间模块
 import logging  # 导入日志模块
 import traceback  # 导入异常堆栈模块
+from collections import namedtuple  # 导入命名元组用于参数打包
+
+
+# ==========================================================
+#  配置参数（实验参数集中在此处修改）
+# ==========================================================
+
+
+material_cfg = {  # 定义材料参数配置
+    'angle': 15,  # 设置 SV 波入射角度（度）
+    'bedrock': {  # 定义基岩材料参数
+        'elastic_modulus': 26e9,  # 设置基岩杨氏模量（Pa），对应 Vs = 2000 m/s
+        'poisson_ratio': 0.3,  # 设置基岩泊松比
+        'density': 2500,  # 设置基岩密度（kg/m^3）
+    },  # 结束基岩材料参数
+    'overlying': {  # 定义覆盖层材料参数
+        'poisson_ratio': 0.3,  # 设置覆盖层泊松比
+        'density': 2500,  # 设置覆盖层密度
+        'velocity_ratio': 1.25,  # 设置 VR / Vs 阻抗比，对应 Vs = 1600 m/s
+    },  # 结束覆盖层材料参数
+}  # 结束材料参数配置
+
+geometry_cfg = {  # 定义几何参数配置
+    'H_minus_h': 200.0,  # 设置斜坡高度差 H - h (m)
+    'i': 45.0,  # 设置斜坡倾角 (度)
+    'h_over_H': 0.5,  # 设置深度比 h / H
+    'total_L': 1800.0,  # 设置总模型长度 (m)
+    'left_flat': 1000.0,  # 设置上平台长度 (m)
+    'bedrock_thickness': 200.0,  # 设置基岩层厚度 (m)
+}  # 结束几何参数配置
+
+job_cfg = {  # 定义作业参数配置
+    'variables': ('U', 'V', 'A'),  # 设置场输出变量
+    'frequency': 1,  # 设置输出频率
+    'num_cpus': 8,  # 设置并行 CPU 数量
+    'memory_percent': 90,  # 设置作业内存百分比
+}  # 结束作业参数配置
+
+
+mesh_size = 4  # 网格尺寸设为 4 m
+
+
+# ==========================================================
+#  模块常量与全局状态
+# ==========================================================
 
 
 DEFAULT_STEP_NAME = 'Step-earthquake'  # 定义默认分析步名称
@@ -19,261 +64,36 @@ BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # �
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 定义边界处理顺序
 
 
-def main():
-    """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
-    logger = log_step('VAB_oblique_TAF_double.log')  # 初始化日志并写入当前版本日志文件
-    total_start = time.time()  # 记录主流程起始时间
-
-    # 统一配置参数
-    material_cfg = {  # 定义材料参数配置
-        'angle': 15,  # 设置 SV 波入射角度（度）
-        'bedrock': {  # 定义基岩材料参数
-            'elastic_modulus': 26e9,  # 设置基岩杨氏模量（Pa），对应 Vs = 2000 m/s
-            'poisson_ratio': 0.3,  # 设置基岩泊松比
-            'density': 2500,  # 设置基岩密度（kg/m^3）
-        },  # 结束基岩材料参数
-        'overlying': {  # 定义覆盖层材料参数
-            'poisson_ratio': 0.3,  # 设置覆盖层泊松比
-            'density': 2500,  # 设置覆盖层密度
-            'velocity_ratio': 1.25,  # 设置 VR / Vs 阻抗比，对应 Vs = 1600 m/s
-        },  # 结束覆盖层材料参数
-        'max_reflect_order': 3,  # 设置多次反射/透射最大阶数
-    }  # 结束材料参数配置
-
-    geometry_cfg = {  # 定义几何参数配置
-        'H_minus_h': 200.0,  # 设置斜坡高度差 H - h (m)
-        'i': 45.0,  # 设置斜坡倾角 (度)
-        'h_over_H': 0.5,  # 设置深度比 h / H
-        'total_L': 1800.0,  # 设置总模型长度 (m)
-        'left_flat': 1000.0,  # 设置上平台长度 (m)
-        'bedrock_thickness': 200.0,  # 设置基岩层厚度 (m)
-    }  # 结束几何参数配置
-
-    job_cfg = {  # 定义作业参数配置
-        'variables': ('U', 'V', 'A'),  # 设置场输出变量
-        'frequency': 1,  # 设置输出频率
-        'num_cpus': 8,  # 设置并行 CPU 数量
-        'memory_percent': 90,  # 设置作业内存百分比
-    }  # 结束作业参数配置
-
-    try:
-        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
-
-        # 波动参数计算
-        cs_bedrock = _compute_wave_speed_from_elastic_modulus(
-            material_cfg['bedrock']['elastic_modulus'],
-            material_cfg['bedrock']['poisson_ratio'],
-            material_cfg['bedrock']['density']
-        )
-        cs_overlying = cs_bedrock / material_cfg['overlying']['velocity_ratio']
-
-        # 几何高度计算
-        H_minus_h = geometry_cfg['H_minus_h']
-        h_over_H = geometry_cfg['h_over_H']
-        H = H_minus_h / (1.0 - h_over_H)
-        h = H - H_minus_h
-        bedrock_thickness = geometry_cfg['bedrock_thickness']
-        H_lower = bedrock_thickness + h
-        H_flat = bedrock_thickness + H
-        H_upper = bedrock_thickness + H
-        w_slope = H_minus_h / math.tan(math.radians(geometry_cfg['i']))
-        total_L = geometry_cfg['total_L']
-        left_flat = geometry_cfg['left_flat']
-
-        # 网格尺寸设为高度 (H - h) 的 4%
-        mesh_size = 4
-
-        cae_name = 'h{}_i{}_a{}.cae'.format(int(H_minus_h), int(geometry_cfg['i']), int(material_cfg['angle']))
-
-        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
-
-        base_model, part_name, inst_name = create_model(  # 创建基础几何与网格模型
-            total_L=total_L,
-            H_minus_h=H_minus_h,
-            i=geometry_cfg['i'],
-            h_over_H=h_over_H,
-            bedrock_thickness=bedrock_thickness,
-            cs_bedrock=cs_bedrock,
-            vv_bedrock=material_cfg['bedrock']['poisson_ratio'],
-            density_bedrock=material_cfg['bedrock']['density'],
-            cs_overlying=cs_overlying,
-            vv_overlying=material_cfg['overlying']['poisson_ratio'],
-            density_overlying=material_cfg['overlying']['density'],
-            mesh_size=mesh_size,
-            cae_name=cae_name,
-            logger=logger
-        )
-
-        flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
-            total_L=total_L,
-            H_flat=H_flat,
-            bedrock_thickness=bedrock_thickness,
-            cs_bedrock=cs_bedrock,
-            vv_bedrock=material_cfg['bedrock']['poisson_ratio'],
-            density_bedrock=material_cfg['bedrock']['density'],
-            cs_overlying=cs_overlying,
-            vv_overlying=material_cfg['overlying']['poisson_ratio'],
-            density_overlying=material_cfg['overlying']['density'],
-            mesh_size=mesh_size,
-            logger=logger
-        )
-
-        slope_model_names = build_models(  # 依据不同地震动复制斜坡模型并施加等效边界
-            acc_info=acc_info,
-            base_model=base_model,
-            part_name=part_name,
-            inst_name=inst_name,
-            angle=material_cfg['angle'],
-            cs_bedrock=cs_bedrock,
-            vv_bedrock=material_cfg['bedrock']['poisson_ratio'],
-            density_bedrock=material_cfg['bedrock']['density'],
-            cs_overlying=cs_overlying,
-            vv_overlying=material_cfg['overlying']['poisson_ratio'],
-            density_overlying=material_cfg['overlying']['density'],
-            bedrock_thickness=bedrock_thickness,
-            H_upper=H_upper,
-            H_lower=H_lower,
-            left_flat=left_flat,
-            w_slope=w_slope,
-            max_reflect_order=material_cfg['max_reflect_order'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            model_scene='slope',
-            logger=logger
-        )
-
-        flat_model_names = build_models(  # 依据不同地震动复制平坦自由场模型并施加等效边界
-            acc_info=acc_info,
-            base_model=flat_base_model,
-            part_name=flat_part_name,
-            inst_name=flat_inst_name,
-            angle=material_cfg['angle'],
-            cs_bedrock=cs_bedrock,
-            vv_bedrock=material_cfg['bedrock']['poisson_ratio'],
-            density_bedrock=material_cfg['bedrock']['density'],
-            cs_overlying=cs_overlying,
-            vv_overlying=material_cfg['overlying']['poisson_ratio'],
-            density_overlying=material_cfg['overlying']['density'],
-            bedrock_thickness=bedrock_thickness,
-            H_upper=H_upper,
-            H_lower=H_upper,  # 平坦自由场上部和下部都是统一总高度 H_upper
-            left_flat=left_flat,
-            w_slope=0.001,  # 平坦自由场相当于倾斜宽度极小
-            max_reflect_order=material_cfg['max_reflect_order'],
-            step_name=DEFAULT_STEP_NAME,
-            variables=job_cfg['variables'],
-            frequency=job_cfg['frequency'],
-            model_scene='flat',
-            logger=logger
-        )
-
-        model_names = slope_model_names + flat_model_names  # 合并两类模型名称用于统一提交作业
-
-        for model_name in model_names:  # 顺序提交每个模型作业
-            submit_job(
-                num_cpus=job_cfg['num_cpus'],
-                memory_percent=job_cfg['memory_percent'],
-                model_name=model_name,
-                logger=logger
-            )
-
-        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
-    except Exception as exc:  # 捕获脚本运行异常
-        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
-        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈
-        raise  # 继续抛出异常以便上层处理
+MAX_REFLECT_ORDER = 3  # 射线法覆盖层内多次反射/透射的几何级数截断阶数（v3 默认 3）
 
 
-def _next_available_name(prefix, existing_container):  # 定义生成唯一名称的辅助函数
-    """按前缀生成可用名称（如 Part-1, Part-2）。"""  # 说明函数用途
-    index = 1  # 初始化序号
-    while '%s-%d' % (prefix, index) in existing_container:  # 循环查找未占用名称
-        index += 1  # 序号递增
-    return '%s-%d' % (prefix, index)  # 返回可用名称
+# ============================================================
+#  参数打包对象（v7：用结构化对象取代散标量，缩短函数签名、便于阅读）
+# ============================================================
+# Material：单层材料的基本输入（剪切波速、泊松比、密度）；
+#   派生量 GG/lam/cp/EE 仍由物理核心函数按需计算，故此处只存输入。
+Material = namedtuple('Material', ['cs', 'vv', 'density'])  # 单层材料输入
+# Site：场地两层材料 + 基岩层厚度
+Site = namedtuple('Site', ['bedrock', 'overlying', 'bedrock_thickness'])  # 双层场地
+# Geometry：斜坡几何（输入项 + 一次算好的派生项）
+Geometry = namedtuple('Geometry', [
+    'total_L', 'i', 'left_flat', 'H_minus_h', 'h_over_H', 'bedrock_thickness',  # 输入项
+    'H', 'h', 'H_upper', 'H_lower', 'H_flat', 'w_slope'])  # 派生项
+# BoundaryNode：单个边界节点的几何与粘弹性边界参数（取代裸 numpy 列索引）
+BoundaryNode = namedtuple('BoundaryNode',
+                          ['label', 'x', 'y', 'influence', 'kn', 'cn', 'kt', 'ct'])  # 边界节点
+# FreeFieldCtx：射线法等效力计算所需的上下文（一次打包，避免长参数列表）
+FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
+    'mat_bedrock', 'mat_overlying', 'geom', 'ymax_l', 'ymax_r', 'ymin',  # 两层材料、几何、各边界高度信息
+    'alpha', 'beta_p', 'alpha2', 'beta2',  # 基岩 SV 入射角/P 反射角、覆盖层 SV/P 角
+    'A1', 'A2', 'cycle_sv', 'cycle_p',  # 等效自由面反射/转换系数 + 覆盖层混响幅值因子
+    'GG', 'lam', 'cs', 'cp', 'cs2', 'cp2',  # 基岩剪切模量/拉梅常数/波速 + 覆盖层波速
+    'VEL', 'DIS', 'dt', 'time_arr', 'max_reflect_order'])  # 速度/位移时程、步长、时间轴、反射阶数
 
 
-def _normalize_output_variables(variables):  # 定义输出变量规范化函数
-    """规范化输出变量为元组，满足 Abaqus 接口要求。"""  # 说明函数用途
-    if isinstance(variables, str):  # 判断是否为单个字符串
-        return (variables,)  # 转换为单元素元组
-    if isinstance(variables, list):  # 判断是否为列表
-        return tuple(variables)  # 转换为元组
-    return variables  # 其他类型保持原样返回
-
-
-def _compute_wave_speed_from_elastic_modulus(elastic_modulus, poisson_ratio, density):  # 定义波速反算函数
-    """根据杨氏模量、泊松比和密度计算剪切波速。"""  # 说明函数用途
-    return math.sqrt((elastic_modulus / (2 * (1 + poisson_ratio))) / density)  # 返回计算得到的剪切波速
-
-
-def _compute_elastic_modulus_from_wave_speed(cs, vv, density):  # 定义弹性模量反算函数
-    """根据剪切波速、泊松比和密度计算杨氏模量 E。"""  # 说明函数用途
-    GG = density * (cs ** 2)  # 计算剪切模量
-    EE = 2 * GG * (1 + vv)  # 计算杨氏模量
-    return EE  # 返回杨氏模量
-
-
-def _safe_arcsin(value):  # 定义安全反正弦函数
-    """对 arcsin 输入做截断，避免浮点超界。"""  # 说明函数用途
-    return math.asin(max(-1.0, min(1.0, value)))  # 将输入截断到合法范围后再求反正弦
-
-
-def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
-    """根据 Vs、泊松比、密度计算材料参数。"""  # 说明函数用途
-    GG = density * cs ** 2  # 计算剪切模量
-    EE = 2 * GG * (1 + vv)  # 计算杨氏模量
-    lam = 2 * GG * vv / (1 - 2 * vv)  # 计算拉梅常数
-    cp = math.sqrt((lam + 2 * GG) / density)  # 计算纵波波速
-    return {'GG': GG, 'EE': EE, 'lam': lam, 'cp': cp, 'cs': cs, 'vv': vv, 'density': density}  # 返回材料参数字典
-
-
-def _compute_interface_sv_coeff(alpha1, mat1, mat2):  # 定义界面 SV 波系数计算函数
-    """计算 SV 波在两层界面的等效反射/透射系数（阻抗近似）。"""  # 说明函数用途
-    z1s = mat1['density'] * mat1['cs'] * max(1e-8, math.cos(alpha1))  # 计算入射侧等效阻抗
-    sin_a2 = mat2['cs'] * math.sin(alpha1) / mat1['cs']  # 计算透射角正弦值
-    alpha2 = _safe_arcsin(sin_a2)  # 计算透射角
-    z2s = mat2['density'] * mat2['cs'] * max(1e-8, math.cos(alpha2))  # 计算透射侧等效阻抗
-    denom = z1s + z2s if abs(z1s + z2s) > 1e-12 else 1e-12  # 计算分母并避免除零
-    rss = (z2s - z1s) / denom  # 计算反射系数
-    tss = 2.0 * z2s / denom  # 计算透射系数
-    rsp = 0.0  # 设置转换反射系数为零
-    tsp = 0.0  # 设置转换透射系数为零
-    return {'Rss': rss, 'Rsp': rsp, 'Tss': tss, 'Tsp': tsp, 'alpha2': alpha2}  # 返回界面系数字典
-
-
-def _compute_free_surface_sv_coeff(alpha, cp, cs):  # 定义 SV 波自由面系数计算函数
-    """计算 SV 波在自由面的反射系数。"""  # 说明函数用途
-    beta_p = _safe_arcsin(cp * math.sin(alpha) / cs)  # 计算自由面转换角
-    numerator_a1 = cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta_p) - cp ** 2 * math.cos(2 * alpha) ** 2  # 计算 A1 分子
-    denominator = cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta_p) + cp ** 2 * math.cos(2 * alpha) ** 2  # 计算公共分母
-    if abs(denominator) < 1e-12:  # 检查分母是否过小
-        denominator = 1e-12  # 避免除零
-    a1 = numerator_a1 / denominator  # 计算反射系数 A1
-    a2 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator  # 计算转换系数 A2
-    return {'A1': a1, 'A2': a2, 'beta': beta_p}  # 返回自由面系数字典
-
-
-def _compute_free_surface_p_coeff(beta, cp, cs):  # 定义 P 波自由面系数计算函数
-    """计算 P 波在自由面的反射系数。"""  # 说明函数用途
-    alpha = _safe_arcsin(cs * math.sin(beta) / cp)  # 计算对应入射角
-    numerator_b2 = cp ** 2 * math.cos(2 * alpha) ** 2 - cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)  # 计算 B2 分子
-    denominator = cp ** 2 * math.cos(2 * alpha) ** 2 + cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)  # 计算公共分母
-    if abs(denominator) < 1e-12:  # 检查分母是否过小
-        denominator = 1e-12  # 避免除零
-    b2 = numerator_b2 / denominator  # 计算反射系数 B2
-    b1 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator  # 计算转换系数 B1
-    return {'B1': b1, 'B2': b2, 'alpha': alpha}  # 返回自由面系数字典
-
-
-def _build_model_name_from_record(acc_file, scene_tag):  # 定义模型命名函数
-    """按“记录名-场景名”规则生成模型名。"""  # 说明函数用途
-    record_name = os.path.splitext(os.path.basename(acc_file))[0]  # 提取不带扩展名的记录名
-    if not record_name:  # 检查记录名是否为空
-        raise ValueError('无法从加速度文件生成记录名: %s' % acc_file)  # 抛出命名错误
-    if scene_tag not in ('slope', 'flat'):  # 检查场景标签是否合法
-        raise ValueError('scene_tag 仅支持 slope 或 flat，当前为: %s' % scene_tag)  # 抛出场景错误
-    return '{}-{}'.format(record_name, scene_tag)  # 返回组合后的模型名
+# ==========================================================
+#  通用工具函数
+# ==========================================================
 
 
 def log_step(logger=None, message=None, *args):  # 定义日志记录函数
@@ -313,6 +133,167 @@ def log_step(logger=None, message=None, *args):  # 定义日志记录函数
     return log_step._logger  # 返回已初始化的日志器
 
 
+def _next_available_name(prefix, existing_container):  # 定义生成唯一名称的辅助函数
+    """按前缀生成可用名称（如 Part-1, Part-2）。"""  # 说明函数用途
+    index = 1  # 初始化序号
+    while '%s-%d' % (prefix, index) in existing_container:  # 循环查找未占用名称
+        index += 1  # 序号递增
+    return '%s-%d' % (prefix, index)  # 返回可用名称
+
+
+def _normalize_output_variables(variables):  # 定义输出变量规范化函数
+    """规范化输出变量为元组，满足 Abaqus 接口要求。"""  # 说明函数用途
+    if isinstance(variables, str):  # 判断是否为单个字符串
+        return (variables,)  # 转换为单元素元组
+    if isinstance(variables, list):  # 判断是否为列表
+        return tuple(variables)  # 转换为元组
+    return variables  # 其他类型保持原样返回
+
+
+def _safe_arcsin(value):  # 定义安全反正弦函数
+    """对 arcsin 输入做截断，避免浮点超界。"""  # 说明函数用途
+    return math.asin(max(-1.0, min(1.0, value)))  # 将输入截断到合法范围后再求反正弦
+
+
+# ==========================================================
+#  物理与数值计算
+# ==========================================================
+
+
+def _compute_wave_speed_from_elastic_modulus(elastic_modulus, poisson_ratio, density):  # 定义波速反算函数
+    """根据杨氏模量、泊松比和密度计算剪切波速。"""  # 说明函数用途
+    return math.sqrt((elastic_modulus / (2 * (1 + poisson_ratio))) / density)  # 返回计算得到的剪切波速
+
+
+def _compute_elastic_modulus_from_wave_speed(cs, vv, density):  # 定义弹性模量反算函数
+    """根据剪切波速、泊松比和密度计算杨氏模量 E。"""  # 说明函数用途
+    GG = density * (cs ** 2)  # 计算剪切模量
+    EE = 2 * GG * (1 + vv)  # 计算杨氏模量
+    return EE  # 返回杨氏模量
+
+
+def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
+    """根据 Vs、泊松比、密度计算材料参数。"""  # 说明函数用途
+    GG = density * cs ** 2  # 计算剪切模量
+    EE = 2 * GG * (1 + vv)  # 计算杨氏模量
+    lam = 2 * GG * vv / (1 - 2 * vv)  # 计算拉梅常数
+    cp = math.sqrt((lam + 2 * GG) / density)  # 计算纵波波速
+    return {'GG': GG, 'EE': EE, 'lam': lam, 'cp': cp, 'cs': cs, 'vv': vv, 'density': density}  # 返回材料参数字典
+
+
+def _compute_interface_sv_coeff(alpha1, mat1, mat2):  # 定义界面 SV 波系数计算函数
+    """计算 SV 波在两层界面的等效反射/透射系数（阻抗近似，忽略 SV<->P 转换）。
+
+    alpha1 : 在 mat1 中的 SV 入射角（弧度）
+    mat1   : 入射侧材料参数字典；mat2：透射侧材料参数字典
+    返回 dict：Rss/Rsp/Tss/Tsp 与透射角 alpha2（Rsp=Tsp=0，射线法 v3 的关键近似）
+    """
+    z1s = mat1['density'] * mat1['cs'] * max(1e-8, math.cos(alpha1))  # 计算入射侧等效阻抗
+    sin_a2 = mat2['cs'] * math.sin(alpha1) / mat1['cs']  # 由 Snell 定律计算透射角正弦值
+    alpha2 = _safe_arcsin(sin_a2)  # 计算透射角
+    z2s = mat2['density'] * mat2['cs'] * max(1e-8, math.cos(alpha2))  # 计算透射侧等效阻抗
+    denom = z1s + z2s if abs(z1s + z2s) > 1e-12 else 1e-12  # 计算分母并避免除零
+    rss = (z2s - z1s) / denom  # 计算反射系数
+    tss = 2.0 * z2s / denom  # 计算透射系数
+    rsp = 0.0  # 设置转换反射系数为零（阻抗近似忽略 SV->P）
+    tsp = 0.0  # 设置转换透射系数为零（阻抗近似忽略 SV->P）
+    return {'Rss': rss, 'Rsp': rsp, 'Tss': tss, 'Tsp': tsp, 'alpha2': alpha2}  # 返回界面系数字典
+
+
+def _compute_free_surface_sv_coeff(alpha, cp, cs):  # 定义 SV 波自由面系数计算函数
+    """计算 SV 波在自由面的反射系数 A1（SV->SV）与转换系数 A2（SV->P）。"""  # 说明函数用途
+    beta_p = _safe_arcsin(cp * math.sin(alpha) / cs)  # 计算自由面 P 波转换角
+    numerator_a1 = cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta_p) - cp ** 2 * math.cos(2 * alpha) ** 2  # 计算 A1 分子
+    denominator = cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta_p) + cp ** 2 * math.cos(2 * alpha) ** 2  # 计算公共分母
+    if abs(denominator) < 1e-12:  # 检查分母是否过小
+        denominator = 1e-12  # 避免除零
+    a1 = numerator_a1 / denominator  # 计算反射系数 A1
+    a2 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator  # 计算转换系数 A2
+    return {'A1': a1, 'A2': a2, 'beta': beta_p}  # 返回自由面系数字典
+
+
+def _compute_free_surface_p_coeff(beta, cp, cs):  # 定义 P 波自由面系数计算函数
+    """计算 P 波在自由面的反射系数 B2（P->P）与转换系数 B1（P->SV）。"""  # 说明函数用途
+    alpha = _safe_arcsin(cs * math.sin(beta) / cp)  # 计算对应的 SV 角
+    numerator_b2 = cp ** 2 * math.cos(2 * alpha) ** 2 - cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)  # 计算 B2 分子
+    denominator = cp ** 2 * math.cos(2 * alpha) ** 2 + cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)  # 计算公共分母
+    if abs(denominator) < 1e-12:  # 检查分母是否过小
+        denominator = 1e-12  # 避免除零
+    b2 = numerator_b2 / denominator  # 计算反射系数 B2
+    b1 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator  # 计算转换系数 B1
+    return {'B1': b1, 'B2': b2, 'alpha': alpha}  # 返回自由面系数字典
+
+
+def _integrate_acc_to_velocity(acc, dt, time_arr):  # 定义加速度积分并基线校正的纯数值函数
+    """加速度梯形积分为速度并做基线校正（去零偏 + 线性去趋势），抑制低频漂移。
+
+    acc      : 加速度时程数组
+    dt       : 时间步长 (s)
+    time_arr : 与 acc 对应的时间轴数组
+    返回 (vel, slope)：校正后的速度数组与被扣除的速度线性趋势斜率
+    """
+    acc = acc - np.mean(acc)  # 去除加速度零频偏移，避免积分后速度产生线性漂移
+    vel = np.zeros_like(acc)  # 初始化速度数组
+    vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 通过梯形积分计算速度
+    trend = np.polyfit(time_arr, vel, 1)  # 最小二乘拟合速度的线性趋势项
+    vel = vel - (trend[0] * time_arr + trend[1])  # 扣除线性趋势完成基线校正（位移=速度/(iω) 会放大低频误差）
+    return vel, trend[0]  # 返回校正后速度与趋势斜率
+
+
+def _surface_y_at(x, H_upper, H_lower, left_flat, w_slope):  # 定义按横坐标计算地表高度的纯函数
+    """返回横坐标 x 处的地表 y 坐标（用于底边节点取其正上方柱子的覆盖层厚度）。
+
+    几何：坡顶平台高 H_upper，坡脚平台高 H_lower，二者之间为线性坡面。
+    x <= left_flat            : 坡顶平台，地表 = H_upper
+    left_flat < x <= +w_slope : 坡面段，地表沿 x 从 H_upper 线性降到 H_lower
+    x  > left_flat + w_slope  : 坡脚平台，地表 = H_lower
+    """
+    w = max(w_slope, 1e-9)  # 防止除零（平坦模型 w_slope 取极小值）
+    if x <= left_flat:  # 判断是否位于坡顶平台
+        return H_upper  # 返回坡顶平台高度
+    if x <= left_flat + w:  # 判断是否位于坡面段
+        return H_upper - (x - left_flat) * (H_upper - H_lower) / w  # 返回坡面线性过渡高度
+    return H_lower  # 其余位于坡脚平台，返回坡脚高度
+
+
+# ==========================================================
+#  几何构造与命名
+# ==========================================================
+
+
+def make_geometry(total_L, H_minus_h, i, h_over_H, left_flat, bedrock_thickness):  # 定义斜坡几何构造函数
+    """根据斜坡几何输入计算全部派生量并打包为 Geometry。"""  # 说明函数用途
+    H = H_minus_h / (1.0 - h_over_H)  # 计算总覆盖层厚度
+    h = H - H_minus_h  # 计算下部覆盖层高度
+    H_upper = bedrock_thickness + H  # 计算坡顶地表高度
+    H_lower = bedrock_thickness + h  # 计算坡脚地表高度
+    H_flat = bedrock_thickness + H  # 计算平坦场地总高度（= 坡顶高度）
+    w_slope = H_minus_h / math.tan(math.radians(i))  # 计算坡面水平长度
+    return Geometry(total_L=total_L, i=i, left_flat=left_flat, H_minus_h=H_minus_h,  # 组装并返回几何对象（填入输入项）
+                    h_over_H=h_over_H, bedrock_thickness=bedrock_thickness,  # 继续填入输入项
+                    H=H, h=h, H_upper=H_upper, H_lower=H_lower, H_flat=H_flat, w_slope=w_slope)  # 填入派生项
+
+
+def make_flat_geometry(geom):  # 定义平坦自由场几何派生函数
+    """由斜坡几何派生平坦自由场几何：上下表面统一为 H_upper、坡面宽度取极小值。"""  # 说明函数用途
+    return geom._replace(H_lower=geom.H_upper, w_slope=0.001)  # 替换两项后返回新几何对象
+
+
+def _build_model_name_from_record(acc_file, scene_tag):  # 定义模型命名函数
+    """按"记录名-场景名"规则生成模型名。"""  # 说明函数用途
+    record_name = os.path.splitext(os.path.basename(acc_file))[0]  # 提取不带扩展名的记录名
+    if not record_name:  # 检查记录名是否为空
+        raise ValueError('无法从加速度文件生成记录名: %s' % acc_file)  # 抛出命名错误
+    if scene_tag not in ('slope', 'flat'):  # 检查场景标签是否合法
+        raise ValueError('scene_tag 仅支持 slope 或 flat，当前为: %s' % scene_tag)  # 抛出场景错误
+    return '{}-{}'.format(record_name, scene_tag)  # 返回组合后的模型名
+
+
+# ==========================================================
+#  输入读取
+# ==========================================================
+
+
 def find_acc_txt(logger=None):  # 定义加速度文件检索函数
     """查找当前工作目录下所有 .txt 文件，并读取每个加速度文件的分析步时长和增量步。"""  # 说明函数用途
     cwd = os.getcwd()  # 获取当前工作目录
@@ -349,20 +330,192 @@ def find_acc_txt(logger=None):  # 定义加速度文件检索函数
     return result  # 返回全部文件信息
 
 
-def create_model(total_L, H_minus_h, i, h_over_H, bedrock_thickness,
-                 cs_bedrock, vv_bedrock, density_bedrock,
-                 cs_overlying, vv_overlying, density_overlying,
-                 mesh_size, cae_name=None, logger=None):
-    """创建二维平面应变模型：几何、材料、截面、装配、网格（不含分析步）"""  # 说明函数用途
+# ============================================================
+#  双层自由场核心实现（射线法 / 到时延迟叠加，移植自 v3 并保留 v7 改良）：
+#  基岩入射 SV → 界面反/透射（阻抗近似，忽略 SV<->P 转换 Rsp=Tsp=0）
+#  → 覆盖层内自由面多次混响（按 max_reflect_order 截断的几何级数）。
+#  时域实现：对每个边界节点按几何到时延迟速度/位移时程后线性叠加。
+#  保留 v7 改良：①输入速度用基线校正积分 _integrate_acc_to_velocity；
+#               ②覆盖层混响厚度按各柱（侧边用该侧最高点、底边按 x）取值，而非全场统一最厚。
+# ============================================================
+
+
+def _delay_signal(u0, n_delay, dt):  # 定义将时程延迟整数步的函数
+    """将时程 u0(Nx2) 整体延迟 n_delay 个时间步，返回延长后的 (N+n_delay)x2 数组。"""  # 说明函数用途
+    N = u0.shape[0]  # 原始序列长度
+    new_len = N + n_delay  # 延迟后总长度
+    delayed = np.zeros((new_len, 2))  # 创建延迟后数组
+    delayed[:, 0] = np.arange(new_len) * dt  # 生成新时间轴
+    delayed[n_delay:, 1] = u0[:, 1]  # 将原信号平移到延迟位置
+    return delayed  # 返回延迟信号
+
+
+def _make_delay_cache(timeseries, dt):  # 定义延迟信号缓存工厂
+    """返回一个按延迟步数缓存延迟信号的访问器，跨节点复用以减少重复构造。"""  # 说明函数用途
+    cache = {}  # 初始化缓存字典
+    def get_delayed(delay_t):  # 定义按延迟时间取信号的闭包
+        n_delay = int(np.round(delay_t / dt))  # 将延迟时间换算为离散步数
+        if n_delay not in cache:  # 缓存未命中
+            cache[n_delay] = _delay_signal(timeseries, n_delay, dt)  # 构造并缓存
+        return cache[n_delay]  # 返回缓存信号
+    return get_delayed  # 返回访问器
+
+
+def _pad_to(arr, length, dt):  # 定义把 (M,2) 数组补零到指定长度的函数
+    """将 arr(Mx2) 末尾补零延长到 length 行，补零段补充时间轴。"""  # 说明函数用途
+    if arr.shape[0] < length:  # 需要补零时
+        pad = np.zeros((length - arr.shape[0], 2))  # 创建补零段
+        pad[:, 0] = np.arange(arr.shape[0], length) * dt  # 补齐时间轴
+        arr = np.vstack([arr, pad])  # 拼接
+    return arr  # 返回补齐后数组
+
+
+def _calc_node_delay(boundary, x0, y0, Ly, Lx,
+                     alpha, beta_p, cs, cp, alpha2, beta2, cs2, cp2, ymax_col):
+    """计算单个边界节点的三段到时 (tA, tB, tC)：入射 SV、反射 SV、反射/转换 P。
+
+    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；Ly：界面相对底边高度；Lx：模型横向跨度
+    返回 (t1, t2, t3) 三段延迟时间（秒）。基岩段用 cs/cp/alpha/beta_p，
+    覆盖层段用 cs2/cp2/alpha2/beta2，与 v3 射线法一致。
+    """
+    if boundary in ('l', 'r'):  # 处理左/右边界节点
+        if y0 <= Ly:  # 节点位于基岩段
+            t1 = y0 * np.cos(alpha) / cs  # 入射 SV 到时
+            t2 = (2 * Ly - y0) * np.cos(alpha) / cs  # 反射 SV 到时
+            t3 = ((Ly - y0) / (cp * np.cos(beta_p))  # 反射 P 到时（第一部分）
+                  + (Ly - (Ly - y0) * np.tan(alpha) * np.tan(beta_p)) * np.cos(alpha) / cs)  # 第二部分
+        else:  # 节点位于覆盖层段
+            t1 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(alpha2) / cs2  # 入射 SV 到时
+            t2 = Ly * np.cos(alpha) / cs + (2 * ymax_col - Ly - y0) * np.cos(alpha2) / cs2  # 反射 SV 到时
+            t3 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(beta2) / cp2  # 反射 P 到时
+        if boundary == 'r':  # 右边界叠加横向传播延迟
+            shift = Lx * np.sin(alpha) / cs  # 横向传播延迟量
+            t1 += shift; t2 += shift; t3 += shift  # 三段同时叠加
+        return t1, t2, t3  # 返回三段到时
+    elif boundary == 'b':  # 处理底边节点（位于基岩，纯基岩波场）
+        t4 = x0 * np.sin(alpha) / cs  # 入射 SV 到时
+        t5 = (2 * Ly + x0 * np.tan(alpha)) * np.cos(alpha) / cs  # 反射 SV 到时
+        t6 = (Ly / (cp * np.cos(beta_p))  # 反射 P 到时（第一部分）
+              + (Ly * np.cos(alpha) + x0 * np.sin(alpha)  # 第二部分
+                 - Ly * np.tan(beta_p) * np.sin(alpha)) / cs)  # 第三部分
+        return t4, t5, t6  # 返回三段到时
+    else:  # 非法边界
+        raise ValueError("boundary must be 'l', 'r', or 'b'")  # 抛出异常
+
+
+def _superpose_paths(get_delayed, tA, tB, tC,
+                     cycle_sv, cycle_p, cdelay_sv, cdelay_p, order_count, dt):
+    """对一个节点叠加主路径与覆盖层多次混响，返回 (时间轴, A路径值, B路径累加, C路径累加)。
+
+    A：主到时 tA 的延迟信号；B：反射 SV 路径在 tB + k·cdelay_sv 的各阶混响（幅值 cycle_sv^k）；
+    C：反射/转换 P 路径在 tC + k·cdelay_p 的各阶混响（幅值 cycle_p^k）。所有数组补零到统一长度。
+    """
+    u0_tA = get_delayed(tA)  # 主到时延迟信号
+    b_list = []  # B 路径各阶信号
+    c_list = []  # C 路径各阶信号
+    for k in range(order_count + 1):  # 遍历反射阶数
+        b_list.append(get_delayed(tB + k * cdelay_sv))  # B 路径第 k 阶
+        c_list.append(get_delayed(tC + k * cdelay_p))  # C 路径第 k 阶
+    max_len = u0_tA.shape[0]  # 统计统一长度
+    for arr in b_list + c_list:  # 遍历所有路径信号
+        max_len = max(max_len, arr.shape[0])  # 更新最大长度
+    u0_tA = _pad_to(u0_tA, max_len, dt)  # 补齐主路径
+    sumB = np.zeros(max_len)  # B 路径累加器
+    sumC = np.zeros(max_len)  # C 路径累加器
+    for k in range(order_count + 1):  # 按阶叠加
+        ab = _pad_to(b_list[k], max_len, dt)  # 补齐 B 路径第 k 阶
+        ac = _pad_to(c_list[k], max_len, dt)  # 补齐 C 路径第 k 阶
+        sumB += (cycle_sv ** k) * ab[:, 1]  # 累加 B 路径（带几何级数幅值）
+        sumC += (cycle_p ** k) * ac[:, 1]  # 累加 C 路径（带几何级数幅值）
+    return u0_tA[:, 0], u0_tA[:, 1], sumB, sumC  # 返回时间轴与三路结果
+
+
+def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis):
+    """射线法计算单节点自由场时程，返回 dict：time/ux/uy/dotux/dotuy/sigmax/sigmay。
+
+    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度（决定覆盖层厚与反射到时）；
+    ctx      : FreeFieldCtx（含角度、等效系数、混响幅值因子、材料、VEL/DIS、dt 等）；
+    get_vel/get_dis：速度/位移时程的延迟缓存访问器（跨节点复用）。
+    应力按 v3 公式由速度场叠加得到，且各边界公式已内嵌外法向符号。
+    """
+    geom = ctx.geom  # 取几何对象
+    Ly = geom.bedrock_thickness - ctx.ymin  # 界面相对底边高度
+    Lx = geom.total_L  # 模型横向跨度（xmin=0）
+    h2 = max(0.0, ymax_col - geom.bedrock_thickness)  # 该柱覆盖层厚度（v7 改良：按柱取值）
+    cdelay_sv = (2.0 * h2 * math.cos(ctx.alpha2) / ctx.cs2) if h2 > 0 else 0.0  # 覆盖层 SV 混响往返延迟
+    cdelay_p = (2.0 * h2 * math.cos(ctx.beta2) / ctx.cp2) if h2 > 0 else 0.0  # 覆盖层 P 混响往返延迟
+
+    tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时
+                                  ctx.alpha, ctx.beta_p, ctx.cs, ctx.cp,  # 基岩角度/波速
+                                  ctx.alpha2, ctx.beta2, ctx.cs2, ctx.cp2, ymax_col)  # 覆盖层角度/波速
+    dt = ctx.dt  # 时间步长
+    oc = max(0, int(ctx.max_reflect_order))  # 反射阶数上限
+
+    # 位移自由场：对位移时程 DIS 做延迟叠加
+    td, dA, dB, dC = _superpose_paths(get_dis, tA, tB, tC,  # 位移路径叠加
+                                      ctx.cycle_sv, ctx.cycle_p, cdelay_sv, cdelay_p, oc, dt)
+    # 速度自由场：对速度时程 VEL 做延迟叠加（速度与应力共用此叠加结果）
+    _tv, vA, vB, vC = _superpose_paths(get_vel, tA, tB, tC,  # 速度路径叠加
+                                       ctx.cycle_sv, ctx.cycle_p, cdelay_sv, cdelay_p, oc, dt)
+
+    a = ctx.alpha  # 入射 SV 角
+    bp = ctx.beta_p  # 基岩 P 反射角
+    A1 = ctx.A1  # 等效自由面 SV 反射系数
+    A2 = ctx.A2  # 等效自由面 SV->P 转换系数
+
+    ux = dA * np.cos(a) - A1 * dB * np.cos(a) + A2 * dC * np.sin(bp)  # x 向位移
+    uy = -dA * np.sin(a) - A1 * dB * np.sin(a) - A2 * dC * np.cos(bp)  # y 向位移
+    dotux = vA * np.cos(a) - A1 * vB * np.cos(a) + A2 * vC * np.sin(bp)  # x 向速度
+    dotuy = -vA * np.sin(a) - A1 * vB * np.sin(a) - A2 * vC * np.cos(bp)  # y 向速度
+
+    GG = ctx.GG; cs = ctx.cs; lam = ctx.lam; cp = ctx.cp  # 基岩材料标量（应力公式用）
+    sin2a = np.sin(2 * a)  # 双角正弦
+    cos2a = np.cos(2 * a)  # 双角余弦
+    sin2bp = np.sin(bp) ** 2  # P 角正弦平方
+    sin2bp_2 = np.sin(2 * bp)  # 双倍 P 角正弦
+    cosbp2 = np.cos(bp) ** 2  # P 角余弦平方
+
+    if boundary == 'l':  # 左边界应力（外法向已内嵌）
+        sigmax = (GG / cs * sin2a * (vA - A1 * vB)  # σ_xx
+                  + A2 * (lam + 2 * GG * sin2bp) / cp * vC)  # 叠加转换项
+        sigmay = (GG / cs * cos2a * (vA + A1 * vB)  # σ_yy
+                  - A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
+    elif boundary == 'r':  # 右边界应力
+        sigmax = (GG / cs * sin2a * (-vA + A1 * vB)  # σ_xx
+                  - A2 * (lam + 2 * GG * sin2bp) / cp * vC)  # 叠加转换项
+        sigmay = (GG / cs * cos2a * (-vA - A1 * vB)  # σ_yy
+                  + A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
+    else:  # 底边界应力
+        sigmax = (GG / cs * cos2a * (vA + A1 * vB)  # σ_xx
+                  - A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
+        sigmay = (GG / cs * sin2a * (-vA + A1 * vB)  # σ_yy
+                  + A2 * (lam + 2 * GG * cosbp2) / cp * vC)  # 叠加转换项
+
+    return {'time': td, 'ux': ux, 'uy': uy, 'dotux': dotux, 'dotuy': dotuy,  # 打包返回
+            'sigmax': sigmax, 'sigmay': sigmay}  # 应力分量
+
+
+# ==========================================================
+#  建模（几何/材料/网格）
+# ==========================================================
+
+
+def create_model(site, geom, mesh_size, cae_name=None, logger=None):
+    """创建二维平面应变斜坡模型：几何、材料、截面、装配、网格（不含分析步）。
+
+    site: Site 对象（两层材料 + 基岩厚度）
+    geom: Geometry 对象（斜坡几何，含派生量）
+    """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-1'  # 设置基础模型名称
 
-    H = H_minus_h / (1.0 - h_over_H)  # 根据高度比反算总高度
-    h = H - H_minus_h  # 计算下部高度
-    H_lower = bedrock_thickness + h  # 计算坡脚地表高度
-    H_upper = bedrock_thickness + H  # 计算坡顶地表高度
-    w_slope = H_minus_h / math.tan(math.radians(i))  # 计算坡面水平长度
-    left_flat = 1000.0  # 设置左侧平台长度为固定值
+    total_L = geom.total_L  # 读取模型总长度
+    H_lower = geom.H_lower  # 读取坡脚地表高度
+    H_upper = geom.H_upper  # 读取坡顶地表高度
+    H_minus_h = geom.H_minus_h  # 读取斜坡高度差（用于坡面顶点识别）
+    w_slope = geom.w_slope  # 读取坡面水平长度
+    left_flat = geom.left_flat  # 读取左平台长度
+    bedrock_thickness = geom.bedrock_thickness  # 读取基岩层厚度
 
     right_flat = total_L - left_flat - w_slope  # 计算右侧平台长度
     if right_flat <= 0:  # 检查右平台是否有效
@@ -389,18 +542,18 @@ def create_model(total_L, H_minus_h, i, h_over_H, bedrock_thickness,
     del model.sketches['__profile__']  # 删除临时草图
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
-    EE_bedrock = _compute_elastic_modulus_from_wave_speed(cs_bedrock, vv_bedrock, density_bedrock)  # 计算基岩弹性模量
-    EE_overlying = _compute_elastic_modulus_from_wave_speed(cs_overlying, vv_overlying, density_overlying)  # 计算覆盖层弹性模量
+    EE_bedrock = _compute_elastic_modulus_from_wave_speed(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩弹性模量
+    EE_overlying = _compute_elastic_modulus_from_wave_speed(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层弹性模量
 
     mat_bedrock_name = _next_available_name('Material-Bedrock', model.materials)  # 生成基岩材料名
     mat_bedrock = model.Material(name=mat_bedrock_name)  # 创建基岩材料
-    mat_bedrock.Elastic(table=((EE_bedrock, vv_bedrock),))  # 定义基岩弹性参数
-    mat_bedrock.Density(table=((density_bedrock,),))  # 定义基岩密度
+    mat_bedrock.Elastic(table=((EE_bedrock, site.bedrock.vv),))  # 定义基岩弹性参数
+    mat_bedrock.Density(table=((site.bedrock.density,),))  # 定义基岩密度
 
     mat_overlying_name = _next_available_name('Material-Overlying', model.materials)  # 生成覆盖层材料名
     mat_overlying = model.Material(name=mat_overlying_name)  # 创建覆盖层材料
-    mat_overlying.Elastic(table=((EE_overlying, vv_overlying),))  # 定义覆盖层弹性参数
-    mat_overlying.Density(table=((density_overlying,),))  # 定义覆盖层密度
+    mat_overlying.Elastic(table=((EE_overlying, site.overlying.vv),))  # 定义覆盖层弹性参数
+    mat_overlying.Density(table=((site.overlying.density,),))  # 定义覆盖层密度
 
     sec_bedrock_name = _next_available_name('Section-Bedrock', model.sections)  # 生成基岩截面名
     model.HomogeneousSolidSection(name=sec_bedrock_name, material=mat_bedrock_name, thickness=1.0)  # 创建基岩截面
@@ -531,13 +684,18 @@ def create_model(total_L, H_minus_h, i, h_over_H, bedrock_thickness,
     return model_name, part_name, inst_name
 
 
-def create_flat_model(total_L, H_flat, bedrock_thickness,
-                      cs_bedrock, vv_bedrock, density_bedrock,
-                      cs_overlying, vv_overlying, density_overlying,
-                      mesh_size, logger=None):
-    """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。"""  # 说明函数用途
+def create_flat_model(site, geom, mesh_size, logger=None):
+    """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。
+
+    site: Site 对象（两层材料 + 基岩厚度）
+    geom: Geometry 对象（取其总长、平坦总高 H_flat、基岩厚度）
+    """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-2'  # 设置平坦自由场模型名称
+
+    total_L = geom.total_L  # 读取模型总长度
+    H_flat = geom.H_flat  # 读取平坦场地总高度
+    bedrock_thickness = geom.bedrock_thickness  # 读取基岩层厚度
 
     model = mdb.Model(name=model_name)  # 创建平坦自由场模型
     log_step(logger, '%s 基础模型开始创建（平坦自由场）', model_name)  # 记录模型创建日志
@@ -553,18 +711,18 @@ def create_flat_model(total_L, H_flat, bedrock_thickness,
     del model.sketches['__flat_profile__']  # 删除临时草图
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
-    EE_bedrock = _compute_elastic_modulus_from_wave_speed(cs_bedrock, vv_bedrock, density_bedrock)  # 计算基岩弹性模量
-    EE_overlying = _compute_elastic_modulus_from_wave_speed(cs_overlying, vv_overlying, density_overlying)  # 计算覆盖层弹性模量
+    EE_bedrock = _compute_elastic_modulus_from_wave_speed(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩弹性模量
+    EE_overlying = _compute_elastic_modulus_from_wave_speed(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层弹性模量
 
     mat_bedrock_name = _next_available_name('Material-Bedrock', model.materials)  # 生成基岩材料名
     mat_bedrock = model.Material(name=mat_bedrock_name)  # 创建基岩材料
-    mat_bedrock.Elastic(table=((EE_bedrock, vv_bedrock),))  # 定义基岩弹性参数
-    mat_bedrock.Density(table=((density_bedrock,),))  # 定义基岩密度
+    mat_bedrock.Elastic(table=((EE_bedrock, site.bedrock.vv),))  # 定义基岩弹性参数
+    mat_bedrock.Density(table=((site.bedrock.density,),))  # 定义基岩密度
 
     mat_overlying_name = _next_available_name('Material-Overlying', model.materials)  # 生成覆盖层材料名
     mat_overlying = model.Material(name=mat_overlying_name)  # 创建覆盖层材料
-    mat_overlying.Elastic(table=((EE_overlying, vv_overlying),))  # 定义覆盖层弹性参数
-    mat_overlying.Density(table=((density_overlying,),))  # 定义覆盖层密度
+    mat_overlying.Elastic(table=((EE_overlying, site.overlying.vv),))  # 定义覆盖层弹性参数
+    mat_overlying.Density(table=((site.overlying.density,),))  # 定义覆盖层密度
 
     sec_bedrock_name = _next_available_name('Section-Bedrock', model.sections)  # 生成基岩截面名
     model.HomogeneousSolidSection(name=sec_bedrock_name, material=mat_bedrock_name, thickness=1.0)  # 创建基岩截面
@@ -579,7 +737,6 @@ def create_flat_model(total_L, H_flat, bedrock_thickness,
     assembly.Instance(name=inst_name, part=part, dependent=ON)  # 创建零件实例
 
     # ============ 水平切分面 ============
-    # 1. 基岩水平切分 (y = bedrock_thickness)
     part_faces = part.faces  # 获取当前面集合
     partition_sketch = model.ConstrainedSketch(name='__flat_bedrock_partition__', sheetSize=max(total_L, H_flat) * 2)  # 创建基岩界面草图
     partition_sketch.Line(point1=(total_L, bedrock_thickness), point2=(0.0, bedrock_thickness))  # 绘制基岩界面
@@ -655,15 +812,156 @@ def create_flat_model(total_L, H_flat, bedrock_thickness,
     return model_name, part_name, inst_name
 
 
-def VAB_oblique(angle,
-                cs_bedrock, vv_bedrock, density_bedrock,
-                cs_overlying, vv_overlying, density_overlying,
-                bedrock_thickness,
-                H_upper, H_lower, left_flat, w_slope,
-                max_reflect_order=1,
+# ==========================================================
+#  人工边界 VAB（弹簧-阻尼器 + 等效节点力）
+# ==========================================================
+
+
+def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax):  # 定义构建边界节点列表的函数
+    """对一条边界的实例节点排序、计算影响长度与弹簧/阻尼系数，返回 BoundaryNode 列表。
+
+    nodes       : Abaqus 实例节点序列
+    sort_axis   : 'x' 或 'y'，沿该轴排序并据相邻间距求影响长度
+    ascending   : 是否升序（底边升序、侧边降序，沿用 v6 行为）
+    pick_material: 函数 (x, y) -> 材料参数 dict，用于按节点所在层取系数
+    ymax        : 弹簧刚度公式中的参考长度 R
+    """  # 说明函数用途与参数
+    arr = np.array([[node.label, node.coordinates[0], node.coordinates[1]] for node in nodes], dtype=float)  # 生成节点数据表
+    axis = 1 if sort_axis == 'x' else 2  # 根据排序轴选择坐标列
+    arr = arr[arr[:, axis].argsort()]  # 按指定坐标排序
+    if not ascending:  # 判断是否需要倒序
+        arr = arr[::-1]  # 反转排序结果
+
+    n = arr.shape[0]  # 统计节点数量
+    if n == 1:  # 处理单节点情况
+        influence = np.array([0.0])  # 单节点影响长度设为零
+    else:  # 处理多节点情况
+        coord = arr[:, axis]  # 提取排序坐标
+        influence = np.empty(n)  # 创建影响长度数组
+        influence[0] = abs(coord[0] - coord[1]) / 2.0  # 计算首节点影响长度
+        influence[-1] = abs(coord[-1] - coord[-2]) / 2.0  # 计算末节点影响长度
+        if n > 2:  # 处理中间节点
+            influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0  # 计算中间节点影响长度
+
+    result = []  # 初始化边界节点列表
+    for idx in range(n):  # 遍历每个节点
+        x0 = arr[idx, 1]  # 读取节点 x 坐标
+        y0 = arr[idx, 2]  # 读取节点 y 坐标
+        inf = influence[idx]  # 读取节点影响长度
+        mat = pick_material(x0, y0)  # 按节点位置选择材料参数
+        kn = mat['GG'] / 2.0 / ymax * inf  # 计算法向刚度
+        cn = mat['density'] * mat['cp'] * inf  # 计算法向阻尼
+        kt = mat['GG'] / 4.0 / ymax * inf  # 计算切向刚度
+        ct = mat['density'] * mat['cs'] * inf  # 计算切向阻尼
+        result.append(BoundaryNode(label=int(arr[idx, 0]), x=x0, y=y0, influence=inf,  # 组装边界节点
+                                   kn=kn, cn=cn, kt=kt, ct=ct))  # 填入弹簧/阻尼系数
+    return result  # 返回边界节点列表
+
+
+def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logger):  # 定义施加弹簧阻尼器的函数
+    """为三条边界的所有节点创建接地弹簧-阻尼器（法向 + 切向）。"""  # 说明函数用途
+    boundary_dof = {'l': (1, 2), 'r': (1, 2), 'b': (2, 1)}  # 各边界 (法向自由度, 切向自由度)
+    for boundary in BOUNDARY_SEQUENCE:  # 按边界顺序处理
+        dof_n, dof_t = boundary_dof[boundary]  # 读取当前边界自由度配置
+        for bn in nodes_by_boundary[boundary]:  # 遍历该边界每个节点
+            node_array = instance.nodes.sequenceFromLabels([bn.label])  # 通过标签获取实例节点
+            if len(node_array) == 0:  # 判断节点是否存在
+                logger.warning('创建弹簧-阻尼器时，实例中不存在节点 %d', bn.label)  # 输出警告日志
+                continue  # 跳过当前节点
+            region = Region(nodes=node_array)  # 构建节点区域
+            assembly.engineeringFeatures.SpringDashpotToGround(  # 创建法向弹簧阻尼器
+                name='SpringDashpot_{}_{}_normal'.format(boundary, bn.label),  # 设置法向元件名称
+                region=region, orientation=None, dof=dof_n,  # 设置区域和自由度
+                springBehavior=ON, springStiffness=bn.kn,  # 设置弹簧行为和刚度
+                dashpotBehavior=ON, dashpotCoefficient=bn.cn)  # 设置阻尼行为和阻尼系数
+            assembly.engineeringFeatures.SpringDashpotToGround(  # 创建切向弹簧阻尼器
+                name='SpringDashpot_{}_{}_tangent'.format(boundary, bn.label),  # 设置切向元件名称
+                region=region, orientation=None, dof=dof_t,  # 设置区域和自由度
+                springBehavior=ON, springStiffness=bn.kt,  # 设置弹簧行为和刚度
+                dashpotBehavior=ON, dashpotCoefficient=bn.ct)  # 设置阻尼行为和阻尼系数
+    log_step(logger, '%s 弹簧-阻尼器创建完成', model_name)  # 记录创建完成日志
+
+
+def _build_equivalent_forces(nodes_by_boundary, ctx):  # 定义计算等效节点力时程的函数
+    """逐边界逐节点用射线法计算自由场并组装等效节点力时程，返回 {'<label>-<边界>-fx/fy': Nx2 数组}。
+
+    等效力 = K·u_ff + C·v̇_ff + A·σ_ff，其中应力 σ_ff 的各边界公式已内嵌外法向符号
+      （见 _compute_freefield_at_node），故此处面力项统一取 +A·σ：
+      侧边(l/r)：fx=kn·ux+cn·u̇x+A·σx, fy=kt·uy+ct·u̇y+A·σy；
+      底边(b)  ：fx=kt·ux+ct·u̇x+A·σx, fy=kn·uy+cn·u̇y+A·σy。
+    角点处理：左下/右下角点同属侧边与底边两个集合，会各算一次并叠加（VAB 角点标准处理，不折半）。
+    时间轴：射线法按到时延迟会延长时程，故各节点力时程取其自身（延长后）时间轴，不截断到原长。
+    """  # 说明函数用途与外法向/角点约定
+    field_data = {}  # 初始化等效力缓存字典
+    geom = ctx.geom  # 取出几何对象
+    get_vel = _make_delay_cache(ctx.VEL, ctx.dt)  # 速度时程延迟缓存（跨节点复用）
+    get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
+    for boundary in BOUNDARY_SEQUENCE:  # 遍历每个边界
+        for bn in nodes_by_boundary[boundary]:  # 遍历该边界每个节点
+            # 确定当前节点所在柱子的地表高度 ymax_col（#2：底边按 x 取值）
+            if boundary == 'l':  # 左边界
+                ymax_col = ctx.ymax_l  # 左边界柱地表高度
+            elif boundary == 'r':  # 右边界
+                ymax_col = ctx.ymax_r  # 右边界柱地表高度
+            else:  # 底边界
+                ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)  # 该底节点正上方地表高度
+
+            ff = _compute_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx, get_vel, get_dis)  # 射线法自由场时程
+
+            time = ff['time']  # 延长后的时间轴
+            ux = ff['ux']; uy = ff['uy']  # 位移分量
+            dotux = ff['dotux']; dotuy = ff['dotuy']  # 速度分量
+            sigmax = ff['sigmax']; sigmay = ff['sigmay']  # 应力分量（已含外法向符号）
+
+            if boundary in ('l', 'r'):  # 侧边界：x 为法向、y 为切向
+                fx = bn.kn * ux + bn.cn * dotux + bn.influence * sigmax  # x 向等效力（法向弹簧+阻尼+面力）
+                fy = bn.kt * uy + bn.ct * dotuy + bn.influence * sigmay  # y 向等效力（切向弹簧+阻尼+面力）
+            else:  # 底边界：x 为切向、y 为法向
+                fx = bn.kt * ux + bn.ct * dotux + bn.influence * sigmax  # x 向等效力（切向弹簧）
+                fy = bn.kn * uy + bn.cn * dotuy + bn.influence * sigmay  # y 向等效力（法向弹簧）
+
+            field_data['{}-{}-fx'.format(bn.label, boundary)] = np.column_stack((time, fx))  # 缓存 x 向力时程
+            field_data['{}-{}-fy'.format(bn.label, boundary)] = np.column_stack((time, fy))  # 缓存 y 向力时程
+    return field_data  # 返回等效力缓存
+
+
+def _apply_amplitudes_and_loads(model_name, inst_name, nodes_by_boundary, field_data, step_name, logger):  # 定义施加幅值与集中力的函数
+    """为每个边界节点创建幅值曲线（TabularAmplitude）并施加 x/y 向集中力。"""  # 说明函数用途
+    model = mdb.models[model_name]  # 获取目标模型
+    nodes = model.rootAssembly.instances[inst_name].nodes  # 获取实例节点集合
+    for boundary in BOUNDARY_SEQUENCE:  # 遍历每个边界
+        for bn in nodes_by_boundary[boundary]:  # 遍历该边界每个节点
+            fx_arr = field_data['{}-{}-fx'.format(bn.label, boundary)]  # 读取 x 向力时程
+            fy_arr = field_data['{}-{}-fy'.format(bn.label, boundary)]  # 读取 y 向力时程
+            name_amp_fx = 'AMP-{}-{}-fx'.format(bn.label, boundary)  # 生成 x 向幅值名
+            name_amp_fy = 'AMP-{}-{}-fy'.format(bn.label, boundary)  # 生成 y 向幅值名
+            model.TabularAmplitude(data=tuple(tuple(row) for row in fx_arr),  # 创建 x 向幅值曲线
+                                   name=name_amp_fx, smooth=SOLVER_DEFAULT, timeSpan=STEP)  # 设置平滑与时间跨度
+            model.TabularAmplitude(data=tuple(tuple(row) for row in fy_arr),  # 创建 y 向幅值曲线
+                                   name=name_amp_fy, smooth=SOLVER_DEFAULT, timeSpan=STEP)  # 设置平滑与时间跨度
+            node_array = nodes.sequenceFromLabels([bn.label])  # 按标签查找实例节点
+            if len(node_array) == 0:  # 判断节点是否存在
+                logger.warning('施加载荷时，实例中不存在节点 %d (实例: %s)', bn.label, inst_name)  # 输出警告日志
+                continue  # 跳过当前节点
+            region = Region(nodes=node_array)  # 构建节点区域
+            model.ConcentratedForce(name='load-{}-{}-fx'.format(bn.label, boundary),  # 创建 x 向集中力
+                                    createStepName=step_name, region=region, cf1=1.0, amplitude=name_amp_fx,  # 设置分析步/区域/幅值
+                                    distributionType=UNIFORM, field='', localCsys=None)  # 设置载荷分布
+            model.ConcentratedForce(name='load-{}-{}-fy'.format(bn.label, boundary),  # 创建 y 向集中力
+                                    createStepName=step_name, region=region, cf2=1.0, amplitude=name_amp_fy,  # 设置分析步/区域/幅值
+                                    distributionType=UNIFORM, field='', localCsys=None)  # 设置载荷分布
+    log_step(logger, '%s 幅值曲线与集中力已创建', model_name)  # 记录完成日志
+
+
+def VAB_oblique(site, geom, angle,
                 model_name='Model-1', part_name='Part-1', inst_name='Part-1-1',
                 acc_file=None, step_name=None, logger=None):
-    """为二维模型施加粘弹性人工边界（弹簧-阻尼器）和地震动斜向输入等效节点力。"""  # 说明函数用途
+    """为二维模型施加粘弹性人工边界（弹簧-阻尼器）与斜入射 SV 波等效节点力。
+
+    site: Site 对象（两层材料 + 基岩厚度）
+    geom: Geometry 对象（几何，含 H_upper/H_lower/left_flat/w_slope/bedrock_thickness）
+    angle: SV 波入射角（度）
+    """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     t0 = time.time()  # 记录函数开始时间
     step_name = step_name or DEFAULT_STEP_NAME  # 使用默认分析步名称
@@ -693,176 +991,71 @@ def VAB_oblique(angle,
         return instance.nodes.sequenceFromLabels(labels)  # 按标签获取实例节点序列
 
     # 材料参数计算
-    mat_bedrock = _compute_material_params(cs_bedrock, vv_bedrock, density_bedrock)  # 计算基岩材料参数
-    mat_overlying = _compute_material_params(cs_overlying, vv_overlying, density_overlying)  # 计算覆盖层材料参数
+    mat_bedrock = _compute_material_params(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 计算基岩材料参数
+    mat_overlying = _compute_material_params(site.overlying.cs, site.overlying.vv, site.overlying.density)  # 计算覆盖层材料参数
 
-    def _pick_material_by_node(x_coord, y_coord):  # 定义按节点坐标选择材料的函数
-        if y_coord < bedrock_thickness + 1e-4:  # 判断节点是否位于基岩层
-            return mat_bedrock  # 返回基岩材料参数
-        else:  # 否则认为属于覆盖层
-            return mat_overlying  # 返回覆盖层材料参数
-
-    # 获取模型尺寸
+    # 获取模型尺寸（左/右边界最高点与底边 y）
     l_nodes = get_instance_nodes_from_part_set('Left_boundary')  # 获取左边界节点
-    l_ymax_node = max(l_nodes, key=lambda node: node.coordinates[1])  # 取左边界最高节点
-    xmin = l_ymax_node.coordinates[0]  # 记录左边界 x 坐标
-    ymax_l = l_ymax_node.coordinates[1]  # 记录左边界最高 y 坐标
+    ymax_l = max(l_nodes, key=lambda node: node.coordinates[1]).coordinates[1]  # 记录左边界最高 y 坐标
 
     b_nodes = get_instance_nodes_from_part_set('Bottom_boundary')  # 获取底边节点
     ymin = b_nodes[0].coordinates[1]  # 记录底边 y 坐标
 
     r_nodes = get_instance_nodes_from_part_set('Right_boundary')  # 获取右边界节点
-    r_ymax_node = max(r_nodes, key=lambda node: node.coordinates[1])  # 取右边界最高节点
-    xmax = r_ymax_node.coordinates[0]  # 记录右边界 x 坐标
-    ymax_r = r_ymax_node.coordinates[1]  # 记录右边界最高 y 坐标
+    ymax_r = max(r_nodes, key=lambda node: node.coordinates[1]).coordinates[1]  # 记录右边界最高 y 坐标
 
-    ymax = max(ymax_l, ymax_r)  # 取左右边界最高点中的较大值
+    ymax = max(ymax_l, ymax_r)  # 取左右边界最高点中的较大值（弹簧刚度参考长度 R）
 
-    # 计算节点影响长度
-    def get_node_influence(nodes, sort_axis='y', ascending=False):  # 定义节点影响长度计算函数
-        node_data = np.array([[node.label, node.coordinates[0], node.coordinates[1]] for node in nodes], dtype=float)  # 生成节点数据表
-        axis = 1 if sort_axis == 'x' else 2  # 根据排序轴选择坐标列
-        node_data = node_data[node_data[:, axis].argsort()]  # 按指定坐标排序
-        if not ascending:  # 判断是否需要倒序
-            node_data = node_data[::-1]  # 反转排序结果
+    # 按节点所在材质层选择材料参数（基岩/覆盖层）
+    def pick_material(x_coord, y_coord):  # 定义按节点坐标选择材料的函数
+        if y_coord < geom.bedrock_thickness + 1e-4:  # 判断节点是否位于基岩层
+            return mat_bedrock  # 返回基岩材料参数
+        return mat_overlying  # 否则返回覆盖层材料参数
 
-        n = node_data.shape[0]  # 统计节点数量
-        if n == 1:  # 处理单节点情况
-            influence = np.array([0.0])  # 单节点影响长度设为零
-        else:  # 处理多节点情况
-            coord = node_data[:, axis]  # 提取排序坐标
-            influence = np.empty(n)  # 创建影响长度数组
-            influence[0] = abs(coord[0] - coord[1]) / 2.0  # 计算首节点影响长度
-            influence[-1] = abs(coord[-1] - coord[-2]) / 2.0  # 计算末节点影响长度
-            if n > 2:  # 处理中间节点
-                influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0  # 计算中间节点影响长度
+    # 构建三条边界的节点列表（含影响长度与弹簧-阻尼系数）
+    nodes_by_boundary = {  # 各边界 -> BoundaryNode 列表
+        'l': _make_boundary_nodes(l_nodes, 'y', False, pick_material, ymax),  # 左边界（沿 y 降序）
+        'r': _make_boundary_nodes(r_nodes, 'y', False, pick_material, ymax),  # 右边界（沿 y 降序）
+        'b': _make_boundary_nodes(b_nodes, 'x', True, pick_material, ymax),  # 底边界（沿 x 升序）
+    }  # 结束节点列表构建
+    log_step(logger, '%s 边界节点影响长度与弹簧-阻尼系数已计算', model_name)  # 记录计算日志
 
-        node_data = np.hstack((node_data, influence.reshape(-1, 1)))  # 将影响长度拼接到数据表
-        return node_data  # 返回节点影响数据
+    _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logger)  # 施加接地弹簧-阻尼器
 
-    node_data_l = get_node_influence(l_nodes, sort_axis='y', ascending=False)  # 计算左边界节点影响长度
-    node_data_r = get_node_influence(r_nodes, sort_axis='y', ascending=False)  # 计算右边界节点影响长度
-    node_data_b = get_node_influence(b_nodes, sort_axis='x', ascending=True)  # 计算底边节点影响长度
-    log_step(logger, '%s 节点影响长度已计算', model_name)  # 记录节点影响长度日志
-
-    # 粘弹性人工边界参数 (根据节点所在材质层动态赋值)
-    def add_spring_damper(node_data):  # 定义弹簧阻尼参数计算函数
-        influence = node_data[:, 3]  # 提取节点影响长度
-        kns = np.zeros_like(influence)  # 初始化法向刚度数组
-        cns = np.zeros_like(influence)  # 初始化法向阻尼数组
-        kts = np.zeros_like(influence)  # 初始化切向刚度数组
-        cts = np.zeros_like(influence)  # 初始化切向阻尼数组
-        for idx in range(node_data.shape[0]):  # 遍历所有边界节点
-            x0 = node_data[idx, 1]  # 读取节点 x 坐标
-            y0 = node_data[idx, 2]  # 读取节点 y 坐标
-            mat = _pick_material_by_node(x0, y0)  # 根据节点位置选择材料参数
-            kn_coeff = mat['GG'] / 2.0 / ymax  # 计算法向刚度系数
-            cn_coeff = mat['density'] * mat['cp']  # 计算法向阻尼系数
-            kt_coeff = mat['GG'] / 4.0 / ymax  # 计算切向刚度系数
-            ct_coeff = mat['density'] * mat['cs']  # 计算切向阻尼系数
-            kns[idx] = kn_coeff * influence[idx]  # 计算法向刚度
-            cns[idx] = cn_coeff * influence[idx]  # 计算法向阻尼
-            kts[idx] = kt_coeff * influence[idx]  # 计算切向刚度
-            cts[idx] = ct_coeff * influence[idx]  # 计算切向阻尼
-        return np.hstack((node_data,  # 拼接原始节点数据
-                           kns.reshape(-1, 1),  # 拼接法向刚度
-                           cns.reshape(-1, 1),  # 拼接法向阻尼
-                           kts.reshape(-1, 1),  # 拼接切向刚度
-                           cts.reshape(-1, 1)))  # 拼接切向阻尼
-
-    node_data_l = add_spring_damper(node_data_l)  # 为左边界分配弹簧阻尼参数
-    node_data_r = add_spring_damper(node_data_r)  # 为右边界分配弹簧阻尼参数
-    node_data_b = add_spring_damper(node_data_b)  # 为底边分配弹簧阻尼参数
-    log_step(logger, '%s 弹簧-阻尼系数已分配到所有边界节点', model_name)  # 记录参数分配日志
-
-    # 添加弹簧阻尼器到地面
-    def add_spring_dashpot(node_data, prefix, dof_n, dof_t):  # 定义创建弹簧阻尼器的函数
-        for row in node_data:  # 遍历每个边界节点
-            node_label = int(row[0])  # 读取节点标签
-            kn = row[4]  # 读取法向刚度
-            cn = row[5]  # 读取法向阻尼
-            kt = row[6]  # 读取切向刚度
-            ct = row[7]  # 读取切向阻尼
-            node_array = instance.nodes.sequenceFromLabels([node_label])  # 通过标签获取实例节点
-            if len(node_array) == 0:  # 判断节点是否存在
-                logger.warning('创建弹簧-阻尼器时，实例中不存在节点 %d', node_label)  # 输出警告日志
-                continue  # 跳过当前节点
-            region = Region(nodes=node_array)  # 构建节点区域
-            assembly.engineeringFeatures.SpringDashpotToGround(  # 创建法向弹簧阻尼器
-                name='SpringDashpot_{}_{}_normal'.format(prefix, node_label),  # 设置法向元件名称
-                region=region, orientation=None, dof=dof_n,  # 设置区域和自由度
-                springBehavior=ON, springStiffness=kn,  # 设置弹簧行为和刚度
-                dashpotBehavior=ON, dashpotCoefficient=cn)  # 设置阻尼行为和阻尼系数
-            assembly.engineeringFeatures.SpringDashpotToGround(  # 创建切向弹簧阻尼器
-                name='SpringDashpot_{}_{}_tangent'.format(prefix, node_label),  # 设置切向元件名称
-                region=region, orientation=None, dof=dof_t,  # 设置区域和自由度
-                springBehavior=ON, springStiffness=kt,  # 设置弹簧行为和刚度
-                dashpotBehavior=ON, dashpotCoefficient=ct)  # 设置阻尼行为和阻尼系数
-
-    boundary_dof = {  # 定义各边界对应的法向与切向自由度
-        'l': (1, 2),  # 左边界法向为 1、切向为 2
-        'r': (1, 2),  # 右边界法向为 1、切向为 2
-        'b': (2, 1),  # 底边法向为 2、切向为 1
-    }  # 结束自由度映射
-    boundary_node_data = {  # 定义各边界对应的节点数据
-        'l': node_data_l,  # 左边界节点数据
-        'r': node_data_r,  # 右边界节点数据
-        'b': node_data_b,  # 底边节点数据
-    }  # 结束节点数据映射
-    for boundary in BOUNDARY_SEQUENCE:  # 按边界顺序创建弹簧阻尼器
-        dof_n, dof_t = boundary_dof[boundary]  # 读取当前边界自由度配置
-        add_spring_dashpot(boundary_node_data[boundary], prefix=boundary, dof_n=dof_n, dof_t=dof_t)  # 施加弹簧阻尼器
-    log_step(logger, '%s 弹簧-阻尼器创建完成', model_name)  # 记录创建完成日志
-
-    # ============ 入射角与反射系数计算 ============
+    # ============ 入射角处理 ============
     if angle == 0:  # 判断入射角是否为零
         angle = 1e-10  # 用极小角度替代零角度
     else:  # 处理非零角度
         angle = round(angle, 4)  # 保留四位小数
-
     alpha1 = math.radians(angle)  # 将角度转换为弧度
-    interface_coeff_12 = _compute_interface_sv_coeff(alpha1, mat_bedrock, mat_overlying)  # 计算界面 1->2 系数
-    alpha2 = interface_coeff_12['alpha2']  # 读取透射角
-    beta1 = _safe_arcsin(mat_bedrock['cp'] * math.sin(alpha1) / mat_bedrock['cs'])  # 计算基岩 P 波角
-    beta2 = _safe_arcsin(mat_overlying['cp'] * math.sin(alpha2) / mat_overlying['cs']) if abs(math.sin(alpha2)) > 0 else 1e-10  # 计算覆盖层 P 波角
 
-    free_sv_2 = _compute_free_surface_sv_coeff(alpha2, mat_overlying['cp'], mat_overlying['cs'])  # 计算覆盖层自由面 SV 系数
-    free_p_2 = _compute_free_surface_p_coeff(beta2, mat_overlying['cp'], mat_overlying['cs'])  # 计算覆盖层自由面 P 系数
-    interface_coeff_21 = _compute_interface_sv_coeff(alpha2, mat_overlying, mat_bedrock)  # 计算界面 2->1 系数
+    # ============ 射线法等效反射/转换系数（全局，与节点厚度无关）============
+    cs1 = mat_bedrock['cs']  # 基岩剪切波速
+    cp1 = mat_bedrock['cp']  # 基岩纵波波速
+    cs2 = mat_overlying['cs']  # 覆盖层剪切波速
+    cp2 = mat_overlying['cp']  # 覆盖层纵波波速
 
-    rss_primary = interface_coeff_12['Rss']  # 提取主反射系数
-    rsp_primary = interface_coeff_12['Rsp']  # 提取转换反射系数
-    tss_primary = interface_coeff_12['Tss']  # 提取主透射系数
-    tsp_primary = interface_coeff_12['Tsp']  # 提取转换透射系数
+    interface_12 = _compute_interface_sv_coeff(alpha1, mat_bedrock, mat_overlying)  # 界面 1->2 系数（基岩入射）
+    alpha2 = interface_12['alpha2']  # 覆盖层内 SV 透射角
+    beta1 = _safe_arcsin(cp1 * math.sin(alpha1) / cs1)  # 基岩 P 波反射角
+    beta2 = _safe_arcsin(cp2 * math.sin(alpha2) / cs2) if abs(math.sin(alpha2)) > 0 else 1e-10  # 覆盖层 P 波角
+    free_sv_2 = _compute_free_surface_sv_coeff(alpha2, cp2, cs2)  # 覆盖层自由面 SV 反射/转换系数
+    free_p_2 = _compute_free_surface_p_coeff(beta2, cp2, cs2)  # 覆盖层自由面 P 反射/转换系数
+    interface_21 = _compute_interface_sv_coeff(alpha2, mat_overlying, mat_bedrock)  # 界面 2->1 系数（下行回基岩）
 
-    h2 = max(0.0, ymax - bedrock_thickness)  # 计算覆盖层厚度
-    cycle_sv = free_sv_2['A1'] * interface_coeff_21['Rss']  # 计算 SV 循环项
-    cycle_p = free_p_2['B2'] * interface_coeff_21['Rss']  # 计算 P 循环项
-    order_count = max(0, int(max_reflect_order))  # 计算反射阶数上限
+    cycle_sv = free_sv_2['A1'] * interface_21['Rss']  # 覆盖层内一次 SV 混响的幅值因子
+    cycle_p = free_p_2['B2'] * interface_21['Rss']  # 覆盖层内一次 P 混响的幅值因子
+    order_count = max(0, int(MAX_REFLECT_ORDER))  # 几何级数截断阶数
+    sum_cycle_sv = sum([cycle_sv ** k for k in range(order_count + 1)])  # SV 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
+    sum_cycle_p = sum([cycle_p ** k for k in range(order_count + 1)])  # P 混响幅值几何级数和（用列表避免 sum 被通配导入覆盖后拒收生成器）
+    Rss_eff = interface_12['Rss'] + interface_12['Tss'] * free_sv_2['A1'] * interface_21['Tss'] * sum_cycle_sv  # 等效 SV 反射系数
+    Rsp_eff = interface_12['Rsp'] + interface_12['Tss'] * free_sv_2['A2'] * interface_21['Tss'] * sum_cycle_p  # 等效 SV->P 转换系数
+    log_step(logger, '%s 射线法反射参数: Rss_eff=%.4f, Rsp_eff=%.4f, alpha2=%.4f, beta2=%.4f',  # 记录系数日志
+             model_name, Rss_eff, Rsp_eff, alpha2, beta2)  # 输出关键系数
 
-    sum_cycle_sv = 0.0  # 初始化 SV 累积项
-    sum_cycle_p = 0.0  # 初始化 P 累积项
-    for order_idx in range(order_count + 1):  # 按阶数累加循环项
-        sum_cycle_sv += cycle_sv ** order_idx  # 累加 SV 几何级数
-        sum_cycle_p += cycle_p ** order_idx  # 累加 P 几何级数
-
-    Rss_eff = rss_primary + tss_primary * free_sv_2['A1'] * interface_coeff_21['Tss'] * sum_cycle_sv  # 计算等效反射系数
-    Rsp_eff = rsp_primary + tss_primary * free_sv_2['A2'] * interface_coeff_21['Tss'] * sum_cycle_p  # 计算等效转换系数
-    cycle_delay_sv = (2.0 * h2 * math.cos(alpha2) / mat_overlying['cs']) if h2 > 0 else 0.0  # 计算 SV 循环延迟
-    cycle_delay_p = (2.0 * h2 * math.cos(beta2) / mat_overlying['cp']) if h2 > 0 else 0.0  # 计算 P 循环延迟
-    log_step(logger, '%s 反射参数计算完成: Rss_eff=%.4f, Rsp_eff=%.4f', model_name, Rss_eff, Rsp_eff)  # 记录反射参数日志
-
-    # 映射回基准变量名 (底层使用 bedrock)
-    alpha = alpha1  # 映射入射角变量
-    beta_p = beta1  # 映射 P 波角变量
-    A1 = Rss_eff  # 映射等效反射系数
-    A2 = Rsp_eff  # 映射等效转换系数
-    GG = mat_bedrock['GG']  # 映射基岩剪切模量
-    lam = mat_bedrock['lam']  # 映射基岩拉梅常数
-    cs = mat_bedrock['cs']  # 映射基岩剪切波速
-    cp = mat_bedrock['cp']  # 映射基岩纵波波速
-
-    # 读取加速度时程并积分
+    # ============ 读取加速度时程并积分（保留 v7 基线校正）============
+    # [输入幅值约定（#5）] 加速度记录积分得到的速度被当作"基底入射上行 SV 波"幅值 E；
+    #   自由岩面对应 2E（自由面效应），TAF=PGA_slope/PGA_flat 取比值时该归一化抵消。
     if not acc_file:  # 判断加速度文件是否为空
         raise ValueError('acc_file 不能为空')  # 抛出参数缺失异常
     ACC = np.loadtxt(acc_file)  # 读取加速度时程
@@ -874,393 +1067,49 @@ def VAB_oblique(angle,
     if dt <= 0:  # 检查步长是否有效
         raise ValueError('加速度 dt 必须 > 0')  # 抛出步长异常
 
-    vel = np.zeros_like(acc)  # 初始化速度数组
-    vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 通过梯形积分计算速度
-    VEL = np.column_stack((time_arr, vel))  # 组合速度时程
-
+    # 积分得到速度时程（梯形积分 + 基线校正，抑制低频漂移），再积分得到位移时程
+    vel, _vel_slope = _integrate_acc_to_velocity(acc, dt, time_arr)  # 加速度→速度（含基线校正）
+    log_step(logger, '%s 速度基线校正完成: 去趋势斜率=%.3e', model_name, _vel_slope)  # 记录基线校正日志
     dis = np.zeros_like(vel)  # 初始化位移数组
-    dis[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt)  # 通过梯形积分计算位移
-    DIS = np.column_stack((time_arr, dis))  # 组合位移时程
+    dis[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt)  # 速度梯形积分得到位移
+    VEL = np.column_stack((time_arr, vel))  # 组合速度时程 [t, v]
+    DIS = np.column_stack((time_arr, dis))  # 组合位移时程 [t, u]
 
-    max_time = ACC[-1, 0]  # 读取原始时程末时刻
-    Ly = bedrock_thickness - ymin  # 计算基岩界面高度差
-    Lx = xmax - xmin  # 计算模型横向跨度
+    # ============ 逐节点用射线法计算自由场并组装等效力 ============
+    ctx = FreeFieldCtx(  # 打包射线法等效力计算所需上下文
+        mat_bedrock=mat_bedrock, mat_overlying=mat_overlying, geom=geom,  # 材料与几何
+        ymax_l=ymax_l, ymax_r=ymax_r, ymin=ymin,  # 边界高度信息
+        alpha=alpha1, beta_p=beta1, alpha2=alpha2, beta2=beta2,  # 各波传播角
+        A1=Rss_eff, A2=Rsp_eff, cycle_sv=cycle_sv, cycle_p=cycle_p,  # 等效系数与混响幅值因子
+        GG=mat_bedrock['GG'], lam=mat_bedrock['lam'], cs=cs1, cp=cp1, cs2=cs2, cp2=cp2,  # 材料标量
+        VEL=VEL, DIS=DIS, dt=dt, time_arr=time_arr, max_reflect_order=order_count)  # 时程、步长、阶数
+    field_data = _build_equivalent_forces(nodes_by_boundary, ctx)  # 计算所有边界节点等效力时程
+    log_step(logger, '%s 所有边界等效节点力计算完成', model_name)  # 记录计算完成日志
 
-    # 计算各节点的波到达延迟时间
-    def calc_node_delay(node_data, boundary, alpha, beta_p, cs, cp, Ly, Lx,
-                        cs2, cp2, alpha2, beta2, ymax_col):  # 定义节点延迟时间计算函数
-        n = node_data.shape[0]  # 读取节点数量
-        det = np.zeros((n, 4))  # 初始化延迟时间表
-        det[:, 0] = node_data[:, 0]  # 将节点标签写入结果表第一列
-
-        for i in range(n):  # 遍历每个边界节点
-            x0 = node_data[i, 1]  # 读取节点 x 坐标
-            y0 = node_data[i, 2]  # 读取节点 y 坐标
-
-            if boundary == 'l':  # 处理左边界节点
-                if y0 <= Ly:  # 判断是否处于基岩段
-                    t1 = y0 * np.cos(alpha) / cs  # 计算第一段延迟
-                    t2 = (2 * Ly - y0) * np.cos(alpha) / cs  # 计算第二段延迟
-                    t3 = ((Ly - y0) / (cp * np.cos(beta_p))  # 计算第三段延迟的第一部分
-                          + (Ly - (Ly - y0) * np.tan(alpha) * np.tan(beta_p)) * np.cos(alpha) / cs)  # 计算第三段延迟的第二部分
-                else:  # 处理覆盖层段
-                    t1 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(alpha2) / cs2  # 计算第一段延迟
-                    t2 = Ly * np.cos(alpha) / cs + (2 * ymax_col - Ly - y0) * np.cos(alpha2) / cs2  # 计算第二段延迟
-                    t3 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(beta2) / cp2  # 计算第三段延迟
-                det[i, 1] = t1  # 写入第一列延迟
-                det[i, 2] = t2  # 写入第二列延迟
-                det[i, 3] = t3  # 写入第三列延迟
-
-            elif boundary == 'r':  # 处理右边界节点
-                if y0 <= Ly:  # 判断是否处于基岩段
-                    t1 = y0 * np.cos(alpha) / cs  # 计算第一段延迟
-                    t2 = (2 * Ly - y0) * np.cos(alpha) / cs  # 计算第二段延迟
-                    t3 = ((Ly - y0) / (cp * np.cos(beta_p))  # 计算第三段延迟的第一部分
-                          + (Ly - (Ly - y0) * np.tan(alpha) * np.tan(beta_p)) * np.cos(alpha) / cs)  # 计算第三段延迟的第二部分
-                else:  # 处理覆盖层段
-                    t1 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(alpha2) / cs2  # 计算第一段延迟
-                    t2 = Ly * np.cos(alpha) / cs + (2 * ymax_col - Ly - y0) * np.cos(alpha2) / cs2  # 计算第二段延迟
-                    t3 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(beta2) / cp2  # 计算第三段延迟
-                det[i, 1] = t1 + Lx * np.sin(alpha) / cs  # 写入并叠加横向传播延迟
-                det[i, 2] = t2 + Lx * np.sin(alpha) / cs  # 写入并叠加横向传播延迟
-                det[i, 3] = t3 + Lx * np.sin(alpha) / cs  # 写入并叠加横向传播延迟
-
-            elif boundary == 'b':  # 处理底边节点
-                t4 = x0 * np.sin(alpha) / cs  # 计算底边第一段延迟
-                t5 = (2 * Ly + x0 * np.tan(alpha)) * np.cos(alpha) / cs  # 计算底边第二段延迟
-                t6 = (Ly / (cp * np.cos(beta_p))  # 计算底边第三段延迟的第一部分
-                      + (Ly * np.cos(alpha) + x0 * np.sin(alpha)  # 计算底边第三段延迟的第二部分
-                         - Ly * np.tan(beta_p) * np.sin(alpha)) / cs)  # 计算底边第三段延迟的第三部分
-                det[i, 1] = t4  # 写入第一列延迟
-                det[i, 2] = t5  # 写入第二列延迟
-                det[i, 3] = t6  # 写入第三列延迟
-            else:  # 处理非法边界类型
-                raise ValueError("boundary must be 'l', 'r', or 'b'")  # 抛出边界类型异常
-        return det  # 返回延迟时间表
-
-    det_l = calc_node_delay(node_data_l, 'l', alpha, beta_p, cs, cp, Ly, Lx,  # 计算左边界延迟表
-                            cs_overlying, mat_overlying['cp'], alpha2, beta2, ymax_l)  # 传入覆盖层参数
-    det_r = calc_node_delay(node_data_r, 'r', alpha, beta_p, cs, cp, Ly, Lx,  # 计算右边界延迟表
-                            cs_overlying, mat_overlying['cp'], alpha2, beta2, ymax_r)  # 传入覆盖层参数
-    det_b = calc_node_delay(node_data_b, 'b', alpha, beta_p, cs, cp, Ly, Lx,  # 计算底边延迟表
-                            cs_overlying, mat_overlying['cp'], alpha2, beta2, ymax)  # 传入覆盖层参数
-    log_step(logger, '%s 左/右/底 边界节点延迟时间已计算', model_name)  # 记录延迟时间日志
-
-    # 补零延长
-    detmax = max(np.max(det_l[:, 1:]), np.max(det_r[:, 1:]), np.max(det_b[:, 1:]))  # 计算最大延迟时间
-    if max_time < detmax:  # 判断原始时程是否不足以覆盖所有延迟
-        n_add = int(np.ceil((detmax - max_time) / dt))  # 计算需要补零的步数
-        new_times = VEL[-1, 0] + dt * np.arange(1, n_add + 1)  # 生成新增时间序列
-        new_vel = np.zeros((n_add, 2))  # 创建补零数组
-        new_vel[:, 0] = new_times  # 写入补零段时间
-        VEL = np.vstack([VEL, new_vel])  # 将补零段追加到速度时程
-        DIS = np.vstack([DIS, new_vel])  # 将补零段追加到位移时程
-        log_step(logger, '%s VEL/DIS 已用零延长: 增加行数=%d', model_name, n_add)  # 记录补零日志
-    else:  # 处理无需延长的情况
-        log_step(logger, '%s VEL/DIS 无需延长', model_name)  # 记录无需延长日志
-
-    # 对齐延迟时间
-    def round_delay(det, dt):  # 定义延迟时间取整函数
-        det[:, 1:4] = np.round(det[:, 1:4] / dt) * dt  # 将延迟时间对齐到时间步长
-        return det  # 返回取整后的延迟表
-
-    det_l = round_delay(det_l, dt)  # 对左边界延迟时间取整
-    det_r = round_delay(det_r, dt)  # 对右边界延迟时间取整
-    det_b = round_delay(det_b, dt)  # 对底边延迟时间取整
-
-    det_map_l = {int(row[0]): (row[1], row[2], row[3]) for row in det_l}  # 构建左边界延迟映射
-    det_map_r = {int(row[0]): (row[1], row[2], row[3]) for row in det_r}  # 构建右边界延迟映射
-    det_map_b = {int(row[0]): (row[1], row[2], row[3]) for row in det_b}  # 构建底边延迟映射
-
-    def delay_signal(u0, delay_t, dt):  # 定义信号延迟函数
-        n_delay = int(np.round(delay_t / dt))  # 将延迟时间转换为步数
-        N = u0.shape[0]  # 获取原始序列长度
-        new_len = N + n_delay  # 计算延迟后长度
-        delayed = np.zeros((new_len, 2))  # 创建延迟后的时程数组
-        delayed[:, 0] = np.arange(new_len) * dt  # 生成新的时间轴
-        delayed[n_delay:, 1] = u0[:, 1]  # 将原始信号平移到延迟位置
-        return delayed  # 返回延迟信号
-
-    def make_delay_cache(timeseries, dt):  # 定义延迟缓存工厂函数
-        cache = {}  # 初始化缓存字典
-        def get_delayed(delay_t):  # 定义延迟获取函数
-            n_delay = int(np.round(delay_t / dt))  # 将延迟时间转换为步数
-            if n_delay not in cache:  # 判断缓存中是否已有对应延迟
-                cache[n_delay] = delay_signal(timeseries, n_delay * dt, dt)  # 生成并缓存延迟信号
-            return cache[n_delay]  # 返回缓存中的延迟信号
-        return get_delayed  # 返回延迟获取函数
-
-    def pad_to(arr, length, dt):  # 定义数组补零函数
-        if arr.shape[0] < length:  # 判断是否需要补零
-            pad = np.zeros((length - arr.shape[0], 2))  # 创建补零数组
-            pad[:, 0] = np.arange(arr.shape[0], length) * dt  # 为补零段补充时间轴
-            arr = np.vstack([arr, pad])  # 将补零段拼接到末尾
-        return arr  # 返回补零后的数组
-
-    # ============ 计算自由场位移和速度 ============
-    field_data = {}  # 初始化自由场结果缓存
-
-    def calc_freefield_u_and_dotu_general(node_data, det_map, timeseries, dt,
-                                           alpha, beta_p, A1, A2,
-                                           suffix1, suffix2, prefix):  # 定义自由场位移速度计算函数
-        get_delayed = make_delay_cache(timeseries, dt)  # 创建延迟信号缓存器
-        for i in range(node_data.shape[0]):  # 遍历边界节点
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            tA, tB, tC = det_map[node_id]  # 读取三段延迟时间
-
-            u0_tA = get_delayed(tA)  # 获取主传播延迟信号
-            u0_tB_list = []  # 初始化 B 路径信号列表
-            u0_tC_list = []  # 初始化 C 路径信号列表
-            for order_idx in range(order_count + 1):  # 遍历反射阶数
-                delay_b = tB + order_idx * cycle_delay_sv  # 计算 SV 循环延迟
-                delay_c = tC + order_idx * cycle_delay_p  # 计算 P 循环延迟
-                u0_tB_list.append(get_delayed(delay_b))  # 追加 B 路径延迟信号
-                u0_tC_list.append(get_delayed(delay_c))  # 追加 C 路径延迟信号
-
-            max_len = u0_tA.shape[0]  # 初始化最大长度
-            for arr in u0_tB_list + u0_tC_list:  # 遍历所有延迟信号
-                max_len = max(max_len, arr.shape[0])  # 统计统一长度
-
-            u0_tA = pad_to(u0_tA, max_len, dt)  # 补齐主传播信号长度
-            u0_tB_sum = np.zeros(max_len)  # 初始化 B 路径累加数组
-            u0_tC_sum = np.zeros(max_len)  # 初始化 C 路径累加数组
-            for order_idx in range(order_count + 1):  # 按阶数叠加路径信号
-                arr_b = pad_to(u0_tB_list[order_idx], max_len, dt)  # 补齐 B 路径信号
-                arr_c = pad_to(u0_tC_list[order_idx], max_len, dt)  # 补齐 C 路径信号
-                u0_tB_sum += (cycle_sv ** order_idx) * arr_b[:, 1]  # 累加 B 路径贡献
-                u0_tC_sum += (cycle_p ** order_idx) * arr_c[:, 1]  # 累加 C 路径贡献
-
-            ux = (u0_tA[:, 1] * np.cos(alpha)  # 计算 x 向位移
-                  - A1 * u0_tB_sum * np.cos(alpha)  # 叠加反射修正项
-                  + A2 * u0_tC_sum * np.sin(beta_p))  # 叠加转换修正项
-            uy = (-u0_tA[:, 1] * np.sin(alpha)  # 计算 y 向位移
-                  - A1 * u0_tB_sum * np.sin(alpha)  # 叠加反射修正项
-                  - A2 * u0_tC_sum * np.cos(beta_p))  # 叠加转换修正项
-
-            ux_arr = np.zeros((max_len, 2))  # 创建 x 向时程数组
-            uy_arr = np.zeros((max_len, 2))  # 创建 y 向时程数组
-            ux_arr[:, 0] = u0_tA[:, 0]  # 写入时间轴
-            uy_arr[:, 0] = u0_tA[:, 0]  # 写入时间轴
-            ux_arr[:, 1] = ux  # 写入 x 向结果
-            uy_arr[:, 1] = uy  # 写入 y 向结果
-
-            field_data['{}-{}-{}'.format(node_id, prefix, suffix1)] = ux_arr  # 缓存 x 向结果
-            field_data['{}-{}-{}'.format(node_id, prefix, suffix2)] = uy_arr  # 缓存 y 向结果
-
-    boundary_det_map = {  # 定义各边界延迟映射
-        'l': det_map_l,  # 左边界映射
-        'r': det_map_r,  # 右边界映射
-        'b': det_map_b,  # 底边映射
-    }  # 结束边界延迟映射
-
-    # 计算位移自由场
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界计算位移自由场
-        calc_freefield_u_and_dotu_general(  # 调用自由场计算函数
-            boundary_node_data[boundary], boundary_det_map[boundary], DIS, dt,  # 传入位移时程与延迟表
-            alpha, beta_p, A1, A2, 'ux', 'uy', boundary)  # 传入输出后缀与边界标识
-    log_step(logger, '%s 自由场位移已计算', model_name)  # 记录位移自由场日志
-
-    # 计算速度自由场
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界计算速度自由场
-        calc_freefield_u_and_dotu_general(  # 调用自由场计算函数
-            boundary_node_data[boundary], boundary_det_map[boundary], VEL, dt,  # 传入速度时程与延迟表
-            alpha, beta_p, A1, A2, 'dotux', 'dotuy', boundary)  # 传入输出后缀与边界标识
-    log_step(logger, '%s 自由场速度已计算', model_name)  # 记录速度自由场日志
-
-    # ============ 计算自由场应力 ============
-    def calc_freefield_sigma_general(node_data, det_map, VEL, dt,
-                                      alpha, beta_p, A1, A2,
-                                      GG, cs, lam, cp, prefix):  # 定义自由场应力计算函数
-        get_delayed = make_delay_cache(VEL, dt)  # 创建速度延迟缓存器
-        for i in range(node_data.shape[0]):  # 遍历边界节点
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            tA, tB, tC = det_map[node_id]  # 读取三段延迟时间
-
-            v0_tA = get_delayed(tA)  # 获取主传播速度信号
-            v0_tB_list = []  # 初始化 B 路径速度列表
-            v0_tC_list = []  # 初始化 C 路径速度列表
-            for order_idx in range(order_count + 1):  # 遍历反射阶数
-                delay_b = tB + order_idx * cycle_delay_sv  # 计算 SV 循环延迟
-                delay_c = tC + order_idx * cycle_delay_p  # 计算 P 循环延迟
-                v0_tB_list.append(get_delayed(delay_b))  # 追加 B 路径速度信号
-                v0_tC_list.append(get_delayed(delay_c))  # 追加 C 路径速度信号
-
-            max_len = v0_tA.shape[0]  # 初始化最大长度
-            for arr in v0_tB_list + v0_tC_list:  # 遍历所有延迟信号
-                max_len = max(max_len, arr.shape[0])  # 统计统一长度
-
-            v0_tA = pad_to(v0_tA, max_len, dt)  # 补齐主传播速度信号
-            v0_tB_sum = np.zeros(max_len)  # 初始化 B 路径累加数组
-            v0_tC_sum = np.zeros(max_len)  # 初始化 C 路径累加数组
-            for order_idx in range(order_count + 1):  # 按阶数叠加路径信号
-                arr_b = pad_to(v0_tB_list[order_idx], max_len, dt)  # 补齐 B 路径信号
-                arr_c = pad_to(v0_tC_list[order_idx], max_len, dt)  # 补齐 C 路径信号
-                v0_tB_sum += (cycle_sv ** order_idx) * arr_b[:, 1]  # 累加 B 路径贡献
-                v0_tC_sum += (cycle_p ** order_idx) * arr_c[:, 1]  # 累加 C 路径贡献
-
-            sin2a = np.sin(2 * alpha)  # 计算双角正弦项
-            cos2a = np.cos(2 * alpha)  # 计算双角余弦项
-            sin2bp = np.sin(beta_p) ** 2  # 计算 P 波角相关项
-            sin2bp_2 = np.sin(2 * beta_p)  # 计算双倍 P 波角正弦项
-            cosbp = np.cos(beta_p)  # 计算 P 波角余弦
-            cosbp2 = cosbp ** 2  # 计算余弦平方项
-
-            if prefix == 'l':  # 处理左边界应力
-                sigmax = (GG / cs * sin2a * (v0_tA[:, 1] - A1 * v0_tB_sum)  # 计算 x 向应力
-                          + A2 * (lam + 2 * GG * sin2bp) / cp * v0_tC_sum)  # 叠加转换项
-                sigmay = (GG / cs * cos2a * (v0_tA[:, 1] + A1 * v0_tB_sum)  # 计算 y 向应力
-                          - A2 * GG * sin2bp_2 / cp * v0_tC_sum)  # 叠加转换项
-            elif prefix == 'r':  # 处理右边界应力
-                sigmax = (GG / cs * sin2a * (-v0_tA[:, 1] + A1 * v0_tB_sum)  # 计算 x 向应力
-                          - A2 * (lam + 2 * GG * sin2bp) / cp * v0_tC_sum)  # 叠加转换项
-                sigmay = (GG / cs * cos2a * (-v0_tA[:, 1] - A1 * v0_tB_sum)  # 计算 y 向应力
-                          + A2 * GG * sin2bp_2 / cp * v0_tC_sum)  # 叠加转换项
-            elif prefix == 'b':  # 处理底边应力
-                sigmax = (GG / cs * cos2a * (v0_tA[:, 1] + A1 * v0_tB_sum)  # 计算 x 向应力
-                          - A2 * GG * sin2bp_2 / cp * v0_tC_sum)  # 叠加转换项
-                sigmay = (GG / cs * sin2a * (-v0_tA[:, 1] + A1 * v0_tB_sum)  # 计算 y 向应力
-                          + A2 * (lam + 2 * GG * cosbp2) / cp * v0_tC_sum)  # 叠加转换项
-            else:  # 处理非法边界前缀
-                raise ValueError("prefix must be 'l', 'r' or 'b'")  # 抛出前缀异常
-
-            sigmax_arr = np.zeros((max_len, 2))  # 创建 x 向应力数组
-            sigmay_arr = np.zeros((max_len, 2))  # 创建 y 向应力数组
-            sigmax_arr[:, 0] = v0_tA[:, 0]  # 写入时间轴
-            sigmay_arr[:, 0] = v0_tA[:, 0]  # 写入时间轴
-            sigmax_arr[:, 1] = sigmax  # 写入 x 向应力结果
-            sigmay_arr[:, 1] = sigmay  # 写入 y 向应力结果
-
-            field_data['{}-{}-sigmax'.format(node_id, prefix)] = sigmax_arr  # 缓存 x 向应力时程
-            field_data['{}-{}-sigmay'.format(node_id, prefix)] = sigmay_arr  # 缓存 y 向应力时程
-
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界计算自由场应力
-        calc_freefield_sigma_general(  # 调用自由场应力计算函数
-            boundary_node_data[boundary], boundary_det_map[boundary], VEL, dt,  # 传入速度时程与延迟表
-            alpha, beta_p, A1, A2, GG, cs, lam, cp, boundary)  # 传入材料参数与边界标识
-    log_step(logger, '%s 自由场应力已计算', model_name)  # 记录应力自由场日志
-
-    # ============ 计算等效节点力 ============
-    def calc_equiv_node_force_general(node_data, prefix):  # 定义等效节点力计算函数
-        for i in range(node_data.shape[0]):  # 遍历边界节点
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            A = node_data[i, 3]  # 读取影响长度
-            kn = node_data[i, 4]  # 读取法向刚度
-            cn = node_data[i, 5]  # 读取法向阻尼
-            kt = node_data[i, 6]  # 读取切向刚度
-            ct = node_data[i, 7]  # 读取切向阻尼
-
-            ux_arr = field_data['{}-{}-ux'.format(node_id, prefix)]  # 读取 x 向位移时程
-            dotux_arr = field_data['{}-{}-dotux'.format(node_id, prefix)]  # 读取 x 向速度时程
-            sigmax_arr = field_data['{}-{}-sigmax'.format(node_id, prefix)]  # 读取 x 向应力时程
-            uy_arr = field_data['{}-{}-uy'.format(node_id, prefix)]  # 读取 y 向位移时程
-            dotuy_arr = field_data['{}-{}-dotuy'.format(node_id, prefix)]  # 读取 y 向速度时程
-            sigmay_arr = field_data['{}-{}-sigmay'.format(node_id, prefix)]  # 读取 y 向应力时程
-
-            min_len = min(ux_arr.shape[0], dotux_arr.shape[0], sigmax_arr.shape[0],  # 计算统一长度
-                          uy_arr.shape[0], dotuy_arr.shape[0], sigmay_arr.shape[0])  # 计算统一长度
-
-            ux = ux_arr[:min_len, 1]  # 截取 x 向位移值
-            dotux = dotux_arr[:min_len, 1]  # 截取 x 向速度值
-            sigmax = sigmax_arr[:min_len, 1]  # 截取 x 向应力值
-            uy = uy_arr[:min_len, 1]  # 截取 y 向位移值
-            dotuy = dotuy_arr[:min_len, 1]  # 截取 y 向速度值
-            sigmay = sigmay_arr[:min_len, 1]  # 截取 y 向应力值
-            time = ux_arr[:min_len, 0]  # 截取时间轴
-
-            if prefix in ('l', 'r'):  # 处理侧边界
-                fx = kn * ux + cn * dotux + A * sigmax  # 计算 x 向等效力
-                fy = kt * uy + ct * dotuy + A * sigmay  # 计算 y 向等效力
-            elif prefix == 'b':  # 处理底边界
-                fx = kt * ux + ct * dotux + A * sigmax  # 计算 x 向等效力
-                fy = kn * uy + cn * dotuy + A * sigmay  # 计算 y 向等效力
-            else:  # 处理非法前缀
-                raise ValueError("prefix must be 'l', 'r' or 'b'")  # 抛出前缀异常
-
-            fx_arr = np.zeros((min_len, 2))  # 创建 x 向力时程数组
-            fy_arr = np.zeros((min_len, 2))  # 创建 y 向力时程数组
-            fx_arr[:, 0] = time  # 写入时间轴
-            fy_arr[:, 0] = time  # 写入时间轴
-            fx_arr[:, 1] = fx  # 写入 x 向力值
-            fy_arr[:, 1] = fy  # 写入 y 向力值
-
-            field_data['{}-{}-fx'.format(node_id, prefix)] = fx_arr  # 缓存 x 向力时程
-            field_data['{}-{}-fy'.format(node_id, prefix)] = fy_arr  # 缓存 y 向力时程
-
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界计算等效节点力
-        calc_equiv_node_force_general(boundary_node_data[boundary], boundary)  # 调用等效节点力计算函数
-    log_step(logger, '%s 等效节点力时程已计算', model_name)  # 记录等效力日志
-
-    # 创建幅值曲线 (Amplitude)
-    def batch_add_node_force_amplitude(node_data, prefix):  # 定义批量创建幅值曲线函数
-        for i in range(node_data.shape[0]):  # 遍历节点数据
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            fx_arr = field_data['{}-{}-fx'.format(node_id, prefix)]  # 读取 x 向力时程
-            fy_arr = field_data['{}-{}-fy'.format(node_id, prefix)]  # 读取 y 向力时程
-
-            ampli_fx = tuple(tuple(row) for row in fx_arr)  # 将 x 向时程转换为幅值数据
-            ampli_fy = tuple(tuple(row) for row in fy_arr)  # 将 y 向时程转换为幅值数据
-
-            name_amp_fx = 'AMP-{}-{}-fx'.format(node_id, prefix)  # 生成 x 向幅值名称
-            name_amp_fy = 'AMP-{}-{}-fy'.format(node_id, prefix)  # 生成 y 向幅值名称
-
-            mdb.models[model_name].TabularAmplitude(  # 创建 x 向幅值曲线
-                data=ampli_fx, name=name_amp_fx,  # 传入数据和名称
-                smooth=SOLVER_DEFAULT, timeSpan=STEP)  # 设置平滑和时间跨度
-            mdb.models[model_name].TabularAmplitude(  # 创建 y 向幅值曲线
-                data=ampli_fy, name=name_amp_fy,  # 传入数据和名称
-                smooth=SOLVER_DEFAULT, timeSpan=STEP)  # 设置平滑和时间跨度
-
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界创建幅值曲线
-        batch_add_node_force_amplitude(boundary_node_data[boundary], boundary)  # 调用幅值创建函数
-    log_step(logger, '%s 所有边界节点的幅值曲线已创建', model_name)  # 记录幅值曲线日志
-
-    # 施加集中力载荷
-    def batch_add_node_force(node_data, prefix, step_name):  # 定义批量施加载荷函数
-        assembly = mdb.models[model_name].rootAssembly  # 获取当前模型装配体
-        instance_name = inst_name  # 记录实例名称
-        n = assembly.instances[instance_name].nodes  # 获取实例节点集合
-
-        for i in range(node_data.shape[0]):  # 遍历节点数据
-            node_id = int(node_data[i, 0])  # 读取节点标签
-            name_amp_fx = 'AMP-{}-{}-fx'.format(node_id, prefix)  # 生成 x 向幅值名
-            name_amp_fy = 'AMP-{}-{}-fy'.format(node_id, prefix)  # 生成 y 向幅值名
-            name_load_fx = 'load-{}-{}-fx'.format(node_id, prefix)  # 生成 x 向载荷名
-            name_load_fy = 'load-{}-{}-fy'.format(node_id, prefix)  # 生成 y 向载荷名
-
-            node_array = n.sequenceFromLabels([node_id])  # 按标签查找实例节点
-            if len(node_array) == 0:  # 判断节点是否存在
-                logger.warning('施加载荷时，实例中不存在节点 %d (实例: %s)', node_id, instance_name)  # 输出警告日志
-                continue  # 跳过当前节点
-            region = Region(nodes=node_array)  # 构建节点区域
-            mdb.models[model_name].ConcentratedForce(  # 创建 x 向集中力
-                name=name_load_fx, createStepName=step_name,  # 设置载荷名称和分析步
-                region=region, cf1=1.0, amplitude=name_amp_fx,  # 设置作用区域和幅值
-                distributionType=UNIFORM, field='', localCsys=None)  # 设置载荷分布
-            mdb.models[model_name].ConcentratedForce(  # 创建 y 向集中力
-                name=name_load_fy, createStepName=step_name,  # 设置载荷名称和分析步
-                region=region, cf2=1.0, amplitude=name_amp_fy,  # 设置作用区域和幅值
-                distributionType=UNIFORM, field='', localCsys=None)  # 设置载荷分布
-
-    for boundary in BOUNDARY_SEQUENCE:  # 逐边界施加载荷
-        batch_add_node_force(boundary_node_data[boundary], boundary, step_name)  # 调用载荷创建函数
-    log_step(logger, '%s 所有边界节点已施加集中力', model_name)  # 记录载荷施加日志
+    # ============ 创建幅值曲线并施加集中力 ============
+    _apply_amplitudes_and_loads(model_name, inst_name, nodes_by_boundary, field_data, step_name, logger)  # 施加幅值与载荷
     mdb.save()  # 保存模型数据库
     log_step(logger, '%s 粘弹性人工边界完成: 耗时=%.2fs', model_name, time.time() - t0)  # 记录结束耗时
 
 
+# ==========================================================
+#  批量建模与作业提交
+# ==========================================================
+
+
 def build_models(acc_info, base_model, part_name, inst_name,
-                 angle,
-                 cs_bedrock, vv_bedrock, density_bedrock,
-                 cs_overlying, vv_overlying, density_overlying,
-                 bedrock_thickness,
-                 H_upper, H_lower, left_flat, w_slope,
-                 max_reflect_order=1,
-                 step_name=DEFAULT_STEP_NAME, variables=('S', 'U', 'V'), frequency=10,
-                 model_scene='slope', logger=None):
-    """根据加速度时程信息批量复制模型、创建分析步、施加人工边界。"""  # 说明函数用途
+                 site, geom, angle, job,
+                 step_name=DEFAULT_STEP_NAME, model_scene='slope', logger=None):
+    """根据加速度时程信息批量复制模型、创建分析步、施加人工边界。
+
+    site/geom: 场地材料与几何对象（直接转发给 VAB_oblique）
+    angle    : SV 波入射角（度）
+    job      : 作业配置 dict，读取 'variables'（场输出变量）与 'frequency'（输出频率）
+    """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
 
-    variables = _normalize_output_variables(variables)  # 规范化场输出变量列表
+    variables = _normalize_output_variables(job['variables'])  # 规范化场输出变量列表
+    frequency = job['frequency']  # 读取场输出频率
 
     model_names = []  # 初始化模型名称列表
     for acc_file, tp, inc in acc_info:  # 遍历每个加速度记录
@@ -1282,16 +1131,9 @@ def build_models(acc_info, base_model, part_name, inst_name,
         log_step(logger, '%s 分析步已创建, 时长=%.2f, 增量=%.3f',  # 记录分析步创建日志
                  new_model_name, tp, inc)  # 输出时长和初始增量
 
-        VAB_oblique(angle=angle,  # 调用人工边界构建函数
-                    cs_bedrock=cs_bedrock, vv_bedrock=vv_bedrock, density_bedrock=density_bedrock,  # 传入基岩参数
-                    cs_overlying=cs_overlying, vv_overlying=vv_overlying, density_overlying=density_overlying,  # 传入覆盖层参数
-                    bedrock_thickness=bedrock_thickness,  # 传入基岩厚度
-                    H_upper=H_upper, H_lower=H_lower, left_flat=left_flat, w_slope=w_slope,  # 传入几何参数
-                    max_reflect_order=max_reflect_order,  # 传入反射阶数
-                    model_name=new_model_name, part_name=part_name,  # 传入模型和零件名称
-                    inst_name=inst_name,  # 传入实例名称
-                    acc_file=acc_file, step_name=step_name,  # 传入加速度文件和分析步名称
-                    logger=logger)  # 传入日志器
+        VAB_oblique(site=site, geom=geom, angle=angle,  # 调用人工边界构建函数（传入场地与几何对象）
+                    model_name=new_model_name, part_name=part_name, inst_name=inst_name,  # 传入模型/零件/实例名称
+                    acc_file=acc_file, step_name=step_name, logger=logger)  # 传入加速度文件、分析步与日志器
         model_names.append(new_model_name)  # 记录新模型名称
 
     return model_names  # 返回模型名称列表
@@ -1315,13 +1157,90 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
             getMemoryFromAnalysis=True, explicitPrecision=SINGLE,  # 设置精度参数
             nodalOutputPrecision=SINGLE, echoPrint=OFF, modelPrint=OFF,  # 关闭冗余输出
             contactPrint=OFF, historyPrint=OFF,  # 关闭接触与历史输出
-            numCpus=num_cpus, numGPUs=0)  # 设置并行计算资源
+            numCpus=num_cpus, numDomains=num_cpus,  # 设置 CPU 数量与并行域数量
+            multiprocessingMode=DEFAULT, numGPUs=0)  # 设置多处理器并行模式与 GPU 核心数
 
     mdb.save()  # 保存模型数据库
     log_step(logger, '%s作业已提交，正在等待完成...', job_name)  # 记录作业提交日志
     mdb.jobs[job_name].submit(consistencyChecking=OFF)  # 提交作业并关闭一致性检查
     mdb.jobs[job_name].waitForCompletion()  # 等待作业完成
     log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)  # 记录作业完成耗时
+
+
+# ==========================================================
+#  主入口
+# ==========================================================
+
+
+def main():
+    """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
+    logger = log_step('VAB_oblique_TAF_double.log')  # 初始化日志并写入当前版本日志文件
+    total_start = time.time()  # 记录主流程起始时间
+
+    try:
+        log_step(logger, '脚本开始执行')  # 写入脚本启动日志
+
+        # 波动参数计算
+        cs_bedrock = _compute_wave_speed_from_elastic_modulus(
+            material_cfg['bedrock']['elastic_modulus'],
+            material_cfg['bedrock']['poisson_ratio'],
+            material_cfg['bedrock']['density']
+        )
+        cs_overlying = cs_bedrock / material_cfg['overlying']['velocity_ratio']  # 计算覆盖层剪切波速
+
+        # 打包场地材料与斜坡几何为结构化对象（取代散标量透传）
+        site = Site(  # 构建双层场地对象
+            bedrock=Material(cs=cs_bedrock,  # 基岩剪切波速
+                             vv=material_cfg['bedrock']['poisson_ratio'],  # 基岩泊松比
+                             density=material_cfg['bedrock']['density']),  # 基岩密度（构成基岩材料）
+            overlying=Material(cs=cs_overlying,  # 覆盖层剪切波速
+                               vv=material_cfg['overlying']['poisson_ratio'],  # 覆盖层泊松比
+                               density=material_cfg['overlying']['density']),  # 覆盖层密度（构成覆盖层材料）
+            bedrock_thickness=geometry_cfg['bedrock_thickness'])  # 基岩层厚度
+
+        geom = make_geometry(  # 构建斜坡几何对象（含全部派生量）
+            total_L=geometry_cfg['total_L'],  # 模型总长度
+            H_minus_h=geometry_cfg['H_minus_h'],  # 斜坡高度差
+            i=geometry_cfg['i'],  # 斜坡倾角
+            h_over_H=geometry_cfg['h_over_H'],  # 深度比 h/H
+            left_flat=geometry_cfg['left_flat'],  # 上平台长度
+            bedrock_thickness=geometry_cfg['bedrock_thickness'])  # 基岩层厚度
+        geom_flat = make_flat_geometry(geom)  # 派生平坦自由场几何
+
+        cae_name = 'h{}_i{}_a{}.cae'.format(int(geom.H_minus_h), int(geom.i), int(material_cfg['angle']))  # 生成工程文件名
+        acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
+
+        base_model, part_name, inst_name = create_model(  # 创建斜坡基础几何与网格模型
+            site=site, geom=geom, mesh_size=mesh_size, cae_name=cae_name, logger=logger)  # 传入场地/几何/网格/文件名
+
+        flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
+            site=site, geom=geom, mesh_size=mesh_size, logger=logger)  # 传入场地/几何/网格
+
+        slope_model_names = build_models(  # 批量复制斜坡模型并施加等效边界
+            acc_info=acc_info, base_model=base_model, part_name=part_name, inst_name=inst_name,  # 地震动信息与基础模型/零件/实例
+            site=site, geom=geom, angle=material_cfg['angle'],  # 场地、斜坡几何与入射角
+            job=job_cfg, model_scene='slope', logger=logger)  # 作业配置与斜坡场景标签
+
+        flat_model_names = build_models(  # 批量复制平坦自由场模型并施加等效边界
+            acc_info=acc_info, base_model=flat_base_model, part_name=flat_part_name, inst_name=flat_inst_name,  # 地震动信息与平坦基础模型/零件/实例
+            site=site, geom=geom_flat, angle=material_cfg['angle'],  # 场地、平坦几何与入射角
+            job=job_cfg, model_scene='flat', logger=logger)  # 作业配置与平坦场景标签
+
+        model_names = slope_model_names + flat_model_names  # 合并两类模型名称用于统一提交作业
+
+        for model_name in model_names:  # 顺序提交每个模型作业
+            submit_job(
+                num_cpus=job_cfg['num_cpus'],
+                memory_percent=job_cfg['memory_percent'],
+                model_name=model_name,
+                logger=logger
+            )
+
+        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)  # 输出总耗时日志
+    except Exception as exc:  # 捕获脚本运行异常
+        log_step(logger, '脚本失败: %s', str(exc))  # 记录异常摘要
+        logger.error('异常堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈
+        raise  # 继续抛出异常以便上层处理
 
 
 if __name__ == '__main__':  # 判断是否直接运行脚本

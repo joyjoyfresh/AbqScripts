@@ -8,113 +8,240 @@ from caeModules import *
 import mesh
 import numpy as np
 import math
+import os
+import time
+import logging
+import traceback
 
 
-def create_model(width, height, cs, vv, density, mesh_size,
-                 time_period, initial_inc, min_inc, max_num_inc):
+def log_step(logger=None, message=None, *args):
     """
-    创建二维平面应变模型：几何、材料、截面、装配、分析步、网格
+    日志函数：首次调用时初始化日志器，后续调用输出带总用时的日志。
+    初始化:    logger = log_step('mylog.log')  # 传入日志文件名
+               logger = log_step()            # 使用默认文件名 'logfile.log'
+    记录日志:  log_step(logger, '消息 %s', val)
+    """
+    if not hasattr(log_step, '_logger'):
+        if logger is not None and isinstance(logger, str):
+            log_filename = logger
+            logger = None
+        else:
+            log_filename = 'logfile.log'
 
+        _logger = logging.getLogger('abqpy') # 日志器名称
+        _logger.setLevel(logging.INFO)
+        _logger.propagate = False
+
+        _logger.handlers = []
+        formatter = logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+        file_handler = logging.FileHandler(log_filename, mode='w')
+        file_handler.setFormatter(formatter)
+        _logger.addHandler(file_handler)
+
+        log_step._logger = _logger
+        log_step._start_time = time.time()
+        log_step._log_filename = log_filename
+
+        return _logger
+
+    if message is not None:
+        now = time.time()
+        delta_total = now - log_step._start_time
+        log_step._logger.info('[%.3fs] ' + message, delta_total, *args)
+
+    return log_step._logger
+
+
+def find_vel_txt(logger=None):
+    """
+    查找当前工作目录下所有 .txt 文件，并读取每个文件的分析步时长和增量步。
+    返回按文件名排序的列表: [(filename, time_period, initial_inc), ...]
+    若无文件则抛出异常。
+    """
+    cwd = os.getcwd()
+    txt_files = sorted([f for f in os.listdir(cwd) if f.lower().endswith('.txt')])
+    if len(txt_files) == 0:
+        raise IOError('当前目录 {} 下未找到任何 .txt 文件'.format(cwd))
+
+    result = []
+    for f in txt_files:
+        time_period = 2.0
+        initial_inc = 0.001
+        try:
+            vel_data = np.loadtxt(f)
+            if vel_data.ndim == 2 and vel_data.shape[0] >= 2 and vel_data.shape[1] >= 2:
+                time_arr = vel_data[:, 0]
+                dt = time_arr[1] - time_arr[0]
+                if dt > 0:
+                    time_period = time_arr[-1]
+                    initial_inc = dt
+                    if logger:
+                        log_step(logger, '已从 %s 读取分析步参数: 时长=%.6f, 初始增量=%.6f',
+                                 f, time_period, initial_inc)
+                else:
+                    if logger:
+                        log_step(logger, '%s 中 dt <= 0，将使用默认值', f)
+            else:
+                if logger:
+                    log_step(logger, '%s 格式无效，将使用默认值', f)
+        except Exception as e:
+            if logger:
+                log_step(logger, '读取速度时程文件失败: %s，将使用默认值', str(e))
+        result.append((f, time_period, initial_inc))
+
+    return result
+
+
+def create_model(total_L, h, i, cs, vv, density, mesh_size,
+                 H_lower=None, cae_name=None, logger=None):
+    """
+    创建二维平面应变模型：几何、材料、截面、装配、网格（不含分析步）
     参数:
-        width      (float): 模型宽度 (m)
-        height     (float): 模型高度 (m)
-        cs         (float): 剪切波速 (m/s)
-        vv         (float): 泊松比
-        density    (float): 密度 (kg/m³)
-        mesh_size  (float): 网格尺寸 (m)
-        time_period(float): 分析步总时长 (s)
-        initial_inc(float): 初始增量步 (s)
-        min_inc    (float): 最小增量步 (s)
-        max_num_inc(int):   最大增量步数
+        total_L     (float): 模型总水平长度 (m)
+        h           (float): 斜坡高度 (m)
+        i           (float): 斜坡倾角 (°)
+        cs          (float): 剪切波速 (m/s)
+        vv          (float): 泊松比
+        density     (float): 密度 (kg/m³)
+        mesh_size   (float): 网格尺寸 (m)
+        H_lower     (float): 下垫面高度 (m)，默认为 2*h
+    几何逻辑（6个关键点，逆时针闭合）:
+        w_slope = h / tan(i)         斜坡水平投影宽度
+        L_rem   = total_L - w_slope  剩余水平长度
+        L_flat  = L_rem / 2          左/右平台水平长度
+        P1=(0, 0),  P2=(total_L, 0),
+        P3=(total_L, H_lower),  P4=(L_flat+w_slope, H_lower),
+        P5=(L_flat, H_lower+h), P6=(0, H_lower+h)
     """
+    logger = logger or log_step()
     model_name = 'Model-1'
-    part_name = 'Part-1'
 
-    # --- 清除已有模型并重建 ---
-    try:
-        del mdb.models[model_name]
-    except KeyError:
-        pass
-    model = mdb.Model(name=model_name, modelType=STANDARD_EXPLICIT)
+    if h <= 0:
+        raise ValueError('h 必须 > 0')
+    if i <= 0 or i >= 90:
+        raise ValueError('倾角 i 必须在 (0, 90) 范围内')
+    if H_lower <= 0:
+        raise ValueError('H_lower 必须 > 0')
 
-    # ============ 创建二维矩形Part ============
-    s = model.ConstrainedSketch(name='__profile__', sheetSize=max(width, height) * 2)
-    s.rectangle(point1=(0.0, 0.0), point2=(width, height))
+    w_slope = h / math.tan(math.radians(i))
+    L_rem = total_L - w_slope
+    if L_rem <= 0:
+        raise ValueError('斜坡水平投影 w_slope=%.3f 超过总长 total_L=%.3f' % (w_slope, total_L))
+    L_flat = L_rem / 2.0
+    H_upper = H_lower + h   # 左侧（上覆）地表高度
+
+    model = mdb.Model(name=model_name)
+    log_step(logger, '已创建模型: %s', model_name)
+
+    # ============ 创建二维坡地 Part（6节点多边形） ============
+    pn = 1
+    while 'Part-%d' % pn in model.parts:
+        pn += 1
+    part_name = 'Part-%d' % pn
+    # P1(0,0) → P2(total_L,0) → P3(total_L,H_lower) → P4(L_flat+w_slope,H_lower)
+    #         → P5(L_flat,H_upper) → P6(0,H_upper) → 闭合
+    s = model.ConstrainedSketch(name='__profile__', sheetSize=max(total_L, H_upper) * 2)
+    s.Line(point1=(0.0, 0.0),                   point2=(total_L, 0.0))               # 底边
+    s.Line(point1=(total_L, 0.0),               point2=(total_L, H_lower))           # 右边界
+    s.Line(point1=(total_L, H_lower),           point2=(L_flat + w_slope, H_lower))  # 右平台地表
+    s.Line(point1=(L_flat + w_slope, H_lower),  point2=(L_flat, H_upper))            # 斜坡
+    s.Line(point1=(L_flat, H_upper),            point2=(0.0, H_upper))               # 左平台地表
+    s.Line(point1=(0.0, H_upper),               point2=(0.0, 0.0))                   # 左边界
+    log_step(logger, '已创建草图')
     part = model.Part(name=part_name, dimensionality=TWO_D_PLANAR,
                       type=DEFORMABLE_BODY)
     part.BaseShell(sketch=s)
     del model.sketches['__profile__']
+    log_step(logger, '已创建零件并生成壳基体: %s', part_name)
 
     # ============ 材料与截面 ============
     GG = density * cs ** 2
     EE = 2 * GG * (1 + vv)
 
-    mat = model.Material(name='Soil')
+    mat_n = 1
+    while 'Material-%d' % mat_n in model.materials:
+        mat_n += 1
+    mat_name = 'Material-%d' % mat_n
+    mat = model.Material(name=mat_name)
     mat.Elastic(table=((EE, vv),))
     mat.Density(table=((density,),))
+    log_step(logger, '材料已定义: %s', mat_name)
 
-    model.HomogeneousSolidSection(name='Section-1', material='Soil',
-                                  thickness=1.0)
+    sec_n = 1
+    while 'Section-%d' % sec_n in model.sections:
+        sec_n += 1
+    sec_name = 'Section-%d' % sec_n
+    model.HomogeneousSolidSection(name=sec_name, material=mat_name, thickness=1.0)
+    log_step(logger, '截面已创建: %s', sec_name)
 
     faces = part.faces
-    region = part.Set(faces=faces, name='Set-All')
-    part.SectionAssignment(region=region, sectionName='Section-1',
+    region = Region(faces=faces)
+    part.SectionAssignment(region=region, sectionName=sec_name,
                            offset=0.0, offsetType=MIDDLE_SURFACE,
                            offsetField='', thicknessAssignment=FROM_SECTION)
+    log_step(logger, '截面已分配到所有面')
 
     # ============ 装配 ============
     assembly = model.rootAssembly
     assembly.DatumCsysByDefault(CARTESIAN)
-    assembly.Instance(name='Part-1-1', part=part, dependent=ON)
-
-    # ============ 分析步 ============
-    model.ImplicitDynamicsStep(
-        name='step-earthquake', previous='Initial',
-        timePeriod=time_period, timeIncrementationMethod=FIXED, initialInc=initial_inc,
-        maxNumInc=max_num_inc,
-        nlgeom=OFF, application=MODERATE_DISSIPATION)
-
-    # 修改：设置场输出请求，确保每一帧数据都能输出到 odb 文件中
-    # 默认情况下，Abaqus 只有几个关键帧。我们这里强制每个增量步都输出。
-    model.fieldOutputRequests['F-Output-1'].setValues(
-        variables=('S', 'E', 'U', 'V', 'A', 'RF'),
-        frequency=1)
+    in_ = 1
+    while '%s-%d' % (part_name, in_) in assembly.instances:
+        in_ += 1
+    inst_name = '%s-%d' % (part_name, in_)
+    assembly.Instance(name=inst_name, part=part, dependent=ON)
+    log_step(logger, '装配实例已创建: %s', inst_name)
 
     # ============ 网格划分 ============
+    pickedRegions = part.faces
+    part.setMeshControls(regions=pickedRegions, elemShape=QUAD, technique=STRUCTURED)
+    log_step(logger, '网格控制已设置: 四边形 + 结构化')
+
+    # 近似全局尺寸设为 mesh_size
     part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)
-    elemType1 = mesh.ElemType(elemCode=CPE4R, elemLibrary=STANDARD,
-                              hourglassControl=DEFAULT)
-    elemType2 = mesh.ElemType(elemCode=CPE3, elemLibrary=STANDARD)
-    pickedRegions = (part.faces,)
-    part.setElementType(regions=pickedRegions, elemTypes=(elemType1, elemType2))
+    log_step(logger, '已播种网格: 尺寸=%.3f', mesh_size)
+
+    # 指定单元类型：平面应变四节点，取消缩减积分
+    elemType1 = mesh.ElemType(elemCode=CPE4, elemLibrary=STANDARD)
+    part.setElementType(regions=(pickedRegions,), elemTypes=(elemType1,))
     part.generateMesh()
+    log_step(logger, '已生成网格: CPE4 单元')
 
     # 重新生成装配体以同步网格
     assembly.regenerate()
+    log_step(logger, '装配已重新生成')
+    log_step(logger, '创建基础模型完成: 节点=%d, 单元=%d', len(part.nodes), len(part.elements))
+    if cae_name:
+        mdb.saveAs(pathName=cae_name)
+        log_step(logger, '已保存 CAE : %s，准备施加人工边界', cae_name)
+    return model_name, part_name, inst_name
 
-    print('Model created: {}x{} m, mesh size={} m, CPE4R plane strain'.format(
-        width, height, mesh_size))
 
-
-def VAB_oblique(angle, cs, vv, density):
+def VAB_oblique(angle, cs, vv, density, model_name='Model-1', part_name='Part-1', inst_name='Part-1-1',
+                vel_file=None, step_name=None, logger=None):
     """
     主函数：为二维模型施加粘弹性人工边界（弹簧-阻尼器）和地震动斜向输入等效节点力
-
     参数:
         angle  (float): SV波入射角度（度），0为垂直入射
         cs     (float): 剪切波速 (m/s)
         vv     (float): 泊松比
         density(float): 密度 (kg/m³)
+        vel_file  (str): 指定速度时程文件名，None 时自动查找
+        step_name (str): 分析步名称，None 时使用 'Step-earthquake'
     """
     # ============ 基本参数 ============
-    VELtxt = 'VEL.txt'             # 速度时程文件（两列：时间, 速度）
-    step_name = 'step-earthquake'  # 地震分析步名称
+    logger = logger or log_step()
+    t0 = time.time()
+    step_name = step_name or 'Step-earthquake'
+    log_step(logger, '开始为模型 %s 创建人工边界', model_name)
 
     # ============ 获取装配体和Part ============
-    a = mdb.models['Model-1'].rootAssembly
+    a = mdb.models[model_name].rootAssembly
     a.regenerate()
-
-    part = mdb.models['Model-1'].parts['Part-1']
+    part = mdb.models[model_name].parts[part_name]
     nodes = part.nodes
 
     # ============ 提取边界节点 ============
@@ -134,9 +261,10 @@ def VAB_oblique(angle, cs, vv, density):
     r_nodes = part.nodes.sequenceFromLabels([node.label for node in r_nodes_list])
     b_nodes = part.nodes.sequenceFromLabels([node.label for node in b_nodes_list])
 
-    part.Set(name='l_nodes', nodes=l_nodes)
-    part.Set(name='r_nodes', nodes=r_nodes)
-    part.Set(name='b_nodes', nodes=b_nodes)
+    part.Set(name='l', nodes=l_nodes)
+    part.Set(name='r', nodes=r_nodes)
+    part.Set(name='b', nodes=b_nodes)
+    log_step(logger, '边界节点集已创建: 左=%d, 右=%d, 底=%d', len(l_nodes), len(r_nodes), len(b_nodes))
 
     # ============ 材料参数计算 ============
     GG = density * cs ** 2                    # 剪切模量
@@ -145,21 +273,23 @@ def VAB_oblique(angle, cs, vv, density):
     cp = math.sqrt((lam + 2 * GG) / density)  # 纵波波速
 
     # ============ 获取模型尺寸 ============
-    part = mdb.models['Model-1'].parts['Part-1']
-    l_nodes = part.sets['l_nodes'].nodes
+    part = mdb.models[model_name].parts[part_name]
+    l_nodes = part.sets['l'].nodes
     l_ymax_node = max(l_nodes, key=lambda node: node.coordinates[1])
     xmin = l_ymax_node.coordinates[0]
     ymax_l = l_ymax_node.coordinates[1]
 
-    b_nodes = part.sets['b_nodes'].nodes
+    b_nodes = part.sets['b'].nodes
     ymin = b_nodes[0].coordinates[1]
 
-    r_nodes = part.sets['r_nodes'].nodes
+    r_nodes = part.sets['r'].nodes
     r_ymax_node = max(r_nodes, key=lambda node: node.coordinates[1])
     xmax = r_ymax_node.coordinates[0]
     ymax_r = r_ymax_node.coordinates[1]
 
     ymax = max(ymax_l, ymax_r)
+    log_step(logger, '由边界节点得到模型尺寸: Lx=%.3f, Ly=%.3f',
+             xmax - xmin, ymax - ymin)
 
     # ============ 计算节点影响长度 ============
     def get_node_influence(part, set_name, sort_axis='y', ascending=False):
@@ -190,16 +320,18 @@ def VAB_oblique(angle, cs, vv, density):
         node_data = np.hstack((node_data, influence.reshape(-1, 1)))
         return node_data
 
-    part = mdb.models['Model-1'].parts['Part-1']
-    node_data_l = get_node_influence(part, 'l_nodes', sort_axis='y', ascending=False)
-    node_data_r = get_node_influence(part, 'r_nodes', sort_axis='y', ascending=False)
-    node_data_b = get_node_influence(part, 'b_nodes', sort_axis='x', ascending=True)
+    part = mdb.models[model_name].parts[part_name]
+    node_data_l = get_node_influence(part, 'l', sort_axis='y', ascending=False)
+    node_data_r = get_node_influence(part, 'r', sort_axis='y', ascending=False)
+    node_data_b = get_node_influence(part, 'b', sort_axis='x', ascending=True)
+    log_step(logger, '节点影响长度已计算')
 
     # ============ 粘弹性人工边界参数（刘晶波公式） ============
     kn = GG / 2 / ymax       # 法向弹簧刚度系数
     cn = density * cp         # 法向阻尼系数
     kt = GG / 4 / ymax       # 切向弹簧刚度系数
     ct = density * cs         # 切向阻尼系数
+    log_step(logger, '弹簧-阻尼系数已计算')
 
     def add_spring_damper(node_data):
         """将弹簧刚度和阻尼系数乘以影响长度，追加到 node_data"""
@@ -217,11 +349,12 @@ def VAB_oblique(angle, cs, vv, density):
     node_data_l = add_spring_damper(node_data_l)
     node_data_r = add_spring_damper(node_data_r)
     node_data_b = add_spring_damper(node_data_b)
+    log_step(logger, '弹簧-阻尼系数已分配到所有边界节点')
 
     # ============ 在Abaqus中添加弹簧-阻尼器到地面 ============
-    model = mdb.models['Model-1']
+    model = mdb.models[model_name]
     assembly = model.rootAssembly
-    instance = assembly.instances['Part-1-1']
+    instance = assembly.instances[inst_name]
 
     def add_spring_dashpot(node_data, prefix, dof_n, dof_t):
         """为每个边界节点添加法向和切向弹簧-阻尼器"""
@@ -233,7 +366,7 @@ def VAB_oblique(angle, cs, vv, density):
             ct = row[7]
             node_array = instance.nodes.sequenceFromLabels([node_label])
             if len(node_array) == 0:
-                print('Node {} does not exist'.format(node_label))
+                logger.warning('创建弹簧-阻尼器时，实例中不存在节点 %d', node_label)
                 continue
             region = Region(nodes=node_array)
             assembly.engineeringFeatures.SpringDashpotToGround(
@@ -252,6 +385,7 @@ def VAB_oblique(angle, cs, vv, density):
     add_spring_dashpot(node_data_l, prefix='l', dof_n=1, dof_t=2)
     add_spring_dashpot(node_data_r, prefix='r', dof_n=1, dof_t=2)
     add_spring_dashpot(node_data_b, prefix='b', dof_n=2, dof_t=1)
+    log_step(logger, '弹簧-阻尼器创建完成')
 
     # ============ 入射角与反射系数计算 ============
     if angle == 0:
@@ -273,16 +407,23 @@ def VAB_oblique(angle, cs, vv, density):
 
     numerator_A2 = 2 * cp * cs * np.sin(2 * alpha) * np.cos(2 * alpha)
     A2 = numerator_A2 / denominator_A1
+    log_step(logger, '反射参数已计算')
 
     # ============ 读取速度时程并积分得到位移 ============
-    VEL = np.loadtxt(VELtxt)
-    time = VEL[:, 0]
+    VEL = np.loadtxt(vel_file)
+    if VEL.ndim != 2 or VEL.shape[1] < 2 or VEL.shape[0] < 2:
+        raise ValueError('VEL.txt 至少需要 2 行 2 列: [time, velocity]')
+    time_arr = VEL[:, 0]
     vel = VEL[:, 1]
     dt = VEL[1, 0] - VEL[0, 0]
+    if dt <= 0:
+        raise ValueError('VEL.txt 中时间步长无效: dt 必须 > 0')
+    log_step(logger, '已读取速度时程%s', vel_file)
 
     dis = np.zeros_like(vel)
     dis[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt)  # 梯形积分
-    DIS = np.column_stack((time, dis))
+    DIS = np.column_stack((time_arr, dis))
+    log_step(logger, '速度已积分为位移')
 
     max_time = VEL[-1, 0]
     Ly = ymax - ymin  # 模型高度
@@ -338,6 +479,7 @@ def VAB_oblique(angle, cs, vv, density):
     det_l = calc_node_delay(node_data_l, 'l', alpha, beta_p, cs, cp, Ly, Lx)
     det_r = calc_node_delay(node_data_r, 'r', alpha, beta_p, cs, cp, Ly, Lx)
     det_b = calc_node_delay(node_data_b, 'b', alpha, beta_p, cs, cp, Ly, Lx)
+    log_step(logger, '左/右/底 边界节点延迟时间已计算')
 
     # 如果最大延迟超过输入时程长度，则补零延长
     detmax = max(np.max(det_l[:, 1:]), np.max(det_r[:, 1:]), np.max(det_b[:, 1:]))
@@ -348,6 +490,10 @@ def VAB_oblique(angle, cs, vv, density):
         new_vel[:, 0] = new_times
         VEL = np.vstack([VEL, new_vel])
         DIS = np.vstack([DIS, new_vel])
+        log_step(logger, 'VEL/DIS 已用零延长: 增加行数=%d, 新总时长=%.6f',
+                 n_add, VEL[-1, 0])
+    else:
+        log_step(logger, 'VEL/DIS 无需延长')
 
     # ============ 延迟时间对齐到时间步 ============
     def round_delay(det, dt):
@@ -357,6 +503,7 @@ def VAB_oblique(angle, cs, vv, density):
     det_l = round_delay(det_l, dt)
     det_r = round_delay(det_r, dt)
     det_b = round_delay(det_b, dt)
+    log_step(logger, '延迟时间已对齐到 dt 网格')
 
     # ============ 信号延迟工具函数 ============
     def delay_signal(u0, delay_t, dt):
@@ -424,10 +571,12 @@ def VAB_oblique(angle, cs, vv, density):
     calc_freefield_u_and_dotu_general(node_data_l, det_l, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'l')
     calc_freefield_u_and_dotu_general(node_data_r, det_r, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'r')
     calc_freefield_u_and_dotu_general(node_data_b, det_b, DIS, dt, alpha, beta_p, A1, A2, 'ux', 'uy', 'b')
+    log_step(logger, '左/右/底 自由场位移已计算')
     # 计算速度自由场
     calc_freefield_u_and_dotu_general(node_data_l, det_l, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'l')
     calc_freefield_u_and_dotu_general(node_data_r, det_r, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'r')
     calc_freefield_u_and_dotu_general(node_data_b, det_b, VEL, dt, alpha, beta_p, A1, A2, 'dotux', 'dotuy', 'b')
+    log_step(logger, '左/右/底 自由场速度已计算')
 
     # ============ 计算自由场应力 ============
     def calc_freefield_sigma_general(node_data, det, VEL, dt,
@@ -454,7 +603,6 @@ def VAB_oblique(angle, cs, vv, density):
 
             sin2a = np.sin(2 * alpha)
             cos2a = np.cos(2 * alpha)
-            sinbp = np.sin(beta_p)
             sin2bp = np.sin(beta_p) ** 2
             sin2bp_2 = np.sin(2 * beta_p)
             cosbp = np.cos(beta_p)
@@ -491,6 +639,7 @@ def VAB_oblique(angle, cs, vv, density):
     calc_freefield_sigma_general(node_data_l, det_l, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'l')
     calc_freefield_sigma_general(node_data_r, det_r, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'r')
     calc_freefield_sigma_general(node_data_b, det_b, VEL, dt, alpha, beta_p, A1, A2, GG, cs, lam, cp, 'b')
+    log_step(logger, '左/右/底 自由场应力已计算')
 
     # ============ 计算等效节点力 ============
     def calc_equiv_node_force_general(node_data, prefix):
@@ -548,6 +697,7 @@ def VAB_oblique(angle, cs, vv, density):
     calc_equiv_node_force_general(node_data_l, 'l')
     calc_equiv_node_force_general(node_data_r, 'r')
     calc_equiv_node_force_general(node_data_b, 'b')
+    log_step(logger, '等效节点力时程已计算')
 
     # ============ 创建幅值曲线 (Amplitude) ============
     def batch_add_node_force_amplitude(node_data, prefix):
@@ -562,21 +712,22 @@ def VAB_oblique(angle, cs, vv, density):
             name_amp_fx = 'AMP-{}-{}-fx'.format(node_id, prefix)
             name_amp_fy = 'AMP-{}-{}-fy'.format(node_id, prefix)
 
-            mdb.models['Model-1'].TabularAmplitude(
+            mdb.models[model_name].TabularAmplitude(
                 data=ampli_fx, name=name_amp_fx,
                 smooth=SOLVER_DEFAULT, timeSpan=STEP)
-            mdb.models['Model-1'].TabularAmplitude(
+            mdb.models[model_name].TabularAmplitude(
                 data=ampli_fy, name=name_amp_fy,
                 smooth=SOLVER_DEFAULT, timeSpan=STEP)
 
     batch_add_node_force_amplitude(node_data_l, 'l')
     batch_add_node_force_amplitude(node_data_r, 'r')
     batch_add_node_force_amplitude(node_data_b, 'b')
+    log_step(logger, '所有边界节点的幅值曲线已创建')
 
     # ============ 施加集中力载荷 ============
     def batch_add_node_force(node_data, prefix, step_name):
-        a = mdb.models['Model-1'].rootAssembly
-        instance_name = 'Part-1-1'
+        a = mdb.models[model_name].rootAssembly
+        instance_name = inst_name
         n = a.instances[instance_name].nodes
 
         for i in range(node_data.shape[0]):
@@ -588,15 +739,15 @@ def VAB_oblique(angle, cs, vv, density):
 
             node_array = n.sequenceFromLabels([node_id])
             if len(node_array) == 0:
-                print('Node {} does not exist in instance {}'.format(node_id, instance_name))
+                logger.warning('施加载荷时，实例中不存在节点 %d (实例: %s)', node_id, instance_name)
                 continue
 
             region = [node_array]
-            mdb.models['Model-1'].ConcentratedForce(
+            mdb.models[model_name].ConcentratedForce(
                 name=name_load_fx, createStepName=step_name,
                 region=region, cf1=1.0, amplitude=name_amp_fx,
                 distributionType=UNIFORM, field='', localCsys=None)
-            mdb.models['Model-1'].ConcentratedForce(
+            mdb.models[model_name].ConcentratedForce(
                 name=name_load_fy, createStepName=step_name,
                 region=region, cf2=1.0, amplitude=name_amp_fy,
                 distributionType=UNIFORM, field='', localCsys=None)
@@ -604,23 +755,84 @@ def VAB_oblique(angle, cs, vv, density):
     batch_add_node_force(node_data_l, 'l', step_name)
     batch_add_node_force(node_data_r, 'r', step_name)
     batch_add_node_force(node_data_b, 'b', step_name)
+    log_step(logger, '所有边界节点已施加集中力')
+    log_step(logger, '粘弹性人工边界完成: 总节点数=%d, 耗时=%.2fs',
+             node_data_l.shape[0] + node_data_r.shape[0] + node_data_b.shape[0],
+             time.time() - t0)
+    mdb.save()
+    log_step(logger, '已保存 CAE，')
 
-    print('VAB oblique boundary conditions applied successfully.')
+
+def build_models(vel_info, base_model, part_name, inst_name, angle, cs, vv, density, 
+                 step_name='Step-earthquake',variables=('S', 'U', 'V'), frequency=10, logger=None):
+    """
+    根据速度时程信息批量复制模型、创建分析步、施加人工边界，并删除基础模型。
+
+    参数:
+        vel_info    (list): find_vel_txt 返回的列表 [(vel_file, tp, inc), ...]
+        base_model  (str): 基础模型名称
+        part_name   (str): 零件名称
+        inst_name   (str): 实例名称
+        angle/cs/vv/density: 人工边界参数
+        step_name   (str): 分析步名称
+    返回:
+        model_names (list): 新创建的模型名称列表
+    """
+    logger = logger or log_step()
+
+    # Abaqus 要求 variables 为字符串序列；若传入单个字符串则自动转换为单元素元组
+    if isinstance(variables, str):
+        variables = (variables,)
+    elif isinstance(variables, list):
+        variables = tuple(variables)
+
+    model_names = []
+    for vel_file, tp, inc in vel_info:
+        new_model_name = os.path.splitext(vel_file)[0]
+        mdb.Model(name=new_model_name, objectToCopy=mdb.models[base_model])
+        log_step(logger, '已复制模型: %s <- %s', new_model_name, base_model)
+
+        # 创建分析步
+        model = mdb.models[new_model_name]
+        model.ImplicitDynamicsStep(
+            name=step_name, previous='Initial',
+            timePeriod=tp, timeIncrementationMethod=FIXED, initialInc=inc,
+            maxNumInc=1000000,
+            nlgeom=OFF, application=MODERATE_DISSIPATION)
+        model.fieldOutputRequests['F-Output-1'].setValues(
+            variables=variables, frequency=frequency)
+        mdb.save()
+        log_step(logger, '分析步已创建: %s, 时长=%.6f, 增量=%.6f，并保存 CAE',
+                 new_model_name, tp, inc)
+
+        # 施加粘弹性人工边界和等效节点力
+        VAB_oblique(angle, cs, vv, density,
+                    model_name=new_model_name, part_name=part_name,
+                    inst_name=inst_name,
+                    vel_file=vel_file, step_name=step_name,
+                    logger=logger)
+        model_names.append(new_model_name)
+
+    return model_names
 
 
-def submit_job(job_name='Job-VAB', num_cpus=4, memory_percent=90):
+def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None):
     """
     创建并提交Abaqus作业
 
     参数:
-        job_name       (str):  作业名称
+        model_name     (str):  模型名称（默认同时作为作业名称）
         num_cpus       (int):  CPU数量
         memory_percent (int):  内存百分比
     """
-    model_name = 'Model-1'
-
+    logger = logger or log_step()
+    t0 = time.time()
+    job_name = model_name
     if job_name in mdb.jobs:
         del mdb.jobs[job_name]
+        log_step(logger, '检测到同名旧作业，已删除: %s', job_name)
+    log_step(logger, '提交作业开始: 作业名=%s, CPU 数量=%d, 内存=%d%%',
+             job_name, num_cpus, memory_percent)
 
     mdb.Job(name=job_name, model=model_name,
             description='VAB oblique SV-wave analysis',
@@ -632,45 +844,61 @@ def submit_job(job_name='Job-VAB', num_cpus=4, memory_percent=90):
             numCpus=num_cpus, numDomains=num_cpus,
             multiprocessingMode=DEFAULT, numGPUs=0)
 
-    print('Job "{}" created. Submitting...'.format(job_name))
+    mdb.save()
+    log_step(logger, '%s作业已创建并保存 CAE', job_name)
     mdb.jobs[job_name].submit(consistencyChecking=OFF)
+    log_step(logger, '%s作业已提交，正在等待完成...', job_name)
     mdb.jobs[job_name].waitForCompletion()
-    print('Job "{}" completed.'.format(job_name))
+    log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
 
 
 if __name__ == '__main__':
-    # ===== 参数设置 =====
-    angle = 15        # SV波入射角度（度）
-    cs = 1754         # 剪切波速 (m/s)
-    vv = 0.3          # 泊松比
-    density = 2500    # 密度 (kg/m³)
+    logger = log_step('VAB_oblique_noGUI_v6.log') # *日志文件名
+    total_start = time.time()
+    try:
+        log_step(logger, '脚本开始执行')
+        # ===== 土体参数设置 =====
+        angle = 15        # *SV波入射角度（度）
+        E = 20e9          # *杨氏模量 (Pa)
+        vv = 0.3          # *泊松比
+        density = 2500    # *密度 (kg/m³)
+        cs = math.sqrt((E / (2 * (1 + vv))) / density)  # 由杨氏模量自动计算剪切波速 (m/s)
 
-    width = 200.0     # 模型宽度 (m)
-    height = 100.0    # 模型高度 (m)
-    mesh_size = 1.0   # 网格尺寸 (m)
+        # ====== 模型参数设置 =======
+        h = 200.0                 # *斜坡高度 (m)
+        i = 30.0                  # *斜坡倾角 (°)
+        mesh_size_manual = 10     # *手动设置网格尺寸 (m)
+        f_max = 3.33              # *目标最高频率 (Hz)，用于自动计算网格尺寸
+        n_per_wave = 10           # *每波长最少单元数（建议 8~10）
+        H_lower = 2.0 * h   # 下垫面高度 = 2h
+        total_L = 6.0 * h + h / math.tan(math.radians(i))  # 总长 = 左平台3h + 坡宽 + 右平台3h
+        mesh_size_auto = cs / (f_max * n_per_wave)   # 自动计算网格尺寸 = Vs / (f_max * n)
+        mesh_size = min(mesh_size_auto, mesh_size_manual)  # 取自动与手动中的较小值
 
-    time_period = 2.0     # 分析步总时长 (s)
-    initial_inc = 0.001   # 初始增量步 (s)
-    min_inc = 1e-4        # 最小增量步 (s)
-    max_num_inc = 100000  # 最大增量步数
+        # ====== 作业参数设置 ======
+        cae_name = 'VAB_oblique_slope.cae'            # *CAE文件名（可修改）
+        num_cpus = 7                                  # *CPU数量
+        memory_percent = 90                           # *内存百分比
+        variables = ('U',)                            # *输出变量
+        frequency = 10                                # *输出频率 (Hz)
 
-    job_name = 'Job-VAB'  # 作业名称
-    num_cpus = 4          # CPU数量
+        # 1. 查找速度时程文件
+        vel_info = find_vel_txt(logger)
+        
+        # 2. 创建基础模型（几何、材料、网格、装配，不含分析步）
+        base_model, part_name, inst_name = create_model(
+            total_L, h, i, cs, vv, density, mesh_size, H_lower=H_lower, cae_name=cae_name, logger=logger)
 
-    # ===== 执行流程 =====
-    # 1. 创建模型（几何、材料、网格、装配、分析步）
-    create_model(width, height, cs, vv, density, mesh_size,
-                 time_period, initial_inc, min_inc, max_num_inc)
+        # 3. 为每个txt文件复制模型、创建分析步、施加人工边界、并删除基础模型
+        model_names = build_models(
+            vel_info=vel_info, base_model=base_model, part_name=part_name, inst_name=inst_name, angle=angle, cs=cs, 
+            vv=vv, density=density, step_name='Step-earthquake',variables=variables, frequency=frequency, logger=logger)
 
-    # 第1步完成后保存CAE文件以便检查模型基础信息  
-    mdb.saveAs(pathName='VAB_oblique.cae')    
+        # 4. 依次提交作业
+        for mn in model_names:
+            submit_job(num_cpus=num_cpus, memory_percent=memory_percent, model_name=mn, logger=logger)
 
-    # 2. 施加粘弹性人工边界和等效节点力
-    VAB_oblique(angle, cs, vv, density)
-    # 步骤2：在同一个CAE文件上保存添加了边界和载荷后的状态   
-    mdb.save()
-
-    # 3. 提交作业
-    submit_job(job_name=job_name, num_cpus=num_cpus)
-    # 步骤3：最后即使提交了作业也再保存一次最终状态
-    mdb.save()
+        log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
+    except Exception as exc:
+        log_step(logger, '脚本失败: %s', str(exc))
+        logger.error('异常堆栈:\n%s', traceback.format_exc())
