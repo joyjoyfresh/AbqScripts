@@ -9,6 +9,8 @@ import mesh  # 导入网格模块
 import numpy as np  # 导入数值计算库
 import math  # 导入数学模块
 import os  # 导入操作系统接口
+import io  # 导入 io 模块（提供 Py2/Py3 通用、可指定编码的文件接口，用于写 case_meta.json）
+import json  # 导入 JSON 模块（写出 case_meta.json）
 import time  # 导入时间模块
 import logging  # 导入日志模块
 import traceback  # 导入异常堆栈模块
@@ -21,54 +23,38 @@ from collections import namedtuple  # 导入命名元组用于参数打包
 
 
 # ==========================================================
-#  【本版 = 复现 Shen 等 2025 论文 图15 的三层模型参数】
-#  图15 固定工况：i = 45°, Vr/Vs2 = 2.5, h/H = 0.50, 无量纲频率 a0 = 2.0。
-#  论文材料（全部层）：密度 = 2500 kg/m³, 泊松比 = 0.3；
-#    基岩 V_R = 2000 m/s (E = 26 GPa, Vp = 3742 m/s)。
-#  由 Vr/Vs2 = 2.5 → 覆盖层 Vs2 = 800 m/s（velocity_ratio = Vr/Vs2 = 2.5）。
-#  表层软硬用"表层/覆盖层阻抗比 Vs1/Vs2"（密度相同故=波速比）表示：
-#    软表层 Vs1/Vs2 = 0.5 → Vs1 = 400 m/s → velocity_ratio = Vr/Vs1 = 5.0；
-#    硬表层 Vs1/Vs2 = 2.0 → Vs1 = 1600 m/s → velocity_ratio = Vr/Vs1 = 1.25。
-#  表层相对厚度 h1/(H−h)（H−h = 斜坡高度差 = 200 m）：
-#    0.25 → h1 = 50 m；0.75 → h1 = 150 m。
-#  入射角 θs：0° 与 15°。
-#  → 图15 共 2(厚度) × 2(软/硬) × 2(角度) = 8 个工况；本文件取其一为默认，
-#    其余工况按下表改 'thickness' / 'velocity_ratio' / 'angle' 三处即可（或交由批处理扫描）。
-#  输入波：a0 = 2 fc (H−h)/Vs2 = 2.0 → fc = a0·Vs2 / (2·(H−h)) = 2.0·800/(2·200) = 4.0 Hz，
-#    故需放入 4 Hz Ricker 加速度 .txt 作为输入（脚本从所在目录读取 .txt）。
-# ----------------------------------------------------------
-#  图15 工况速查（改这三处）：
-#    入射角 angle:           0   或   15
-#    表层 velocity_ratio:    5.0(软, Vs1/Vs2=0.5)  或  1.25(硬, Vs1/Vs2=2.0)
-#    表层 thickness:         50.0(h1/(H−h)=0.25)   或  150.0(h1/(H−h)=0.75)
+#  【本版 = 合并版：multilayer_v2(三层图15) + multilayer_v3(双层验证) 同一引擎统一】
+#  引擎与 v2/v3 完全相同（自由场支持 1/2/3… 层）；本版增加【配置注入】：
+#    运行时若工况文件夹内存在 case_config.json，则用其覆盖下面的【默认配置】
+#    （见 _load_case_config）。这样一个批处理脚本即可跑任意变参数工况——
+#    层数(单/双/三层)、各层波速比/厚度、几何(坡角/坡高/覆盖层/基岩厚)、入射角、网格等。
+#  默认配置（下方 material_cfg/geometry_cfg/mesh_size）= 双层、对齐 double_v4，
+#    仅作单独运行(无 case_config.json)时的兜底；批处理时由 Autorun 注入覆盖。
+#  layers 约定：基岩之上的有限层列表，"从上到下"(顶层在前)；
+#    []→单层均质；[overlying]→双层；[surface, overlying]→三层(论文图15)。
+#    velocity_ratio = V_R / V_S（相对基岩波速比）；除最底覆盖层外其余层须给 thickness(m)。
 # ==========================================================
-material_cfg = {  # 定义材料参数配置（图15 三层模型）
-    'angle': 15,  # 设置 SV 波入射角度（度）：图15 取 0° 或 15°
+material_cfg = {  # 默认材料参数配置（双层，对齐 double_v4；可被 case_config.json 覆盖）
+    'angle': 15,  # 设置 SV 波入射角度（度）：与 double_v4 一致（批处理可替换 0/15）
     'bedrock': {  # 定义基岩材料参数（底部半空间 V_R = 2000 m/s）
-        'elastic_modulus': 26e9,  # 基岩杨氏模量（Pa），对应 Vs = 2000 m/s（论文值）
-        'poisson_ratio': 0.3,  # 基岩泊松比（论文值）
-        'density': 2500,  # 基岩密度（kg/m^3，论文值）
+        'elastic_modulus': 26e9,  # 基岩杨氏模量（Pa），对应 Vs = 2000 m/s
+        'poisson_ratio': 0.3,  # 基岩泊松比
+        'density': 2500,  # 基岩密度（kg/m^3）
     },  # 结束基岩材料参数
-    # layers：基岩之上的有限层列表，按"从上到下"排列（顶层在前）。
-    #   空列表[]            → 单层模型（全场均质基岩，经典地形放大）
-    #   1 项 [overlying]    → 双层模型（基岩 + 覆盖层）
-    #   2 项 [surface, ...] → 三层模型（表层 V_S1 + 覆盖层 V_S2 + 基岩，论文图15 模型）
-    # velocity_ratio = V_R / V_S（相对基岩波速比）；除最底覆盖层外其余层须给 thickness(m)。
-    'layers': [  # 定义基岩之上的有限层（从上到下）
-        {'name': 'surface', 'velocity_ratio': 5.0, 'poisson_ratio': 0.3,  # 表层 V_S1：默认软表层 Vs1/Vs2=0.5(Vs1=400)
-         'density': 2500, 'thickness': 50.0},  # 表层密度 + 固定厚度 h1=50 m（h1/(H−h)=0.25）
-        {'name': 'overlying', 'velocity_ratio': 2.5, 'poisson_ratio': 0.3,  # 覆盖层 V_S2：Vr/Vs2=2.5(Vs2=800)
+    # layers：仅一项覆盖层 → 双层模型（M=1），与 double_v4 的 overlying 完全对应。
+    'layers': [  # 定义基岩之上的有限层（仅覆盖层）
+        {'name': 'overlying', 'velocity_ratio': 1.25, 'poisson_ratio': 0.3,  # 覆盖层 Vr/Vs=1.25(Vs=1600)，对齐 double_v4
          'density': 2500},  # 覆盖层密度（厚度由几何决定，故不写 thickness）
     ],  # 结束有限层列表
 }  # 结束材料参数配置
 
-geometry_cfg = {  # 定义几何参数配置（图15 几何）
-    'H_minus_h': 200.0,  # 斜坡高度差 H - h (m)：论文恒为 200 m
-    'i': 45.0,  # 斜坡倾角 (度)：图15 取 45°
-    'h_over_H': 0.5,  # 深度比 h / H：图15 取 0.50
-    'total_L': 1800.0,  # 总模型长度 (m)：论文 1800 m
-    'left_flat': 1000.0,  # 上平台长度 (m)：论文上地表长 1000 m
-    'bedrock_thickness': 200.0,  # 基岩层厚度 (m)：基岩界面以下纳入模型的基岩厚（VAB 底边）
+geometry_cfg = {  # 定义几何参数配置（对齐 double_v4）
+    'H_minus_h': 200.0,  # 斜坡高度差 H - h (m)
+    'i': 45.0,  # 斜坡倾角 (度)：批处理可替换 30/60
+    'h_over_H': 0.5,  # 深度比 h / H
+    'total_L': 1800.0,  # 总模型长度 (m)
+    'left_flat': 1000.0,  # 上平台长度 (m)
+    'bedrock_thickness': 200.0,  # 基岩层厚度 (m)
 }  # 结束几何参数配置
 
 job_cfg = {  # 定义作业参数配置
@@ -127,6 +113,27 @@ FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
 # ==========================================================
 #  通用工具函数
 # ==========================================================
+
+
+_DEFAULT_SCRIPT_NAME = 'VAB_oblique_TAF_multilayer_v2.py'  # 本脚本已知文件名（__file__ 缺失时的兜底）
+
+
+def _script_path():  # 安全获取当前脚本绝对路径（Abaqus 内核可能不定义 __file__）
+    """返回脚本绝对路径；Abaqus 用 execfile/kernel 执行时全局可能无 __file__，此时退化为当前目录下的已知脚本名。"""
+    f = globals().get('__file__')  # 安全读取 __file__（缺失返回 None，不抛 NameError）
+    if f:  # __file__ 存在时
+        return os.path.abspath(f)  # 返回其绝对路径
+    return os.path.join(os.getcwd(), _DEFAULT_SCRIPT_NAME)  # 兜底：当前工作目录(工况文件夹) + 已知脚本名
+
+
+def _script_name():  # 安全获取当前脚本文件名（仅名字部分）
+    """返回脚本文件名（如 'VAB_oblique_TAF_multilayer_v4.py'），不依赖 __file__。"""
+    return os.path.basename(_script_path())  # 取路径基名
+
+
+def _script_dir():  # 安全获取当前脚本所在目录（工况文件夹）
+    """返回脚本所在目录；__file__ 缺失时退化为当前工作目录。"""
+    return os.path.dirname(_script_path())  # 取路径目录部分
 
 
 def log_step(logger=None, message=None, *args):  # 定义日志记录函数
@@ -1392,25 +1399,123 @@ def build_site(material_cfg, geometry_cfg):
     return site, fixed_thicknesses  # 返回场地对象与固定厚度列表
 
 
+def _deep_merge(base, override):  # 递归合并两份配置字典
+    """dict 逐键递归合并；其余类型（含 list，如 layers）整体替换。返回合并后的新 dict。"""
+    out = dict(base)  # 复制基底，避免就地修改
+    for k, v in (override or {}).items():  # 遍历覆盖项
+        if isinstance(v, dict) and isinstance(out.get(k), dict):  # 双方均为 dict 才递归合并
+            out[k] = _deep_merge(out[k], v)  # 递归合并子字典（如 bedrock）
+        else:  # 其余情况（标量/列表/新键）
+            out[k] = v  # 整体替换/新增（layers 列表整体替换即可改层数）
+    return out  # 返回合并结果
+
+
+def _load_case_config(material_cfg, geometry_cfg, mesh_size, logger):  # 加载工况配置注入
+    """若当前工况文件夹存在 case_config.json，则用其覆盖默认配置（支持部分覆盖或整体改 layers/几何/网格）。
+
+    case_config.json 结构（各键可选，缺省即用默认）：
+      {"material_cfg": {...部分或全部...}, "geometry_cfg": {...}, "mesh_size": 4}
+    返回覆盖后的 (material_cfg, geometry_cfg, mesh_size)。无文件或解析失败则原样返回默认。
+    """
+    path = os.path.join(os.getcwd(), 'case_config.json')  # 约定的配置注入文件
+    if not os.path.isfile(path):  # 无注入文件 → 用默认配置单独运行
+        if logger:  # 记录提示
+            log_step(logger, '未发现 case_config.json，使用脚本内默认配置')  # 输出默认配置提示
+        return material_cfg, geometry_cfg, mesh_size  # 原样返回默认
+    try:  # 尝试读取并覆盖
+        import json  # 导入 JSON 模块
+        with open(path, 'r', encoding='utf-8') as f:  # 打开配置文件
+            cfg = json.load(f)  # 解析为字典
+        if isinstance(cfg.get('material_cfg'), dict):  # 提供了材料覆盖
+            material_cfg = _deep_merge(material_cfg, cfg['material_cfg'])  # 合并材料配置
+        if isinstance(cfg.get('geometry_cfg'), dict):  # 提供了几何覆盖
+            geometry_cfg = _deep_merge(geometry_cfg, cfg['geometry_cfg'])  # 合并几何配置
+        if cfg.get('mesh_size') is not None:  # 提供了网格覆盖
+            mesh_size = cfg['mesh_size']  # 覆盖网格尺寸
+        if logger:  # 记录成功
+            log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, i=%s',  # 输出关键覆盖项
+                     material_cfg.get('angle'), len(material_cfg.get('layers', [])), geometry_cfg.get('i'))
+    except Exception as _e:  # 解析失败
+        if logger:  # 记录告警
+            log_step(logger, '加载 case_config.json 失败(改用默认配置): %s', str(_e))  # 输出失败告警
+    return material_cfg, geometry_cfg, mesh_size  # 返回（可能被覆盖的）配置
+
+
+def _meta_f(value):  # 把数值安全转为内置 float（兼容 numpy 标量）
+    """将 numpy/字符串等数值规范化为内置 float；None 原样返回，不可转换返回 None。"""
+    if value is None:  # 空值
+        return None  # 原样返回
+    try:  # 尝试转换
+        return float(value)  # 返回内置浮点
+    except (TypeError, ValueError):  # 不可转换
+        return None  # 返回 None
+
+
+def _meta_material(name, cs, vv, density, thickness=None):  # 打包单层材料为规范字典
+    """返回 {name, cs, vv, density, thickness}；thickness=None 表示半空间或由几何决定。"""
+    return {'name': str(name), 'cs': _meta_f(cs), 'vv': _meta_f(vv),  # 层名与波速、泊松比
+            'density': _meta_f(density), 'thickness': _meta_f(thickness)}  # 密度与厚度
+
+
 def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger):  # 写出统一工况元数据
-    """把本工况参数固化为 case_meta.json（依赖随脚本拷入工况文件夹的 case_meta.py）。失败仅告警、不中断建模。"""
+    """把本工况参数固化为当前工况文件夹的 case_meta.json（自包含、不依赖任何外部模块）。失败仅告警、不中断建模。
+
+    本函数是工况元数据的【唯一写入者 / 单一真相源】：所有派生量公式（a0_base、波速比、模型类型等）只在此处定义；
+    下游 Collect/Plot 仅读取生成的 JSON 数据、不共享本处代码，因此不存在跨 Abaqus/普通 Python 的字段口径漂移。
+    """
     try:  # 元数据写出不应影响建模主流程
-        _here = os.path.dirname(os.path.abspath(__file__))  # 脚本所在目录（工况文件夹）
-        import sys  # 导入 sys 以补充导入路径
-        if _here not in sys.path:  # 确保同目录的 case_meta.py 可被导入
-            sys.path.insert(0, _here)  # 将脚本目录加入搜索路径
-        import case_meta as _cm  # 导入统一元数据模块
-        bedrock_mat = _cm.material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料规范字典
-                                   site.bedrock.density, site.bedrock.thickness)  # 填入密度与厚度
-        layer_mats = [_cm.material(L.name, L.cs, L.vv, L.density, L.thickness) for L in site.layers]  # 各有限层（从上到下）
-        meta = _cm.build_meta(  # 构建规范元数据
-            model_script=script_name, incident_angle=material_cfg['angle'],  # 建模脚本名与入射角
-            geometry={'i': geom.i, 'total_L': geom.total_L, 'left_flat': geom.left_flat,  # 几何输入项
-                      'H_minus_h': geom.H_minus_h, 'h_over_H': geom.h_over_H,  # 斜坡高度差与深度比
-                      'bedrock_thickness': geom.bedrock_thickness, 'H': geom.H, 'h': geom.h,  # 基岩厚度与派生覆盖厚度
-                      'w_slope': geom.w_slope},  # 坡面水平长度
-            bedrock=bedrock_mat, layers=layer_mats, mesh_size=mesh_size)  # 基岩、有限层与网格
-        path = _cm.write_case_meta(os.getcwd(), meta)  # 写入当前工况文件夹
+        bedrock = _meta_material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料字典
+                                 site.bedrock.density, site.bedrock.thickness)  # 密度与厚度
+        layers = [_meta_material(L.name, L.cs, L.vv, L.density, L.thickness) for L in site.layers]  # 各有限层（从上到下）
+        geometry = {'i': geom.i, 'total_L': geom.total_L, 'left_flat': geom.left_flat,  # 几何输入项
+                    'H_minus_h': geom.H_minus_h, 'h_over_H': geom.h_over_H,  # 斜坡高度差与深度比
+                    'bedrock_thickness': geom.bedrock_thickness, 'H': geom.H, 'h': geom.h,  # 基岩厚度与覆盖厚度
+                    'w_slope': geom.w_slope}  # 坡面水平长度
+        geometry = {k: _meta_f(v) for k, v in geometry.items()}  # 几何统一转 float
+        n_finite = len(layers)  # 有限层数（不含基岩）
+        has_bedrock = site.bedrock is not None  # 是否存在基岩半空间
+        n_total = n_finite + (1 if has_bedrock else 0)  # 总介质层数（含基岩）
+        model_type = 'single' if n_total <= 1 else ('double' if n_total == 2 else 'multilayer')  # 模型类型判定
+        Hmh = geometry.get('H_minus_h')  # 斜坡高度差 H-h
+        slope_height = Hmh if Hmh is not None else geometry.get('h')  # 斜坡特征高度（a0 归一化用，单层退化用 h）
+        vs_bedrock = bedrock['cs'] if has_bedrock else None  # 基岩剪切波速 Vr
+        vs_surface = layers[0]['cs'] if layers else vs_bedrock  # 最顶有限层 Vs1（无有限层退化为基岩）
+        vs_cover = layers[-1]['cs'] if layers else vs_surface  # 最底覆盖层 Vs2（a0 用）
+        vr_over_vs2 = (vs_bedrock / vs_cover) if (vs_bedrock and vs_cover) else None  # Vr/Vs2 抗阻比
+        vs1_over_vs2 = (vs_surface / vs_cover) if (vs_surface and vs_cover) else None  # Vs1/Vs2 软硬比
+        a0_base = (2.0 * slope_height / vs_cover) if (slope_height and vs_cover) else None  # a0 = f_c(Hz) * a0_base
+        derived = {  # 派生量集中区（公式单一真相源）
+            'n_finite_layers': n_finite,  # 有限层数（不含基岩）
+            'n_layers_total': n_total,  # 总层数（含基岩）
+            'vs_bedrock': _meta_f(vs_bedrock),  # 基岩 Vr
+            'vs_surface': _meta_f(vs_surface),  # 表层 Vs1
+            'vs_cover': _meta_f(vs_cover),  # 覆盖层 Vs2
+            'vr_over_vs2': _meta_f(vr_over_vs2),  # Vr/Vs2
+            'vs1_over_vs2': _meta_f(vs1_over_vs2),  # Vs1/Vs2
+            'slope_height': _meta_f(slope_height),  # a0 归一化用斜坡特征高度
+            'a0_base': _meta_f(a0_base),  # a0 换算基数
+        }
+        out_dir = os.path.abspath(os.getcwd())  # 当前工况文件夹（建模运行目录）
+        meta = {  # 组装规范元数据（嵌套结构，供下游通用展平）
+            'schema_version': 1,  # schema 版本号
+            'model_type': model_type,  # 模型类型 single/double/multilayer
+            'model_script': str(script_name),  # 建模脚本文件名
+            'incident_angle': _meta_f(material_cfg['angle']),  # SV 入射角 θs（度）
+            'mesh_size': _meta_f(mesh_size),  # 网格尺寸（m）
+            'geometry': geometry,  # 几何参数（含派生 H/h/w_slope）
+            'bedrock': bedrock,  # 基岩材料字典
+            'layers': layers,  # 从上到下的有限层材料字典列表
+            'derived': derived,  # 派生量
+            'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
+            'extra': {},  # 附加自定义键值
+            'folder': os.path.basename(out_dir.rstrip('/\\')),  # 工况文件夹名（来源标识）
+        }
+        text = json.dumps(meta, ensure_ascii=False, indent=2, default=_meta_f)  # 序列化为字符串（保留中文，default 兜底 numpy 标量）
+        if isinstance(text, bytes):  # Py2 下 ensure_ascii=False 可能返回 bytes
+            text = text.decode('utf-8')  # 解码为 unicode 以匹配 io.open 文本写入
+        path = os.path.join(out_dir, 'case_meta.json')  # 目标路径
+        with io.open(path, 'w', encoding='utf-8') as f:  # 以 UTF-8 文本模式打开（Py2 内置 open 不支持 encoding 关键字）
+            f.write(text)  # 写出序列化文本
         if logger:  # 有日志器时记录
             log_step(logger, 'case_meta.json 已写出: %s', path)  # 输出成功日志
     except Exception as _e:  # 捕获任何写出异常
@@ -1420,11 +1525,15 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger): 
 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
-    logger = log_step('VAB_oblique_TAF_multilayer_v2.log')  # 初始化日志并写入当前版本日志文件
+    global material_cfg, geometry_cfg, mesh_size  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
+    logger = log_step('VAB_oblique_TAF_multilayer_v4.log')  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
 
     try:
         log_step(logger, '脚本开始执行')  # 写入脚本启动日志
+
+        # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（支持任意变参数/层数）
+        material_cfg, geometry_cfg, mesh_size = _load_case_config(material_cfg, geometry_cfg, mesh_size, logger)  # 加载并覆盖
 
         # 构建场地材料（基岩 + 有限层列表）并校验层厚
         site, fixed_thicknesses = build_site(material_cfg, geometry_cfg)  # 由配置构建场地对象与固定层厚度
@@ -1442,7 +1551,7 @@ def main():
             fixed_thicknesses=fixed_thicknesses)  # 顶部固定层厚度（推算固定层间界面）
         geom_flat = make_flat_geometry(geom)  # 派生平坦自由场几何
 
-        _write_case_meta(material_cfg, geom, site, mesh_size, os.path.basename(__file__), logger)  # 写出统一工况元数据 case_meta.json
+        _write_case_meta(material_cfg, geom, site, mesh_size, _script_name(), logger)  # 写出统一工况元数据 case_meta.json（脚本名不依赖 __file__）
 
         cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),  # 生成工程文件名（含层数）
                                                 int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数

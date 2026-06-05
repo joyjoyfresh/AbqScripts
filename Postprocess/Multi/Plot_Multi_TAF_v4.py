@@ -28,6 +28,7 @@
 """
 
 import os  # 导入系统接口模块
+import re  # 导入正则模块（从记录名解析输入波主频 f_c）
 import sys  # 导入系统参数模块
 import glob  # 导入文件匹配模块
 import numpy as np  # 导入数值计算库
@@ -38,21 +39,6 @@ import matplotlib.pyplot as plt  # 导入绘图子模块
 import matplotlib.font_manager as fm  # 导入字体管理器
 import matplotlib.ticker as mticker  # 导入刻度定位器（主/次刻度、网格）
 
-def _locate_case_meta_dir():  # 在仓库内健壮定位 case_meta.py 所在目录（兼容目录整理/改名）
-    """从本脚本出发，尝试同目录、相邻 General/、并向上各级查找 General/case_meta.py；返回首个命中目录。"""
-    here = os.path.dirname(os.path.abspath(__file__))  # 本脚本所在目录
-    cands = [here, os.path.join(here, '..', 'General'), os.path.join(here, '..', '..', 'Postprocess', 'General')]  # 常见候选位置
-    d = here  # 自当前目录向上逐级回溯
-    for _ in range(6):  # 最多上溯 6 级
-        cands.append(os.path.join(d, 'Postprocess', 'General'))  # 任一祖先下的 Postprocess/General
-        d = os.path.dirname(d)  # 上移一级
-    for c in cands:  # 逐个候选检查
-        if os.path.isfile(os.path.join(c, 'case_meta.py')):  # 命中 case_meta.py
-            return os.path.abspath(c)  # 返回其目录
-    return here  # 兜底返回本目录（同目录拷贝场景）
-
-sys.path.insert(0, _locate_case_meta_dir())  # 把 case_meta.py 所在目录加入导入路径
-import case_meta as cm  # 导入统一元数据模块（a0 换算等）
 
 # ==============================================================================
 #  配置与常量
@@ -154,10 +140,17 @@ def _num(row, col):  # 从 index 行安全取数值列
 
 
 def compute_a0(row):  # 由 index 行推导无量纲频率 a0
-    """用该工况规范列 a0_base 与 record 主频按 a0=fc·a0_base 计算（逐工况自洽）；失败返回 None。"""
-    a0_base = _num(row, 'a0_base')  # 该工况的 a0 换算基数（来自 case_meta）
-    a0 = cm.record_to_a0(row.get('record'), a0_base)  # 由记录名主频 × a0_base 得 a0
-    return round(a0, A0_DECIMALS) if a0 is not None else None  # 四舍五入返回
+    """用该工况规范列 derived.a0_base 与 record 主频按 a0=fc·a0_base 计算（逐工况自洽）；失败返回 None。
+
+    薄契约：仅依赖 index.csv 的 derived.a0_base 与 record 两列（由 case_meta.json 通用展平而来）。
+    """
+    a0_base = _num(row, 'derived.a0_base')  # 该工况的 a0 换算基数（来自 case_meta.json）
+    record = row.get('record')  # 输入波记录名
+    m = re.search(r'(\d+(?:\.\d+)?)\s*Hz', str(record), re.IGNORECASE) if record is not None else None  # 解析主频 f_c(Hz)
+    if a0_base is None or m is None:  # 缺基数或主频则无法换算
+        return None  # 返回空
+    a0 = float(m.group(1)) * a0_base  # a0 = f_c(Hz) × a0_base
+    return round(a0, A0_DECIMALS)  # 四舍五入返回
 
 
 def style_for_a0(a0, used):  # 为某 a0 取曲线样式
@@ -186,7 +179,7 @@ def collect_cases_from_index(results_dir):  # 读取集中结果并整理为工�
         fpath = os.path.join(results_dir, fname)  # 完整路径
         if not os.path.isfile(fpath):  # 文件缺失
             print('  跳过(文件不存在): %s' % fname); continue  # 提示并跳过
-        slope_i = _num(r, 'slope_i')  # 坡角 i（index 规范列）
+        slope_i = _num(r, 'geometry.i')  # 坡角 i（index 规范列，来自 case_meta 几何）
         theta = _num(r, 'incident_angle')  # 入射角 θs（index 规范列）
         a0 = compute_a0(r)  # 无量纲频率 a0（a0_base × 记录主频）
         if slope_i is None or a0 is None or theta is None:  # 关键分组属性缺失

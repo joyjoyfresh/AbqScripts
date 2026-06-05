@@ -2,10 +2,10 @@
 """跨工况结果收集器 v2（基于 case_meta.json 的统一元数据，单/双/多层通用）。
 
 相对 v1 的关键改变：不再靠文件夹名/建模脚本正则【反猜】工况参数，而是直接读取每个工况
-  文件夹内由建模脚本写出的 case_meta.json（统一 schema，见 Postprocess/case_meta.py），
-  把全部规范参数（坡角 i、入射角 θs、层数、各层 Vs、厚度、Vr/Vs2、Vs1/Vs2、a0 基数…）
-  展平写入 results/index.csv。这样无论单层/双层/三层、无论扫了哪些工况，都得到口径一致、
-  自描述、可直接分组分析的数据库；下游 Plot 脚本按规范列出图，不再做任何文件夹名解析。
+  文件夹内由建模脚本写出的 case_meta.json（由建模脚本自包含写出，本脚本不依赖任何共享模块），
+  用【通用递归展平】把全部参数（坡角 i、入射角 θs、层数、各层 Vs、厚度、Vr/Vs2、Vs1/Vs2、
+  a0 基数…）以点号列名（geometry.i / derived.a0_base / bedrock.cs …）写入 results/index.csv。
+  因不硬编码任何字段名，建模脚本新增/改名字段会自动成列、永不口径漂移；下游 Plot 按列出图。
 
 做法（零侵入，原始文件不动）：遍历根目录下各工况文件夹，把其中 TAF/PGA/TIMESERIES 的 CSV
   【复制】到统一 results/ 目录并重命名为全局唯一：
@@ -24,9 +24,35 @@ import sys  # 导入系统参数模块
 import glob  # 导入文件匹配模块
 import shutil  # 导入文件复制模块
 import csv  # 导入 CSV 写入模块
+import io  # 导入 io 模块（UTF-8 读取 case_meta.json，Py2/Py3 通用）
+import json  # 导入 JSON 模块（解析 case_meta.json、序列化 layers 列）
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 确保同目录的 case_meta.py 可被导入
-import case_meta as cm  # 导入统一元数据模块（schema/读取/展平）
+
+def _read_meta(folder):  # 读取某工况文件夹的 case_meta.json
+    """读取 folder/case_meta.json 并返回 dict；不存在或解析失败返回 None。"""
+    path = os.path.join(folder, 'case_meta.json')  # 元数据路径
+    if not os.path.isfile(path):  # 文件不存在
+        return None  # 返回空
+    try:  # 尝试读取解析
+        with io.open(path, 'r', encoding='utf-8') as f:  # UTF-8 文本模式（Py2/Py3 通用）
+            return json.load(f)  # 返回解析结果
+    except Exception:  # 解析失败
+        return None  # 返回空
+
+
+def _flatten(meta, prefix=''):  # 把嵌套 meta 递归展平为扁平 dict（点号拼接 key）
+    """通用递归展平：dict→点号子键(geometry.i/derived.a0_base/bedrock.cs)；list(如 layers)→紧凑 JSON 字符串；标量原样。
+    不硬编码任何字段名，故建模脚本新增/改名字段会自动成列、永不口径漂移。"""
+    flat = {}  # 扁平结果
+    for k, v in (meta or {}).items():  # 遍历每个键值
+        key = '%s.%s' % (prefix, k) if prefix else k  # 拼接点号前缀
+        if isinstance(v, dict):  # 子字典递归展平
+            flat.update(_flatten(v, key))  # 并入子项
+        elif isinstance(v, list):  # 列表（如 layers）序列化为紧凑 JSON 字符串保真
+            flat[key] = json.dumps(v, ensure_ascii=False)  # 存为字符串列
+        else:  # 标量
+            flat[key] = v  # 原样存入
+    return flat  # 返回扁平 dict
 
 # ==============================================================================
 #  配置
@@ -88,16 +114,17 @@ def main():  # 主入口
         csvs = [f for f in sorted(set(csvs)) if '-normalized' not in os.path.basename(f).lower()]  # 排除归一化临时表
         if not csvs:  # 该文件夹无目标 CSV
             continue  # 跳过
-        meta = cm.read_case_meta(folder)  # 读取该工况统一元数据
+        meta = _read_meta(folder)  # 读取该工况统一元数据（直接解析 JSON，不依赖共享模块）
         if meta is None:  # 缺元数据
             n_missing_meta += 1  # 计数
-            meta_flat = {k: None for k in cm.INDEX_META_FIELDS}  # 元数据列留空
+            meta_flat = {}  # 元数据列留空（写表头时按各行 key 并集补 None）
             print('--- %s  (警告: 缺 case_meta.json，元数据列留空，建议重跑补元数据) ---' % entry)  # 告警
         else:  # 有元数据
-            meta_flat = cm.flatten_for_index(meta)  # 展平为统一列
+            meta_flat = _flatten(meta)  # 通用递归展平为点号列
             print('--- %s  (type=%s, i=%s, θs=%s, n_layers=%s, Vr/Vs2=%s) ---' % (  # 打印工况摘要
-                entry, meta_flat.get('model_type'), meta_flat.get('slope_i'),
-                meta_flat.get('incident_angle'), meta_flat.get('n_layers_total'), meta_flat.get('vr_over_vs2')))
+                entry, meta_flat.get('model_type'), meta_flat.get('geometry.i'),
+                meta_flat.get('incident_angle'), meta_flat.get('derived.n_layers_total'),
+                meta_flat.get('derived.vr_over_vs2')))
         n_folders += 1  # 文件夹计数
         for src in csvs:  # 遍历该文件夹 CSV
             stem = os.path.splitext(os.path.basename(src))[0]  # 文件主干
@@ -120,9 +147,12 @@ def main():  # 主入口
               % '/'.join(COLLECT_PREFIXES))  # 提示
         return  # 退出
 
-    # 写出清单 index.csv（基础列 + 统一元数据列）
+    # 写出清单 index.csv（基础列 + 动态元数据列）
     index_path = os.path.join(out_dir, 'index.csv')  # 清单路径
-    fields = BASE_FIELDS + list(cm.INDEX_META_FIELDS)  # 完整列顺序
+    meta_keys = set()  # 收集所有出现过的元数据列名（点号 key）
+    for row in manifest:  # 遍历清单各行
+        meta_keys.update(k for k in row.keys() if k not in BASE_FIELDS)  # 并入非基础列的 key
+    fields = BASE_FIELDS + sorted(meta_keys)  # 完整列顺序：基础列 + 排序后的元数据列
     with open(index_path, 'w', newline='', encoding='utf-8-sig') as f:  # 写 CSV
         w = csv.DictWriter(f, fieldnames=fields)  # 字典写入器
         w.writeheader()  # 写表头

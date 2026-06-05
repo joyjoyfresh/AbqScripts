@@ -21,27 +21,23 @@ import shutil  # 导入文件复制模块
 import subprocess  # 导入子进程执行模块
 import sys  # 导入系统模块用于获取 Python 解释器
 import concurrent.futures  # 导入并发模块以实现多文件夹并行执行
-import ctypes  # 导入 ctypes 模块用于调用 Windows 系统 API
-from ctypes import wintypes  # 从 ctypes 中导入 wintypes 以使用 Windows 的标准数据类型
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根目录（各工况文件夹建在此）
 FOLDER_PREFIX = "multi-"  # 设置目标文件夹前缀
-DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".com"]  # 每个文件夹脚本执行后要删除的文件类型；为空则不删
-USE_RECYCLE_BIN = False  # 删除文件时放入回收站(True)还是直接永久删除(False)
+DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".com"]  # 每个文件夹脚本执行后要直接删除的文件类型；为空则不删除
 MAX_WORKERS = 2  # 并行处理文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名（建模脚本 v4 会读取它）
 
-# 固定源文件（随每个工况文件夹拷入）：输入波 .txt + 统一元数据模块 case_meta.py
+# 固定源文件（随每个工况文件夹拷入）：仅输入波 .txt（建模脚本已自包含写出 case_meta.json，无需再拷模块）
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_4Hz.txt",  # 4 Hz Ricker 输入波（a0=2.0 @ Vs2=800）
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_6Hz.txt",  # 6 Hz Ricker 输入波
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\ricker_wavelet_8Hz.txt",  # 8 Hz Ricker 输入波
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\case_meta.py",  # 统一工况元数据模块（供建模脚本写 case_meta.json）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",  # 4 Hz Ricker 输入波（a0=2.0 @ Vs2=800）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_6Hz.txt",  # 6 Hz Ricker 输入波
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_8Hz.txt",  # 8 Hz Ricker 输入波
 ]  # 结束固定源文件完整路径定义
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v4.py",  # 合并版建模脚本（读取 case_config.json）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v2.py",  # 合并版建模脚本（读取 case_config.json，自包含写出 case_meta.json）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v3.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v1.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
@@ -79,36 +75,6 @@ PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 confi
     {"config": {"material_cfg": {"angle": 0},  "geometry_cfg": {"i": 60.0}}},  # 双层, i=60, 0°
     {"config": {"material_cfg": {"angle": 15}, "geometry_cfg": {"i": 60.0}}},  # 双层, i=60, 15°
 ]  # 结束变参数工况列表定义
-
-
-class SHFILEOPSTRUCTW(ctypes.Structure):  # 定义 SHFILEOPSTRUCTW 结构体以匹配 Windows API
-    """Windows SHFILEOPSTRUCTW 结构体的 ctypes 实现，用于调用系统回收站功能"""  # 结构体文档说明
-    _fields_ = [  # 定义结构体的成员字段列表
-        ("hwnd", wintypes.HWND),  # 窗口句柄成员
-        ("wFunc", wintypes.UINT),  # 操作类型成员
-        ("pFrom", wintypes.LPCWSTR),  # 源文件路径成员（双空字符结尾）
-        ("pTo", wintypes.LPCWSTR),  # 目的文件路径成员
-        ("fFlags", ctypes.c_ushort),  # 操作控制标志成员
-        ("fAnyOperationsAborted", wintypes.BOOL),  # 是否中止操作成员
-        ("hNameMappings", wintypes.LPVOID),  # 文件名映射句柄成员
-        ("lpszProgressTitle", wintypes.LPCWSTR),  # 进度条标题成员
-    ]  # 结束结构体成员字段列表定义
-
-
-def send_to_recycle_bin(path):  # 定义将指定文件移入 Windows 回收站的函数
-    """path: 待删除文件路径；返回 True 表示移入回收站成功。"""
-    abs_path = os.path.abspath(path) + "\0\0"  # 绝对路径并以双空字符结尾（Windows API 要求）
-    fileop = SHFILEOPSTRUCTW()  # 创建结构体实例
-    fileop.hwnd = None  # 无父窗口
-    fileop.wFunc = 3  # FO_DELETE
-    fileop.pFrom = abs_path  # 源路径
-    fileop.pTo = None  # 删除无需目的路径
-    fileop.fFlags = 0x0040 | 0x0010 | 0x0400 | 0x0004  # 允许撤销 + 不确认 + 无错误界面 + 静默
-    fileop.fAnyOperationsAborted = False  # 初始化中止状态
-    fileop.hNameMappings = None  # 名称映射句柄
-    fileop.lpszProgressTitle = None  # 进度条标题
-    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fileop))  # 调用回收站 API
-    return result == 0  # 返回是否成功
 
 
 def build_source_files(static_source_paths, script_sequence):  # 构建源文件名→源路径映射并检测缺失/重名
@@ -227,8 +193,8 @@ def run_scripts_in_folder(folder_path, run_order):  # 在目录内按顺序执�
     return True  # 全部成功
 
 
-def delete_files_in_folder(folder_path, file_types, use_recycle_bin=True):  # 删除目录下指定类型文件
-    """按扩展名清理中间文件；use_recycle_bin 决定回收站或永久删除。"""
+def delete_files_by_type(folder_path, file_types):  # 直接删除目录下指定类型的文件
+    """按扩展名永久删除中间文件（不放回收站、不移入垃圾桶）；file_types 为空则跳过。"""
     if not file_types:  # 未指定类型
         return  # 直接返回
     normalized = {t.lower() if t.startswith(".") else "." + t.lower() for t in file_types}  # 规范扩展名集合
@@ -242,13 +208,8 @@ def delete_files_in_folder(folder_path, file_types, use_recycle_bin=True):  # �
         if ext not in normalized:  # 非目标类型
             continue  # 跳过
         try:  # 尝试删除
-            if use_recycle_bin:  # 回收站删除
-                ok = send_to_recycle_bin(fp)  # 调用回收站
-                deleted[ext] += 1 if ok else 0  # 计数
-                if not ok:  # 失败
-                    failed.append((fp, "SHFileOperationW failed"))  # 记录失败
-            else:  # 永久删除
-                os.remove(fp); deleted[ext] += 1  # 删除并计数
+            os.remove(fp)  # 直接永久删除文件
+            deleted[ext] += 1  # 删除计数加一
         except OSError as exc:  # 系统异常
             failed.append((fp, str(exc)))  # 记录失败
     for ext, n in sorted(deleted.items()):  # 汇总各类型
@@ -262,9 +223,9 @@ def delete_files_in_folder(folder_path, file_types, use_recycle_bin=True):  # �
 def main():  # 主控制流程
     """组织源文件 → 规划各工况文件夹 → 并行建模/后处理 → 清理。"""
     root_dir = sys.argv[1] if len(sys.argv) >= 2 else ROOT_DIR  # 根目录：命令行参数或默认
-    types_to_delete = list(DELETE_FILE_TYPES)  # 待删类型副本
+    types_to_delete = list(DELETE_FILE_TYPES)  # 待删除的文件类型副本
     print("目标根目录：{}".format(root_dir))  # 打印根目录
-    print("要删除的文件类型：{}".format(types_to_delete if types_to_delete else "无"))  # 打印待删类型
+    print("要直接删除的文件类型：{}".format(types_to_delete if types_to_delete else "无"))  # 打印待删除类型
     source_files, missing_items, duplicate_items = build_source_files(STATIC_SOURCE_PATHS, SCRIPT_SEQUENCE)  # 构建源映射
     run_order = [os.path.basename(p) for p in SCRIPT_SEQUENCE]  # 执行顺序（文件名）
     if not ensure_sources_exist(missing_items):  # 校验源文件存在
@@ -296,7 +257,7 @@ def main():  # 主控制流程
         create_and_fill_folder(folder_path, source_files, config)  # 创建并注入配置
         ok = run_scripts_in_folder(folder_path, run_order)  # 顺序执行脚本
         if types_to_delete:  # 需清理
-            delete_files_in_folder(folder_path, types_to_delete, use_recycle_bin=USE_RECYCLE_BIN)  # 清理中间文件
+            delete_files_by_type(folder_path, types_to_delete)  # 直接永久删除中间文件
         else:  # 不清理
             print("已跳过文件删除（没有指定要删除的文件类型）。")  # 提示
         return folder_path, ok  # 返回结果
