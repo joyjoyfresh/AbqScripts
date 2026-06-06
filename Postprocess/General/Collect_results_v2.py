@@ -2,10 +2,10 @@
 """跨工况结果收集器 v2（基于 case_meta.json 的统一元数据，单/双/多层通用）。
 
 相对 v1 的关键改变：不再靠文件夹名/建模脚本正则【反猜】工况参数，而是直接读取每个工况
-  文件夹内由建模脚本写出的 case_meta.json（由建模脚本自包含写出，本脚本不依赖任何共享模块），
-  用【通用递归展平】把全部参数（坡角 i、入射角 θs、层数、各层 Vs、厚度、Vr/Vs2、Vs1/Vs2、
-  a0 基数…）以点号列名（geometry.i / derived.a0_base / bedrock.cs …）写入 results/index.csv。
-  因不硬编码任何字段名，建模脚本新增/改名字段会自动成列、永不口径漂移；下游 Plot 按列出图。
+  文件夹内由建模脚本写出的 case_meta.json（建模脚本自包含写出，本脚本不依赖任何共享模块），
+  按固定映射把全部参数展平为统一规范列（slope_i、incident_angle、vs_cover、a0_base、layers_json…）
+  写入 results/index.csv。这样无论单层/双层/三层、无论扫了哪些工况，都得到口径一致、可直接分组
+  分析的数据库；下游 Plot 按规范列出图，不再做任何文件夹名解析。
 
 做法（零侵入，原始文件不动）：遍历根目录下各工况文件夹，把其中 TAF/PGA/TIMESERIES 的 CSV
   【复制】到统一 results/ 目录并重命名为全局唯一：
@@ -40,19 +40,47 @@ def _read_meta(folder):  # 读取某工况文件夹的 case_meta.json
         return None  # 返回空
 
 
-def _flatten(meta, prefix=''):  # 把嵌套 meta 递归展平为扁平 dict（点号拼接 key）
-    """通用递归展平：dict→点号子键(geometry.i/derived.a0_base/bedrock.cs)；list(如 layers)→紧凑 JSON 字符串；标量原样。
-    不硬编码任何字段名，故建模脚本新增/改名字段会自动成列、永不口径漂移。"""
-    flat = {}  # 扁平结果
-    for k, v in (meta or {}).items():  # 遍历每个键值
-        key = '%s.%s' % (prefix, k) if prefix else k  # 拼接点号前缀
-        if isinstance(v, dict):  # 子字典递归展平
-            flat.update(_flatten(v, key))  # 并入子项
-        elif isinstance(v, list):  # 列表（如 layers）序列化为紧凑 JSON 字符串保真
-            flat[key] = json.dumps(v, ensure_ascii=False)  # 存为字符串列
-        else:  # 标量
-            flat[key] = v  # 原样存入
-    return flat  # 返回扁平 dict
+INDEX_META_FIELDS = [  # index.csv 中由 case_meta.json 展平而来的列（固定顺序、固定旧列名，供下游脚本稳定读取）
+    'model_type', 'model_script', 'incident_angle', 'mesh_size', 'slope_i',
+    'total_L', 'left_flat', 'H_minus_h', 'h_over_H', 'bedrock_thickness', 'H', 'h', 'w_slope',
+    'n_finite_layers', 'n_layers_total', 'vs_bedrock', 'vs_surface', 'vs_cover',
+    'vr_over_vs2', 'vs1_over_vs2', 'slope_height', 'a0_base', 'layers_json',
+]
+
+
+def _flatten(meta):  # 把嵌套 case_meta 展平为 index.csv 的一行（固定旧列名，兼容现有所有下游读取方）
+    """按固定映射把嵌套 meta（geometry/derived/layers）展平为统一规范列（slope_i/a0_base/vs_cover…）。
+
+    列名与重构前一致，故现有 index.csv 与所有用 pd.read_csv 读它的脚本均不受影响；字段缺失优雅返回 None。
+    """
+    g = meta.get('geometry', {}) or {}  # 几何子字典
+    d = meta.get('derived', {}) or {}  # 派生子字典
+    return {  # 组装扁平规范列
+        'model_type': meta.get('model_type'),  # 模型类型
+        'model_script': meta.get('model_script'),  # 建模脚本
+        'incident_angle': meta.get('incident_angle'),  # 入射角 θs
+        'mesh_size': meta.get('mesh_size'),  # 网格尺寸
+        'slope_i': g.get('i'),  # 坡角 i
+        'total_L': g.get('total_L'),  # 模型总长
+        'left_flat': g.get('left_flat'),  # 上平台长度
+        'H_minus_h': g.get('H_minus_h'),  # 斜坡高度差
+        'h_over_H': g.get('h_over_H'),  # 深度比
+        'bedrock_thickness': g.get('bedrock_thickness'),  # 基岩厚度
+        'H': g.get('H'),  # 总覆盖厚度
+        'h': g.get('h'),  # 下部覆盖高度
+        'w_slope': g.get('w_slope'),  # 坡面水平长度
+        'n_finite_layers': d.get('n_finite_layers'),  # 有限层数
+        'n_layers_total': d.get('n_layers_total'),  # 总层数
+        'vs_bedrock': d.get('vs_bedrock'),  # 基岩 Vr
+        'vs_surface': d.get('vs_surface'),  # 表层 Vs1
+        'vs_cover': d.get('vs_cover'),  # 覆盖层 Vs2
+        'vr_over_vs2': d.get('vr_over_vs2'),  # Vr/Vs2
+        'vs1_over_vs2': d.get('vs1_over_vs2'),  # Vs1/Vs2
+        'slope_height': d.get('slope_height'),  # a0 归一化高度
+        'a0_base': d.get('a0_base'),  # a0 换算基数
+        'layers_json': json.dumps(meta.get('layers', []), ensure_ascii=False),  # 完整层信息（紧凑 JSON 保真）
+    }
+
 
 # ==============================================================================
 #  配置
@@ -117,14 +145,14 @@ def main():  # 主入口
         meta = _read_meta(folder)  # 读取该工况统一元数据（直接解析 JSON，不依赖共享模块）
         if meta is None:  # 缺元数据
             n_missing_meta += 1  # 计数
-            meta_flat = {}  # 元数据列留空（写表头时按各行 key 并集补 None）
+            meta_flat = {k: None for k in INDEX_META_FIELDS}  # 元数据列留空
             print('--- %s  (警告: 缺 case_meta.json，元数据列留空，建议重跑补元数据) ---' % entry)  # 告警
         else:  # 有元数据
-            meta_flat = _flatten(meta)  # 通用递归展平为点号列
+            meta_flat = _flatten(meta)  # 展平为固定规范列
             print('--- %s  (type=%s, i=%s, θs=%s, n_layers=%s, Vr/Vs2=%s) ---' % (  # 打印工况摘要
-                entry, meta_flat.get('model_type'), meta_flat.get('geometry.i'),
-                meta_flat.get('incident_angle'), meta_flat.get('derived.n_layers_total'),
-                meta_flat.get('derived.vr_over_vs2')))
+                entry, meta_flat.get('model_type'), meta_flat.get('slope_i'),
+                meta_flat.get('incident_angle'), meta_flat.get('n_layers_total'),
+                meta_flat.get('vr_over_vs2')))
         n_folders += 1  # 文件夹计数
         for src in csvs:  # 遍历该文件夹 CSV
             stem = os.path.splitext(os.path.basename(src))[0]  # 文件主干
@@ -147,12 +175,9 @@ def main():  # 主入口
               % '/'.join(COLLECT_PREFIXES))  # 提示
         return  # 退出
 
-    # 写出清单 index.csv（基础列 + 动态元数据列）
+    # 写出清单 index.csv（基础列 + 固定规范元数据列）
     index_path = os.path.join(out_dir, 'index.csv')  # 清单路径
-    meta_keys = set()  # 收集所有出现过的元数据列名（点号 key）
-    for row in manifest:  # 遍历清单各行
-        meta_keys.update(k for k in row.keys() if k not in BASE_FIELDS)  # 并入非基础列的 key
-    fields = BASE_FIELDS + sorted(meta_keys)  # 完整列顺序：基础列 + 排序后的元数据列
+    fields = BASE_FIELDS + list(INDEX_META_FIELDS)  # 完整列顺序（固定，兼容现有下游读取方）
     with open(index_path, 'w', newline='', encoding='utf-8-sig') as f:  # 写 CSV
         w = csv.DictWriter(f, fieldnames=fields)  # 字典写入器
         w.writeheader()  # 写表头

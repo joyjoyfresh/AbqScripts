@@ -140,11 +140,11 @@ def _num(row, col):  # 从 index 行安全取数值列
 
 
 def compute_a0(row):  # 由 index 行推导无量纲频率 a0
-    """用该工况规范列 derived.a0_base 与 record 主频按 a0=fc·a0_base 计算（逐工况自洽）；失败返回 None。
+    """用该工况规范列 a0_base 与 record 主频按 a0=fc·a0_base 计算（逐工况自洽）；失败返回 None。
 
-    薄契约：仅依赖 index.csv 的 derived.a0_base 与 record 两列（由 case_meta.json 通用展平而来）。
+    薄契约：仅依赖 index.csv 的 a0_base 与 record 两列（由 Collect 据 case_meta.json 展平而来）。
     """
-    a0_base = _num(row, 'derived.a0_base')  # 该工况的 a0 换算基数（来自 case_meta.json）
+    a0_base = _num(row, 'a0_base')  # 该工况的 a0 换算基数（index 规范列，来自 case_meta.json）
     record = row.get('record')  # 输入波记录名
     m = re.search(r'(\d+(?:\.\d+)?)\s*Hz', str(record), re.IGNORECASE) if record is not None else None  # 解析主频 f_c(Hz)
     if a0_base is None or m is None:  # 缺基数或主频则无法换算
@@ -179,7 +179,7 @@ def collect_cases_from_index(results_dir):  # 读取集中结果并整理为工�
         fpath = os.path.join(results_dir, fname)  # 完整路径
         if not os.path.isfile(fpath):  # 文件缺失
             print('  跳过(文件不存在): %s' % fname); continue  # 提示并跳过
-        slope_i = _num(r, 'geometry.i')  # 坡角 i（index 规范列，来自 case_meta 几何）
+        slope_i = _num(r, 'slope_i')  # 坡角 i（index 规范列，来自 case_meta 几何）
         theta = _num(r, 'incident_angle')  # 入射角 θs（index 规范列）
         a0 = compute_a0(r)  # 无量纲频率 a0（a0_base × 记录主频）
         if slope_i is None or a0 is None or theta is None:  # 关键分组属性缺失
