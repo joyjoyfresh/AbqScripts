@@ -1526,7 +1526,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger): 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
     global material_cfg, geometry_cfg, mesh_size  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
-    logger = log_step('VAB_oblique_TAF_multilayer_v4.log')  # 初始化日志并写入当前版本日志文件
+    logger = log_step('VAB_oblique_TAF_multilayer.log')  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
 
     try:

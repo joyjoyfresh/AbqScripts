@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
-"""复现 Shen 等 2025 论文【图15】风格的跨工况对比图（v2：优先读 results/ 集中结果）。
+"""复现 Shen 等 2025 论文【图15】风格的跨工况对比图（v3：新排版 + 仅集中模式）。
 
-论文图15：i=45°, Vr/Vs2=2.5, h/H=0.50 的三层斜坡，地表水平/竖向 PGA 放大系数沿地表坐标的变化。
-  (a) h1/(H−h)=0.25, (b) h1/(H−h)=0.75；每个厚度一张图；
-  子图按"入射角 θs(0°/15°)"分列、按"水平/竖向"分行；
-  每个面板内对比"表层软硬"两条曲线（图例=Vs1/Vs2，软=0.5、硬=2.0）。
+论文图15：i=45°, Vr/Vs2=2.5, h/H=0.50 的三层斜坡，地表水平/竖向 TAF 沿地表坐标的变化。
+  每个厚度一张图：(a) h1/(H−h)=0.25, (b) h1/(H−h)=0.75。
+  布局（2×2）：
+    行 = 入射角 θs —— 第一行 θs=0°，第二行 θs=15°；
+    列 = 响应分量 —— 左列 Horizontal TAF（纵轴 0–6），右列 Vertical TAF（纵轴 0–5）；
+    每个面板内对比表层软/硬两条曲线（红实线 Vs1/Vs2=0.5，蓝虚线 Vs1/Vs2=2.0），左上角各放一份图例。
+  公共要素：横轴 Surface Receiver Location (m) 0–1800（主刻度 0/600/1200/1800），
+    细密灰色正方网格，x≈坡顶/坡脚处两条黑色竖虚线并标注 #1/#2。
 
-数据来源（v2 自动判别两种模式）：
-  ①【集中模式·推荐】先用 Collect_TAF_results_v1.py 把各工况 CSV 汇到 results/，
-     本脚本读 results/index.csv（含每个 TAF 文件的工况属性 Vs1/Vs2、h1/(H−h)、angle）
-     + results/ 下的 TAF-*.csv，无需再进各工况文件夹。
-  ②【逐文件夹模式·兜底】若目标目录下没有 index.csv，则回退为 v1 行为：
-     遍历各工况子文件夹，逐个读 TAF-*.csv，并从其中的建模脚本副本/文件夹名解析工况属性。
-  坡顶/坡脚(#1/#2)位置从 PGA-*-slope.csv 读取（集中模式读 results/ 内任一份，逐文件夹模式读各自文件夹）。
+数据来源（仅集中模式）：先用 Collect_TAF_results_v1.py 把各工况 CSV 汇到 results/，
+  本脚本读 results/index.csv（含每个 TAF 文件的工况属性 Vs1/Vs2、h1/(H−h)、angle）+ results/ 下 TAF-*.csv；
+  坡顶/坡脚(#1/#2)位置从 results/ 内任一 PGA-*-slope.csv 读取。
+  index.csv 中若含多种记录（如 4/6/8Hz），仅画含 RECORD_PREFER（默认 4Hz）者。
 
 运行：
-  集中模式：先 `python Postprocess/Collect_TAF_results_v1.py <工况根目录>` 生成 results/，再
-    `python Postprocess/Plot_Fig15_compare_v2.py <工况根目录>`（自动找其下的 results/），
-    或直接 `python Postprocess/Plot_Fig15_compare_v2.py <results 目录>`。
-  逐文件夹模式：`cd Batch && python ../Postprocess/Plot_Fig15_compare_v2.py`（目录下无 results/ 时自动回退）。
-  不传参数时默认取当前工作目录。
+  先 `python Postprocess/Collect_TAF_results_v1.py <工况根目录>` 生成 results/，再
+  `python Postprocess/Plot_Fig15_compare_v3.py <工况根目录>`（自动找其下 results/）
+  或直接 `python Postprocess/Plot_Fig15_compare_v3.py <results 目录>`；不传参数取当前目录。
 """
 
 import os  # 导入系统接口模块
@@ -31,12 +30,12 @@ import matplotlib  # 导入绘图框架
 matplotlib.use('Agg')  # 使用无界面后端
 import matplotlib.pyplot as plt  # 导入绘图子模块
 import matplotlib.font_manager as fm  # 导入字体管理器
+import matplotlib.ticker as mticker  # 导入刻度定位器（主/次刻度、网格）
 
 # ==============================================================================
 #  配置与常量
 # ==============================================================================
 RECORD_PREFER = '4Hz'  # 优先选用的输入记录标识（图15 用 4 Hz Ricker）：index.csv 中含多种记录时只画含此标识者
-CUSTOM_YLIM = {'horizontal': None, 'vertical': None}  # 纵轴范围：None 自适应，或 (min,max)
 # 不同 Vs1/Vs2（软/硬）曲线样式：键为四舍五入到 2 位的比值
 RATIO_STYLES = {
     0.5: {'color': '#d62728', 'linestyle': '-', 'linewidth': 1.6, 'marker': '', 'label': r'$V_{s1}/V_{s2}=0.5$'},   # 软表层：红实线
@@ -74,12 +73,14 @@ CN_FONT, EN_FONT = build_font_properties()  # 加载字体
 
 
 def style_axes(ax):  # 统一坐标轴外观
-    """设置白底、四面朝内刻度、黑色边框与点状网格。"""
+    """设置白底、四面朝内刻度、黑色边框、细密灰色正方网格（主+次）。"""
     ax.set_facecolor('white')  # 白色背景
-    ax.tick_params(direction='in', top=True, right=True, bottom=True, left=True, labelsize=10)  # 刻度朝内
+    ax.tick_params(direction='in', which='both', top=True, right=True, bottom=True, left=True, labelsize=10)  # 主次刻度均朝内、四面显示
     for spine in ax.spines.values():  # 遍历四条边框
         spine.set_color('black'); spine.set_linewidth(1.0)  # 黑色边框
-    ax.grid(True, which='both', linestyle=':', color='#b0b0b0', linewidth=0.5)  # 点状网格
+    ax.minorticks_on()  # 打开次刻度（细密网格用）
+    ax.grid(True, which='major', linestyle='-', color='#c8c8c8', linewidth=0.6)  # 主网格（较明显）
+    ax.grid(True, which='minor', linestyle=':', color='#dcdcdc', linewidth=0.4)  # 次网格（细密）
 
 
 # ==============================================================================
@@ -154,20 +155,26 @@ def style_for_ratio(ratio, used):  # 为某 Vs1/Vs2 取曲线样式
     return s, r'$V_{s1}/V_{s2}=%.2f$' % ratio  # 兜底图例
 
 
-def plot_one_thickness(h1_over, cases, x_crest, x_toe, total_L, out_dir, part_tag):  # 画一个厚度的图15 子图
-    """对某一 h1/(H−h) 厚度，绘制 行=水平/竖向 × 列=入射角 的对比图。"""
-    angles = sorted({c['angle'] for c in cases})  # 该厚度下出现的入射角（列）
-    ratios = sorted({round(c['vs1_vs2'], 2) for c in cases})  # 出现的 Vs1/Vs2（曲线）
-    directions = [('taf_h', '水平向 PGA 放大系数', 'Horizontal'),  # 行：水平
-                  ('taf_v', '竖向 PGA 放大系数', 'Vertical')]  # 行：竖向
-    ncol = max(1, len(angles)); nrow = 2  # 列=角度数、行=2（水平/竖向）
-    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 3.6 * nrow), dpi=300, squeeze=False)  # 画布
+def plot_one_thickness(h1_over, cases, x_crest, x_toe, total_L, out_dir, part_tag):  # 画一个厚度的图15
+    """对某一 h1/(H−h) 厚度出图：行=入射角(0°上/15°下)，列=分量(左 Horizontal TAF / 右 Vertical TAF)。
+
+    每个面板内对比软/硬表层两条曲线；横轴 Surface Receiver Location (m) 0–1800，
+    纵轴左列 0–6、右列 0–5；坡顶/坡脚 #1/#2 竖虚线；每个面板左上角各放一份图例。
+    """
+    angles = sorted({c['angle'] for c in cases})  # 入射角（行；0°在上、15°在下）
+    ratios = sorted({round(c['vs1_vs2'], 2) for c in cases})  # 出现的 Vs1/Vs2（每面板内的对比曲线）
+    columns = [('taf_h', 'Horizontal TAF', (0.0, 6.0), 1.0),  # 左列：水平向，纵轴 0–6，主刻度间隔 1
+               ('taf_v', 'Vertical TAF', (0.0, 5.0), 1.0)]  # 右列：竖向，纵轴 0–5，主刻度间隔 1
+    x_ticks = [0, 600, 1200, 1800]  # 横轴主刻度
+    x_max = total_L if (total_L and total_L > 1) else 1800.0  # 横轴上限（默认 1800）
+    nrow = max(1, len(angles)); ncol = 2  # 行=角度数、列=2（H/V）
+    fig, axes = plt.subplots(nrow, ncol, figsize=(5.0 * ncol, 3.7 * nrow), dpi=300, squeeze=False)  # 画布
     plt.rcParams['axes.unicode_minus'] = False  # 正常显示负号
     plt.rcParams['mathtext.fontset'] = 'stix'  # 数学字体
-    for ri, (key, cn_label, en_label) in enumerate(directions):  # 遍历行（方向）
-        for ci, ang in enumerate(angles):  # 遍历列（入射角）
+    for ri, ang in enumerate(angles):  # 遍历行（入射角）
+        for ci, (key, ylabel, ylim, ystep) in enumerate(columns):  # 遍历列（H/V 分量）
             ax = axes[ri][ci]  # 当前面板
-            style_axes(ax)  # 设置外观
+            style_axes(ax)  # 设置外观（含细密网格）
             used = 0  # 兜底样式计数
             for ratio in ratios:  # 同面板内按软/硬画曲线
                 match = [c for c in cases if abs(c['angle'] - ang) < 1e-6 and abs(round(c['vs1_vs2'], 2) - ratio) < 1e-6]  # 匹配工况
@@ -177,28 +184,22 @@ def plot_one_thickness(h1_over, cases, x_crest, x_toe, total_L, out_dir, part_ta
                 s, label = style_for_ratio(ratio, used); used += 1  # 取样式与图例
                 ax.plot(c['x'], c[key], color=s['color'], linestyle=s['linestyle'],  # 绘制曲线
                         linewidth=s['linewidth'], label=label)
-            if total_L:  # 设定横轴范围与刻度
-                ax.set_xlim(0, total_L)  # 0 到总长
-                step = 600.0 if abs(total_L - 1800.0) < 50.0 else total_L / 3.0  # 刻度步长
-                ax.set_xticks(np.arange(0, total_L + 1.0, step))  # 设置刻度
-            lim = CUSTOM_YLIM.get('horizontal' if key == 'taf_h' else 'vertical')  # 自定义纵轴
-            if isinstance(lim, tuple):  # 指定范围
-                ax.set_ylim(*lim)  # 应用
+            ax.set_xlim(0, x_max)  # 横轴范围 0–1800
+            ax.set_xticks([t for t in x_ticks if t <= x_max + 1e-6])  # 主刻度 0/600/1200/1800
+            ax.set_ylim(*ylim)  # 纵轴范围（左 0–6、右 0–5）
+            ax.yaxis.set_major_locator(mticker.MultipleLocator(ystep))  # 纵轴主刻度间隔
             if x_crest is not None:  # 标注坡顶/坡脚 #1/#2
                 ax.axvline(x=x_crest, color='black', linestyle='--', linewidth=1.0)  # 坡顶竖线
                 ax.axvline(x=x_toe, color='black', linestyle='--', linewidth=1.0)  # 坡脚竖线
-                y0, y1 = ax.get_ylim(); ty = y0 + 0.92 * (y1 - y0)  # 文本纵位置
-                ax.text(x_crest - 0.02 * (total_L or 1.0), ty, '#1', fontsize=10, fontproperties=EN_FONT, va='top', ha='right')  # #1
-                ax.text(x_toe - 0.02 * (total_L or 1.0), ty, '#2', fontsize=10, fontproperties=EN_FONT, va='top', ha='right')  # #2
-            if ri == 0:  # 顶行加列标题（入射角）
-                ax.set_title(r'$\theta_s = %g^\circ$' % ang, fontsize=13, fontproperties=CN_FONT, pad=8)  # 入射角标题
+                ty = ylim[0] + 0.95 * (ylim[1] - ylim[0])  # #1/#2 文本纵位置
+                ax.text(x_crest - 0.015 * x_max, ty, '#1', fontsize=10, fontproperties=EN_FONT, va='top', ha='right')  # #1
+                ax.text(x_toe - 0.015 * x_max, ty, '#2', fontsize=10, fontproperties=EN_FONT, va='top', ha='right')  # #2
+            ax.set_title(r'$\theta_s = %g^\circ$' % ang, fontsize=12, fontproperties=EN_FONT, pad=6)  # 每面板入射角标题
             if ri == nrow - 1:  # 底行加横轴标签
-                ax.set_xlabel('地表测点位置 (m)', fontsize=12, fontproperties=CN_FONT)  # 横轴标签
-            if ci == 0:  # 首列加纵轴标签（方向）
-                ax.set_ylabel(cn_label, fontsize=12, fontproperties=CN_FONT)  # 纵轴标签
-            if ri == 0 and ci == ncol - 1:  # 仅右上角放一次图例（软/硬）
-                ax.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='black',
-                          framealpha=1.0, prop=EN_FONT, fontsize=10)  # 图例
+                ax.set_xlabel('Surface Receiver Location (m)', fontsize=12, fontproperties=EN_FONT)  # 横轴标签
+            ax.set_ylabel(ylabel, fontsize=12, fontproperties=EN_FONT)  # 纵轴标签（每面板按列）
+            ax.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='black',  # 每面板左上角图例
+                      framealpha=1.0, prop=EN_FONT, fontsize=9.5)
     title = u'图15(%s)  h1/(H-h) = %.2f  (i=45deg, Vr/Vs2=2.5, h/H=0.50)' % (part_tag, h1_over)  # 总标题（纯 ASCII 避免缺字）
     fig.suptitle(title, fontsize=14, fontproperties=CN_FONT, y=0.995)  # 设置总标题
     fig.tight_layout(rect=(0, 0, 1, 0.97))  # 调整布局给标题留位
