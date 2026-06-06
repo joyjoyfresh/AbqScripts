@@ -1424,7 +1424,7 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, logger):  # 加载�
         return material_cfg, geometry_cfg, mesh_size  # 原样返回默认
     try:  # 尝试读取并覆盖
         import json  # 导入 JSON 模块
-        with open(path, 'r', encoding='utf-8') as f:  # 打开配置文件
+        with io.open(path, 'r', encoding='utf-8') as f:  # 打开配置文件（io.open：Py2 内置 open 不支持 encoding 关键字）
             cfg = json.load(f)  # 解析为字典
         if isinstance(cfg.get('material_cfg'), dict):  # 提供了材料覆盖
             material_cfg = _deep_merge(material_cfg, cfg['material_cfg'])  # 合并材料配置
