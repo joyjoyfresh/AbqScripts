@@ -7,6 +7,7 @@ import matplotlib.font_manager as fm  # 导入字体管理器用于中英文字�
 import os  # 导入 os 用于路径处理
 import glob  # 导入 glob 用于批量匹配文件
 import re  # 导入 re 用于正则解析文件名
+import math  # 导入 math 用于坡脚位置公式计算
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本所在目录
 CSV_GLOB_PATTERN = 'PGA*.csv'  # 定义原始 PGA 数据文件匹配模式
@@ -30,6 +31,32 @@ def parse_incident_angle_from_cae(script_dir):
 
 
 INCIDENT_ANGLE = parse_incident_angle_from_cae(SCRIPT_DIR)  # 读取当前算例入射角用于标题和命名
+
+
+# 解析同目录 CAE 文件名中的 h 与 i 参数用于图表标题样式。
+def parse_geometry_from_cae(script_dir):
+    cae_files = sorted(glob.glob(os.path.join(script_dir, '*.cae')))  # 匹配并排序当前目录下全部 CAE 文件
+    if not cae_files:  # 若未找到 CAE 文件则返回空值以走兜底标题
+        return None, None  # 返回空几何参数
+    cae_name = os.path.splitext(os.path.basename(cae_files[0]))[0]  # 取排序后第一个 CAE 文件名主干
+    match_h = re.search(r'h(-?\d+(?:\.\d+)?)', cae_name)  # 匹配文件名中的 h 后数字
+    match_i = re.search(r'i(-?\d+(?:\.\d+)?)', cae_name)  # 匹配文件名中的 i 后数字
+    height_value = float(match_h.group(1)) if match_h else None  # 解析边坡高度参数并在缺失时置空
+    slope_angle = float(match_i.group(1)) if match_i else None  # 解析边坡角度参数并在缺失时置空
+    return height_value, slope_angle  # 返回解析得到的几何参数
+
+
+SLOPE_HEIGHT, SLOPE_ANGLE = parse_geometry_from_cae(SCRIPT_DIR)  # 读取当前算例 h 与 i 用于标题
+
+
+# 根据坡角 i 计算坡脚归一化坐标 x/h = 3 + 1/tan(i)。
+def compute_toe_location_from_angle(slope_angle_deg):
+    if slope_angle_deg is None:  # 若未解析到坡角则使用默认位置
+        return LOC_TOE  # 返回默认坡脚位置
+    tan_value = math.tan(math.radians(slope_angle_deg))  # 将角度转弧度后计算正切值
+    if abs(tan_value) <= 1e-12:  # 若正切值过小则避免除零
+        return LOC_TOE  # 回退到默认坡脚位置
+    return LOC_CREST + 1.0 / tan_value  # 按公式返回坡脚归一化坐标
 
 
 # 构建中英文字体属性以保证中文显示稳定。
@@ -147,126 +174,61 @@ def compute_taf_dataframe(normalized_normal_df, normalized_flat_df):
     x_flat = normalized_flat_df['x/h'].to_numpy(dtype=float)  # 读取 flat 的归一化横坐标
     if len(x_normal) != len(x_flat) or not np.allclose(x_normal, x_flat):  # 校验两个归一化横坐标严格一致
         raise ValueError('normal 与 flat 的归一化 x/h 不一致，无法逐点相除计算 TAF。')  # 抛出坐标不一致错误
-    result = {'x/h': x_normal}  # 初始化 TAF 结果并写入 x/h
-    for col in TARGET_COLUMNS:  # 遍历每个 PGA 分量并计算对应 TAF
-        denominator = normalized_flat_df[col].to_numpy(dtype=float)  # 读取 flat 分量作为分母
-        numerator = normalized_normal_df[col].to_numpy(dtype=float)  # 读取 normal 分量作为分子
-        valid_mask = np.abs(denominator) > SAFE_DIVIDE_EPS  # 构造分母非零有效掩码
-        taf_values = np.full_like(numerator, np.nan, dtype=float)  # 预分配 TAF 数组并默认设为 NaN
-        taf_values[valid_mask] = numerator[valid_mask] / denominator[valid_mask]  # 在有效位置执行逐点相除
-        taf_col = 'TAF_h' if col == 'PGA_h' else 'TAF_v'  # 将 PGA 分量列映射为 TAF 分量列
-        result[taf_col] = taf_values  # 写入当前分量 TAF 结果
-    return pd.DataFrame(result)  # 返回 TAF 数据表
+    denominator = normalized_flat_df['PGA_h'].to_numpy(dtype=float)  # 读取 flat 水平向分量作为分母
+    numerator = normalized_normal_df['PGA_h'].to_numpy(dtype=float)  # 读取 normal 水平向分量作为分子
+    valid_mask = np.abs(denominator) > SAFE_DIVIDE_EPS  # 构造分母非零有效掩码
+    taf_values = np.full_like(numerator, np.nan, dtype=float)  # 预分配 TAF_h 数组并默认设为 NaN
+    taf_values[valid_mask] = numerator[valid_mask] / denominator[valid_mask]  # 在有效位置执行逐点相除
+    result = {'x/h': x_normal, 'TAF_h': taf_values}  # 仅写入水平向 TAF 结果列
+    return pd.DataFrame(result)  # 返回仅含水平分量的 TAF 数据表
 
 
-# 绘制单个分量 TAF 曲线并保持现有图风格。
-def plot_taf_component(ax, x_h, taf_values, component, motion_name):
-    component_text = '水平向' if component == 'TAF_h' else '竖向'  # 将分量代码映射为中文分量名
-    ax.plot(x_h, taf_values, color='#1f77b4', linestyle='-', linewidth=1.6, label='TAF')  # 绘制当前分量 TAF 曲线
-    ax.set_title(f'入射角 θs = {INCIDENT_ANGLE}°（{component_text}）', fontsize=14, fontproperties=CN_FONT)  # 设置子图标题
-    ax.set_xlabel('x/h', fontsize=12, fontproperties=EN_FONT)  # 设置横轴标签
-    if component == 'TAF_h':  # 判断当前是否为水平向分量
-        ax.set_ylabel('水平向地形放大系数 TAFh', fontsize=12, fontproperties=CN_FONT)  # 设置水平向纵轴标签
-    else:  # 当前为竖向分量
-        ax.set_ylabel('竖向地形放大系数 TAFv', fontsize=12, fontproperties=CN_FONT)  # 设置竖向纵轴标签
+# 格式化数值为标题显示文本。
+def format_value_text(value):
+    if value is None:  # 若参数为空则返回未知占位符
+        return '?'  # 返回问号用于兜底显示
+    return str(int(value)) if float(value).is_integer() else f'{value:g}'  # 将整数显示为整型文本并压缩浮点尾零
+
+
+# 绘制水平向 TAF 曲线并按参考图样式设置图表外观。
+def plot_taf_horizontal(ax, x_h, taf_values):
+    title_h = format_value_text(SLOPE_HEIGHT)  # 格式化标题中的 h 参数文本
+    title_i = format_value_text(SLOPE_ANGLE)  # 格式化标题中的 i 参数文本
+    toe_x = compute_toe_location_from_angle(SLOPE_ANGLE)  # 按坡角计算坡脚虚线位置
+    ax.set_facecolor('#f2f2f2')  # 设置子图背景为浅灰色以接近参考图
+    ax.plot(x_h, taf_values, color='#d62728', linestyle='-', linewidth=1.4)  # 以较细红色实线绘制水平向 TAF 曲线
+    ax.set_title(f'h = {title_h}m, i = {title_i}°', fontsize=14, fontproperties=EN_FONT, pad=8)  # 使用参考图样式设置标题
+    ax.set_xlabel('x/h', fontsize=16, fontproperties=EN_FONT, fontstyle='italic')  # 设置横轴标签为斜体样式
+    ax.set_ylabel('TAF', fontsize=16, fontproperties=EN_FONT)  # 设置纵轴标签为英文 TAF
     ax.set_xlim(0, 8)  # 固定横轴范围为 0 到 8
     ax.set_xticks(np.arange(0, 9, 1))  # 固定横轴主刻度为整数刻度
-    y_valid = taf_values[np.isfinite(taf_values)]  # 取有限值用于自适应纵轴
-    if y_valid.size > 0:  # 若存在有效数据则按数据范围设定纵轴
-        y_min = float(np.min(y_valid))  # 计算有效数据最小值
-        y_max = float(np.max(y_valid))  # 计算有效数据最大值
-        y_span = max(y_max - y_min, 1e-3)  # 计算纵向跨度并设置最小值防止零跨度
-        ax.set_ylim(y_min - 0.08 * y_span, y_max + 0.12 * y_span)  # 添加上下边距后设置纵轴范围
-    ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))  # 设置纵轴数值格式保留两位小数
-    legend = ax.legend(loc='upper right', frameon=True, fontsize=9, prop=CN_FONT, title=motion_name, title_fontproperties=CN_FONT)  # 添加图例并在标题显示波名
-    legend.get_frame().set_edgecolor('black')  # 设置图例边框颜色为黑色
-    ax.axvline(x=LOC_CREST, color='gray', linestyle='--', linewidth=1.2)  # 绘制坡顶参考竖线
-    ax.axvline(x=LOC_TOE, color='gray', linestyle='--', linewidth=1.2)  # 绘制坡脚参考竖线
-    y0, y1 = ax.get_ylim()  # 读取当前纵轴范围用于放置文字
-    y_text = y0 + 0.05 * (y1 - y0)  # 计算标注文本的纵坐标
-    ax.text(LOC_CREST + 0.1, y_text, '坡顶', fontsize=12, verticalalignment='bottom', fontproperties=CN_FONT)  # 标注坡顶文字
-    ax.text(LOC_TOE + 0.1, y_text, '坡底', fontsize=12, verticalalignment='bottom', fontproperties=CN_FONT)  # 标注坡底文字
-    ax.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.3)  # 启用浅灰网格线
-    ax.tick_params(direction='in', top=True, right=True, labelsize=11)  # 设置刻度朝内并显示上右刻度
+    ax.set_ylim(0.5, 3.0)  # 固定纵轴范围为 0.5 到 3.0 以匹配参考图
+    ax.set_yticks(np.arange(0.5, 3.1, 0.5))  # 固定纵轴刻度间距为 0.5
+    ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))  # 设置纵轴数值格式保留一位小数
+    ax.axvline(x=LOC_CREST, color='black', linestyle='--', linewidth=1.0)  # 绘制坡顶位置的黑色虚线
+    ax.axvline(x=toe_x, color='black', linestyle='--', linewidth=1.0)  # 绘制按坡角计算的坡脚位置黑色虚线
+    text_y = 0.56  # 设置中文标注的统一纵坐标位置
+    ax.text(LOC_CREST + 0.06, text_y, '坡顶', fontsize=11, fontproperties=CN_FONT, va='bottom')  # 在坡顶虚线旁标注“坡顶”
+    ax.text(toe_x + 0.06, text_y, '坡脚', fontsize=11, fontproperties=CN_FONT, va='bottom')  # 在坡脚虚线旁标注“坡脚”
+    ax.grid(True, linestyle=(0, (3, 3)), linewidth=0.8, color='#d0d0d0')  # 设置浅灰短虚线网格以贴近示意图
+    ax.tick_params(direction='in', top=True, right=True, labelsize=12)  # 设置刻度朝内并显示上右刻度
 
 
-# 将单波 TAF 两分量曲线绘图并保存合并图与单图。
+# 将单波 TAF 水平分量曲线绘图并保存单图。
 def plot_and_save_taf(taf_df, motion_name, output_dir):
     plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局英文默认字体为 Times 风格
     plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX 以匹配 Times 风格
     plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示问题
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)  # 创建两列子图用于水平与竖向 TAF
-    axes = axes.flatten()  # 拉平子图数组以便循环处理
+    fig, ax = plt.subplots(1, 1, figsize=(4.0, 3.6), squeeze=False)  # 创建单子图用于水平向 TAF
+    ax = ax.flatten()[0]  # 提取单个坐标轴对象
     x_h = taf_df['x/h'].to_numpy(dtype=float)  # 提取横坐标数组
     taf_h = taf_df['TAF_h'].to_numpy(dtype=float)  # 提取水平向 TAF 数组
-    taf_v = taf_df['TAF_v'].to_numpy(dtype=float)  # 提取竖向 TAF 数组
-    plot_taf_component(axes[0], x_h, taf_h, 'TAF_h', motion_name)  # 绘制水平向 TAF 子图
-    plot_taf_component(axes[1], x_h, taf_v, 'TAF_v', motion_name)  # 绘制竖向 TAF 子图
+    plot_taf_horizontal(ax, x_h, taf_h)  # 按参考图样式绘制水平向 TAF 子图
     plt.tight_layout()  # 自动调整子图布局避免遮挡
     angle_text = str(int(INCIDENT_ANGLE)) if float(INCIDENT_ANGLE).is_integer() else str(INCIDENT_ANGLE)  # 生成用于命名的角度文本
-    combined_name = f'TAF_{motion_name}_both_angle{angle_text}.png'  # 定义合并图文件名
-    combined_path = os.path.join(output_dir, combined_name)  # 组装合并图完整路径
-    fig.savefig(combined_path, dpi=300, bbox_inches='tight')  # 保存合并图并使用紧凑裁边
-    fig.canvas.draw()  # 先渲染画布以获取准确子图边界
-    renderer = fig.canvas.get_renderer()  # 获取画布渲染器用于边界计算
-    for ax, comp in zip(axes, ['TAF_h', 'TAF_v']):  # 逐个子图保存单图
-        bbox = ax.get_tightbbox(renderer).transformed(fig.dpi_scale_trans.inverted())  # 计算当前子图的紧边界
-        single_name = f'TAF_{motion_name}_{comp}_angle{angle_text}.png'  # 定义单图文件名
-        single_path = os.path.join(output_dir, single_name)  # 组装单图完整路径
-        fig.savefig(single_path, dpi=300, bbox_inches=bbox)  # 按子图边界裁剪后保存单图
-    plt.close(fig)  # 关闭图对象释放内存
-
-
-# 绘制归一化前后 PGA 对比图以便检查插值效果。
-def plot_and_save_pga_compare(raw_normal_df, raw_flat_df, norm_normal_df, norm_flat_df, motion_name, output_dir):
-    plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局英文默认字体为 Times 风格
-    plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX 以匹配 Times 风格
-    plt.rcParams['axes.unicode_minus'] = False  # 修复负号显示问题
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4), squeeze=False)  # 创建两列子图用于水平与竖向 PGA 对比
-    axes = axes.flatten()  # 拉平子图数组以便统一处理
-    comp_map = [('PGA_h', '水平向峰值加速度 ah,max (g)'), ('PGA_v', '竖向峰值加速度 av,max (g)')]  # 定义分量与纵轴标签映射
-    for ax, (comp, ylabel_text) in zip(axes, comp_map):  # 遍历两个分量绘制对比曲线
-        x_raw_slope = raw_normal_df['x/h'].to_numpy(dtype=float)  # 提取坡地原始横坐标
-        y_raw_slope = raw_normal_df[comp].to_numpy(dtype=float)  # 提取坡地原始分量数据
-        x_raw_flat = raw_flat_df['x/h'].to_numpy(dtype=float)  # 提取平地原始横坐标
-        y_raw_flat = raw_flat_df[comp].to_numpy(dtype=float)  # 提取平地原始分量数据
-        x_norm_slope = norm_normal_df['x/h'].to_numpy(dtype=float)  # 提取坡地归一化横坐标
-        y_norm_slope = norm_normal_df[comp].to_numpy(dtype=float)  # 提取坡地归一化分量数据
-        x_norm_flat = norm_flat_df['x/h'].to_numpy(dtype=float)  # 提取平地归一化横坐标
-        y_norm_flat = norm_flat_df[comp].to_numpy(dtype=float)  # 提取平地归一化分量数据
-        ax.plot(x_raw_slope, y_raw_slope, color='#1f77b4', linestyle='--', linewidth=1.1, alpha=0.9, label='坡地-原始')  # 绘制坡地原始曲线
-        ax.plot(x_norm_slope, y_norm_slope, color='#1f77b4', linestyle='-', linewidth=1.6, alpha=0.95, label='坡地-归一化')  # 绘制坡地归一化曲线
-        ax.plot(x_raw_flat, y_raw_flat, color='#ff7f0e', linestyle='--', linewidth=1.1, alpha=0.9, label='平地-原始')  # 绘制平地原始曲线
-        ax.plot(x_norm_flat, y_norm_flat, color='#ff7f0e', linestyle='-', linewidth=1.6, alpha=0.95, label='平地-归一化')  # 绘制平地归一化曲线
-        component_text = '水平向' if comp == 'PGA_h' else '竖向'  # 将分量代码映射为中文分量名
-        ax.set_title(f'入射角 θs = {INCIDENT_ANGLE}°（{component_text}）', fontsize=14, fontproperties=CN_FONT)  # 设置子图标题
-        ax.set_xlabel('x/h', fontsize=12, fontproperties=EN_FONT)  # 设置横轴标签
-        ax.set_ylabel(ylabel_text, fontsize=12, fontproperties=CN_FONT)  # 设置纵轴标签
-        ax.set_xlim(0, 8)  # 固定横轴范围为 0 到 8
-        ax.set_xticks(np.arange(0, 9, 1))  # 固定横轴主刻度为整数刻度
-        y_all = np.concatenate([y_raw_slope, y_norm_slope, y_raw_flat, y_norm_flat])  # 聚合当前分量全部曲线值用于自适应纵轴
-        y_valid = y_all[np.isfinite(y_all)]  # 过滤非有限值以防止纵轴异常
-        if y_valid.size > 0:  # 若存在有效数据则根据范围设置纵轴
-            y_min = float(np.min(y_valid))  # 计算有效数据最小值
-            y_max = float(np.max(y_valid))  # 计算有效数据最大值
-            y_span = max(y_max - y_min, 1e-3)  # 计算纵向跨度并设置最小值防止零跨度
-            ax.set_ylim(y_min - 0.08 * y_span, y_max + 0.12 * y_span)  # 添加上下边距后设置纵轴范围
-        ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.2f'))  # 设置纵轴数值格式保留两位小数
-        legend = ax.legend(loc='upper right', frameon=True, fontsize=9, prop=CN_FONT, title=motion_name, title_fontproperties=CN_FONT)  # 添加图例并显示波名
-        legend.get_frame().set_edgecolor('black')  # 设置图例边框颜色为黑色
-        ax.axvline(x=LOC_CREST, color='gray', linestyle='--', linewidth=1.2)  # 绘制坡顶参考竖线
-        ax.axvline(x=LOC_TOE, color='gray', linestyle='--', linewidth=1.2)  # 绘制坡脚参考竖线
-        y0, y1 = ax.get_ylim()  # 读取当前纵轴范围用于放置文字
-        y_text = y0 + 0.05 * (y1 - y0)  # 计算标注文本纵坐标
-        ax.text(LOC_CREST + 0.1, y_text, '坡顶', fontsize=12, verticalalignment='bottom', fontproperties=CN_FONT)  # 标注坡顶文字
-        ax.text(LOC_TOE + 0.1, y_text, '坡底', fontsize=12, verticalalignment='bottom', fontproperties=CN_FONT)  # 标注坡底文字
-        ax.grid(True, linestyle='-', linewidth=0.5, color='gray', alpha=0.3)  # 启用浅灰网格线
-        ax.tick_params(direction='in', top=True, right=True, labelsize=11)  # 设置刻度朝内并显示上右刻度
-    plt.tight_layout()  # 自动调整子图布局避免遮挡
-    angle_text = str(int(INCIDENT_ANGLE)) if float(INCIDENT_ANGLE).is_integer() else str(INCIDENT_ANGLE)  # 生成用于命名的角度文本
-    compare_name = f'PGA_compare_{motion_name}_angle{angle_text}.png'  # 定义归一化前后对比图文件名
-    compare_path = os.path.join(output_dir, compare_name)  # 组装对比图完整路径
-    fig.savefig(compare_path, dpi=300, bbox_inches='tight')  # 保存对比图并使用紧凑裁边
+    output_name = f'TAF-{motion_name}-horizontal-angle{angle_text}.png'  # 定义水平向 TAF 输出文件名
+    output_path = os.path.join(output_dir, output_name)  # 组装水平向 TAF 图像完整路径
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')  # 保存水平向 TAF 图像并使用紧凑裁边
     plt.close(fig)  # 关闭图对象释放内存
 
 
@@ -288,7 +250,6 @@ def main():
         flat_norm_file = os.path.join(SCRIPT_DIR, f'{flat_stem}-normalized.csv')  # 生成 flat 归一化输出文件名
         normal_norm_df.to_csv(normal_norm_file, index=False, encoding='utf-8-sig')  # 保存 normal 归一化数据为 CSV
         flat_norm_df.to_csv(flat_norm_file, index=False, encoding='utf-8-sig')  # 保存 flat 归一化数据为 CSV
-        plot_and_save_pga_compare(normal_df, flat_df, normal_norm_df, flat_norm_df, motion_name, SCRIPT_DIR)  # 绘制并保存归一化前后 PGA 对比图
         taf_df = compute_taf_dataframe(normal_norm_df, flat_norm_df)  # 计算当前波的 TAF 数据
         taf_file = os.path.join(SCRIPT_DIR, f'TAF-{motion_name}.csv')  # 生成 TAF 输出文件名并确保以 TAF 开头
         taf_df.to_csv(taf_file, index=False, encoding='utf-8-sig')  # 保存 TAF 结果到 CSV

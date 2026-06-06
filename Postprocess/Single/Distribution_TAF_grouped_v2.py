@@ -2,7 +2,6 @@
 """按相同 h 与 i 聚合不同 angle 的 TAF-El_Centro 曲线并绘制对比图。"""  # 说明脚本用途
 import os  # 导入 os 用于路径处理与目录遍历
 import re  # 导入 re 用于解析文件夹名中的参数
-import sys  # 导入 sys 用于读取命令行参数
 import math  # 导入 math 用于计算坡脚归一化坐标
 import pandas as pd  # 导入 pandas 用于读取 CSV 数据
 import numpy as np  # 导入 numpy 用于数值与刻度生成
@@ -13,7 +12,7 @@ import matplotlib.font_manager as fm  # 导入字体管理器用于中英文字�
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本目录
 WORK_ROOT = SCRIPT_DIR  # 定义输入与输出统一使用脚本当前目录
 TARGET_FILENAME = 'TAF-El_Centro.csv'  # 定义每个算例目录中目标 CSV 文件名
-OUTPUT_FIG_DIR_NAME = 'TAF_grouped_figures_v2'  # 定义分组图统一输出子目录名
+OUTPUT_FIG_DIR_NAME = '1-TAF_grouped'  # 定义分组图统一输出子目录名
 LOC_CREST = 3.0  # 定义坡顶归一化位置
 DEFAULT_TOE = 4.0  # 定义坡脚默认归一化位置
 ANGLE_STYLES = {  # 定义 angle 与颜色线型映射字典
@@ -23,6 +22,9 @@ ANGLE_STYLES = {  # 定义 angle 与颜色线型映射字典
     30: {'color': '#d62728', 'linestyle': '-', 'linewidth': 1.5, 'label': '30°'},  # 定义 30° 为红色实线
 }  # 结束 angle 样式映射定义
 CASE_PATTERN = re.compile(r'h(?P<h>-?\d+(?:\.\d+)?)_i(?P<i>-?\d+(?:\.\d+)?)_angle(?P<angle>-?\d+(?:\.\d+)?)')  # 定义参数文件夹名解析正则
+H_PATTERN = re.compile(r'(^|[^0-9A-Za-z])h(?P<value>-?\d+(?:\.\d+)?)(?=$|[^0-9A-Za-z])', re.IGNORECASE)  # 定义 h 参数独立匹配正则
+I_PATTERN = re.compile(r'(^|[^0-9A-Za-z])i(?P<value>-?\d+(?:\.\d+)?)(?=$|[^0-9A-Za-z])', re.IGNORECASE)  # 定义 i 参数独立匹配正则
+ANGLE_PATTERN = re.compile(r'(^|[^0-9A-Za-z])angle(?P<value>-?\d+(?:\.\d+)?)(?=$|[^0-9A-Za-z])', re.IGNORECASE)  # 定义 angle 参数独立匹配正则
 def build_font_properties():  # 定义构建中英文字体属性的函数
     cn_candidates = ['SimSun', 'NSimSun', 'Microsoft YaHei', 'SimHei']  # 定义中文字体候选列表
     en_candidates = ['Times New Roman', 'Times New Roman PS MT', 'Times']  # 定义英文字体候选列表
@@ -52,12 +54,14 @@ def compute_toe_location_from_angle(slope_angle_deg):  # 定义根据坡角计�
         return DEFAULT_TOE  # 返回默认坡脚位置
     return LOC_CREST + 1.0 / tan_value  # 按几何关系计算坡脚归一化坐标
 def parse_case_folder(folder_name):  # 定义解析参数文件夹名的函数
-    match = CASE_PATTERN.search(folder_name)  # 在文件夹名中匹配 h、i、angle 参数
-    if not match:  # 判断是否匹配失败
+    h_match = H_PATTERN.search(folder_name)  # 在文件夹名中独立匹配 h 参数
+    i_match = I_PATTERN.search(folder_name)  # 在文件夹名中独立匹配 i 参数
+    angle_match = ANGLE_PATTERN.search(folder_name)  # 在文件夹名中独立匹配 angle 参数
+    if not (h_match and i_match and angle_match):  # 判断是否存在任一参数匹配失败
         return None  # 返回空值表示不是目标参数文件夹
-    h_value = float(match.group('h'))  # 读取 h 参数并转换为浮点数
-    i_value = float(match.group('i'))  # 读取 i 参数并转换为浮点数
-    angle_value = float(match.group('angle'))  # 读取 angle 参数并转换为浮点数
+    h_value = float(h_match.group('value'))  # 读取 h 参数并转换为浮点数
+    i_value = float(i_match.group('value'))  # 读取 i 参数并转换为浮点数
+    angle_value = float(angle_match.group('value'))  # 读取 angle 参数并转换为浮点数
     return h_value, i_value, angle_value  # 返回解析得到的参数元组
 def collect_taf_records(batch_root):  # 定义收集 TAF-El_Centro 数据记录的函数
     records = []  # 初始化记录列表
@@ -96,11 +100,19 @@ def load_taf_dataframe(csv_path):  # 定义读取单个 TAF CSV 的函数
     df = df.sort_values(by='x/h')  # 按 x/h 升序排序以保证曲线顺序正确
     return df  # 返回清洗后的数据表
 def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘制同 h、i 下多角度曲线的函数
-    plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局英文字体族为 Times 风格
-    plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
-    plt.rcParams['axes.unicode_minus'] = False  # 修复坐标轴负号显示
-    fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0), squeeze=False)  # 创建单子图画布
-    ax = ax.flatten()[0]  # 提取单个坐标轴对象
+    # 重用绘图配置并在传入的单独画布上绘制（由 draw_group_on_axis 实现）
+    fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0))  # 创建单图画布
+    draw_group_on_axis(ax, h_value, i_value, group_items)  # 在当前轴上绘制曲线
+    title_h = format_value_text(h_value)  # 格式化标题中的 h 文本
+    title_i = format_value_text(i_value)  # 格式化标题中的 i 文本
+    output_name = f'TAF-El_Centro-h{title_h}-i{title_i}-angles.png'  # 组装当前分组输出图片文件名
+    output_path = os.path.join(output_dir, output_name)  # 组装当前分组输出图片完整路径
+    fig.savefig(output_path, dpi=300, bbox_inches='tight')  # 保存图像到输出目录
+    plt.close(fig)  # 关闭图对象释放内存
+    print(f'已输出: {output_path}')  # 输出当前图像保存结果
+
+
+def draw_group_on_axis(ax, h_value, i_value, group_items):  # 在指定轴上绘制单组曲线的函数
     ax.set_facecolor('#f2f2f2')  # 设置子图背景为浅灰色
     plotted_count = 0  # 初始化已绘制曲线计数器
     for item in group_items:  # 遍历当前分组中的各 angle 记录
@@ -115,14 +127,13 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
         ax.plot(x_values, y_values, color=style['color'], linestyle=style['linestyle'], linewidth=style['linewidth'], label=style['label'])  # 按指定颜色与线型绘制曲线
         plotted_count += 1  # 累加已绘制曲线数量
     if plotted_count == 0:  # 判断当前分组是否没有可绘制曲线
-        plt.close(fig)  # 关闭图对象释放内存
         raise ValueError(f'h={h_value}, i={i_value} 组没有可用的 angle 曲线。')  # 抛出无可绘制曲线错误
     toe_x = compute_toe_location_from_angle(i_value)  # 根据坡角计算坡脚位置
     title_h = format_value_text(h_value)  # 格式化标题中的 h 文本
     title_i = format_value_text(i_value)  # 格式化标题中的 i 文本
-    ax.set_title(f'h = {title_h}m, i = {title_i}°', fontsize=18, fontproperties=EN_FONT, pad=4)  # 设置标题样式与文本
-    ax.set_xlabel('x/h', fontsize=10, fontproperties=EN_FONT, fontstyle='italic')  # 设置横轴标签样式
-    ax.set_ylabel('TAF', fontsize=10, fontproperties=EN_FONT)  # 设置纵轴标签样式
+    ax.set_title(f'h = {title_h}m, i = {title_i}°', fontsize=12, fontproperties=EN_FONT, pad=4)  # 设置标题样式与文本（较小字号以适配汇总图）
+    ax.set_xlabel('x/h', fontsize=8, fontproperties=EN_FONT, fontstyle='italic')  # 设置横轴标签样式
+    ax.set_ylabel('TAF', fontsize=8, fontproperties=EN_FONT)  # 设置纵轴标签样式
     ax.set_xlim(0, 8)  # 固定横轴范围为 0 到 8
     ax.set_xticks(np.arange(0, 9, 1))  # 设置横轴整数刻度
     ax.set_ylim(0.5, 3.0)  # 固定纵轴范围为 0.5 到 3.0
@@ -131,20 +142,81 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
     ax.axvline(x=LOC_CREST, color='black', linestyle='--', linewidth=1.0)  # 绘制坡顶位置虚线
     ax.axvline(x=toe_x, color='black', linestyle='--', linewidth=1.0)  # 绘制坡脚位置虚线
     text_y = 2.92  # 设置中文标注位于图上部的统一高度
-    ax.text(LOC_CREST - 0.06, text_y, '坡顶', fontsize=11, fontproperties=CN_FONT, va='top', ha='right')  # 在坡顶虚线左侧上部添加“坡顶”标注
-    ax.text(toe_x + 0.06, text_y, '坡脚', fontsize=11, fontproperties=CN_FONT, va='top', ha='left')  # 在坡脚虚线右侧上部添加“坡脚”标注
-    ax.grid(True, linestyle=(0, (3, 3)), linewidth=0.8, color='#d0d0d0')  # 设置浅灰短虚线网格
-    ax.tick_params(direction='in', top=True, right=True, labelsize=12)  # 设置刻度朝内并显示上右刻度
-    ax.legend(loc='upper right', frameon=True, edgecolor='#666666', prop=EN_FONT, fontsize=10)  # 设置角度图例位置与样式
-    plt.tight_layout()  # 自动调整布局避免元素遮挡
-    output_name = f'TAF-El_Centro-h{title_h}-i{title_i}-angles.png'  # 组装当前分组输出图片文件名
-    output_path = os.path.join(output_dir, output_name)  # 组装当前分组输出图片完整路径
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')  # 保存图像到输出目录
+    ax.text(LOC_CREST - 0.06, text_y, '坡顶', fontsize=9, fontproperties=CN_FONT, va='top', ha='right')  # 在坡顶虚线左侧上部添加“坡顶”标注
+    ax.text(toe_x + 0.06, text_y, '坡脚', fontsize=9, fontproperties=CN_FONT, va='top', ha='left')  # 在坡脚虚线右侧上部添加“坡脚”标注
+    ax.grid(True, linestyle=(0, (3, 3)), linewidth=0.6, color='#d0d0d0')  # 设置浅灰短虚线网格
+    ax.tick_params(direction='in', top=True, right=True, labelsize=8)  # 设置刻度朝内并显示上右刻度
+    ax.legend(loc='upper right', frameon=True, edgecolor='#666666', prop=EN_FONT, fontsize=8)  # 设置角度图例位置与样式
+
+
+def plot_summary_figure(grouped, output_dir, cols=4, include_groups=None):  # 定义生成汇总多子图的函数
+    # include_groups: 可选列表，按顺序包含要绘制的 (h, i) 组合（例如 [(50,30),(50,45),...]）
+    items_all = sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1]))  # 按 h 与 i 排序
+    if include_groups:  # 若传入包含列表，则按该顺序筛选存在的分组
+        items = []
+        for h_i in include_groups:  # 按用户指定顺序遍历
+            key = (float(h_i[0]), float(h_i[1]))
+            if key in grouped:
+                items.append((key, grouped[key]))
+            else:
+                print(f'警告：未找到分组 h={key[0]}, i={key[1]}，已跳过。')
+    else:
+        items = items_all
+    n = len(items)  # 子图数量
+    if n == 0:  # 若无子图则直接返回
+        return
+    rows = math.ceil(n / cols)  # 计算行数
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.0, rows * 4.0))  # 创建子图网格
+    ax_list = np.array(axes).reshape(-1)  # 扁平化轴列表
+    for idx, ((h_value, i_value), group_items) in enumerate(items):  # 遍历每个分组并绘制至对应子图
+        ax = ax_list[idx]  # 选择对应轴
+        try:
+            draw_group_on_axis(ax, h_value, i_value, group_items)  # 在轴上绘制
+        except Exception as exc:  # 若单个子图出错则在该轴写明错误信息
+            ax.text(0.5, 0.5, f'错误: {exc}', ha='center', va='center', fontsize=8)
+            ax.set_axis_off()
+    # 隐藏多余轴
+    for j in range(n, len(ax_list)):
+        ax_list[j].set_visible(False)
+    plt.tight_layout()  # 自动布局
+    summary_name = 'TAF-El_Centro-summary.png'  # 汇总图文件名
+    summary_path = os.path.join(output_dir, summary_name)  # 汇总图完整路径
+    fig.savefig(summary_path, dpi=300, bbox_inches='tight')  # 保存汇总图
     plt.close(fig)  # 关闭图对象释放内存
-    print(f'已输出: {output_path}')  # 输出当前图像保存结果
+    print(f'已输出汇总图: {summary_path}')  # 输出汇总图保存结果
+    return summary_path
+
+
+def save_aggregated_csv(grouped, output_dir, filename='TAF-El_Centro-all.csv'):
+    """将用于绘图的所有 TAF 数据汇总为单个 CSV 并保存到输出目录。
+    只包含脚本实际绘制的角度（由 ANGLE_STYLES 指定）。
+    """
+    rows = []  # 用于收集每个子表的列表
+    for (h_value, i_value), items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        for item in items:
+            angle_int = int(round(item['angle']))
+            if angle_int not in ANGLE_STYLES:  # 仅收集将被绘制的角度
+                continue
+            try:
+                df = load_taf_dataframe(item['csv_path'])  # 读取 CSV
+            except Exception as exc:
+                print(f'警告：读取 {item["csv_path"]} 失败，已跳过 -> {exc}')
+                continue
+            df2 = df.copy()
+            df2.insert(0, 'angle', angle_int)
+            df2.insert(0, 'i', float(i_value))
+            df2.insert(0, 'h', float(h_value))
+            df2['folder'] = os.path.basename(item['folder'])  # 记录所属文件夹名
+            df2['csv_path'] = item['csv_path']  # 记录原始 CSV 路径
+            rows.append(df2)
+    if not rows:
+        raise FileNotFoundError('未找到任何要汇总的 TAF 数据（请确认目录与角度设置）。')
+    all_df = pd.concat(rows, ignore_index=True)
+    out_path = os.path.join(output_dir, filename)
+    all_df.to_csv(out_path, index=False)
+    print(f'已保存汇总CSV: {out_path}')
+    return out_path
 def main():  # 定义主函数
-    if len(sys.argv) > 1:  # 判断是否传入了额外命令行参数
-        print('提示：该脚本固定使用当前目录，已忽略命令行目录参数。')  # 输出忽略参数提示
     batch_root = WORK_ROOT  # 设置批处理根目录为脚本当前目录
     if not os.path.isdir(batch_root):  # 判断当前目录是否存在
         raise NotADirectoryError(f'当前目录不存在: {batch_root}')  # 抛出目录不存在错误
@@ -153,7 +225,19 @@ def main():  # 定义主函数
         os.makedirs(output_dir, exist_ok=True)  # 创建统一图片输出目录
     records = collect_taf_records(batch_root)  # 从当前目录收集所有有效算例记录
     grouped = group_records_by_hi(records)  # 按 h 与 i 对记录进行分组
+    # 先保存汇总CSV，便于后续分析（只包含将被绘制的角度）
+    try:
+        save_aggregated_csv(grouped, output_dir)
+    except Exception as exc:
+        print(f'警告：保存汇总CSV失败 -> {exc}')
     for (h_value, i_value), group_items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):  # 按 h 与 i 升序遍历分组
         plot_group_curves(h_value, i_value, group_items, output_dir)  # 对当前分组绘图并保存到统一图片输出目录
+    # 生成一张汇总图，按若干列排列所有子图并保存
+    try:
+        # 仅生成与示例图相同的八个组合（按示例顺序）
+        include = [(50, 30), (50, 45), (200, 45), (200, 60), (100, 30), (100, 45), (400, 45), (400, 60)]
+        plot_summary_figure(grouped, output_dir, cols=4, include_groups=include)  # 生成并保存汇总图，仅包含指定组合
+    except Exception as exc:  # 捕获汇总图生成错误但不影响已输出的单图
+        print(f'警告：生成汇总图失败 -> {exc}')  # 输出警告信息
 if __name__ == '__main__':  # 判断是否作为主脚本直接运行
     main()  # 调用主函数执行流程

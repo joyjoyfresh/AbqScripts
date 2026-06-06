@@ -11,16 +11,16 @@ matplotlib.use('Agg')  # 设置无界面后端避免脚本运行时弹窗
 import matplotlib.pyplot as plt  # 导入 pyplot 用于绘图
 import matplotlib.font_manager as fm  # 导入字体管理器用于中英文字体配置
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # 记录当前脚本目录
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # 记录项目根目录
-DEFAULT_BATCH_ROOT = os.path.join(PROJECT_ROOT, 'Batch')  # 定义默认批处理结果目录
+WORK_ROOT = SCRIPT_DIR  # 定义输入与输出统一使用脚本当前目录
 TARGET_FILENAME = 'TAF-El_Centro.csv'  # 定义每个算例目录中目标 CSV 文件名
+OUTPUT_FIG_DIR_NAME = 'TAF_grouped_figures_v2'  # 定义分组图统一输出子目录名
 LOC_CREST = 3.0  # 定义坡顶归一化位置
 DEFAULT_TOE = 4.0  # 定义坡脚默认归一化位置
 ANGLE_STYLES = {  # 定义 angle 与颜色线型映射字典
-    0: {'color': '#800080', 'linestyle': ':', 'linewidth': 1.6, 'label': '0°'},  # 定义 0° 为紫色点线
-    10: {'color': '#2ca02c', 'linestyle': (0, (4, 2)), 'linewidth': 1.6, 'label': '10°'},  # 定义 10° 为绿色短虚线
-    20: {'color': '#1f77b4', 'linestyle': (0, (10, 4)), 'linewidth': 1.6, 'label': '20°'},  # 定义 20° 为蓝色长虚线
-    30: {'color': '#d62728', 'linestyle': '-', 'linewidth': 1.6, 'label': '30°'},  # 定义 30° 为红色实线
+    0: {'color': '#800080', 'linestyle': ':', 'linewidth': 1.5, 'label': '0°'},  # 定义 0° 为紫色点线
+    10: {'color': '#2ca02c', 'linestyle': (0, (4, 2)), 'linewidth': 1.5, 'label': '10°'},  # 定义 10° 为绿色短虚线
+    20: {'color': '#1f77b4', 'linestyle': (0, (6, 3)), 'linewidth': 1.5, 'label': '20°'},  # 定义 20° 为蓝色长虚线
+    30: {'color': '#d62728', 'linestyle': '-', 'linewidth': 1.5, 'label': '30°'},  # 定义 30° 为红色实线
 }  # 结束 angle 样式映射定义
 CASE_PATTERN = re.compile(r'h(?P<h>-?\d+(?:\.\d+)?)_i(?P<i>-?\d+(?:\.\d+)?)_angle(?P<angle>-?\d+(?:\.\d+)?)')  # 定义参数文件夹名解析正则
 def build_font_properties():  # 定义构建中英文字体属性的函数
@@ -99,7 +99,7 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
     plt.rcParams['font.family'] = ['Times New Roman', 'serif']  # 设置全局英文字体族为 Times 风格
     plt.rcParams['mathtext.fontset'] = 'stix'  # 设置数学字体为 STIX
     plt.rcParams['axes.unicode_minus'] = False  # 修复坐标轴负号显示
-    fig, ax = plt.subplots(1, 1, figsize=(4.0, 3.6), squeeze=False)  # 创建单子图画布
+    fig, ax = plt.subplots(1, 1, figsize=(4.0, 4.0), squeeze=False)  # 创建单子图画布
     ax = ax.flatten()[0]  # 提取单个坐标轴对象
     ax.set_facecolor('#f2f2f2')  # 设置子图背景为浅灰色
     plotted_count = 0  # 初始化已绘制曲线计数器
@@ -120,9 +120,9 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
     toe_x = compute_toe_location_from_angle(i_value)  # 根据坡角计算坡脚位置
     title_h = format_value_text(h_value)  # 格式化标题中的 h 文本
     title_i = format_value_text(i_value)  # 格式化标题中的 i 文本
-    ax.set_title(f'h = {title_h}m, i = {title_i}°', fontsize=14, fontproperties=EN_FONT, pad=8)  # 设置标题样式与文本
-    ax.set_xlabel('x/h', fontsize=16, fontproperties=EN_FONT, fontstyle='italic')  # 设置横轴标签样式
-    ax.set_ylabel('TAF', fontsize=16, fontproperties=EN_FONT)  # 设置纵轴标签样式
+    ax.set_title(f'h = {title_h}m, i = {title_i}°', fontsize=18, fontproperties=EN_FONT, pad=4)  # 设置标题样式与文本
+    ax.set_xlabel('x/h', fontsize=10, fontproperties=EN_FONT, fontstyle='italic')  # 设置横轴标签样式
+    ax.set_ylabel('TAF', fontsize=10, fontproperties=EN_FONT)  # 设置纵轴标签样式
     ax.set_xlim(0, 8)  # 固定横轴范围为 0 到 8
     ax.set_xticks(np.arange(0, 9, 1))  # 设置横轴整数刻度
     ax.set_ylim(0.5, 3.0)  # 固定纵轴范围为 0.5 到 3.0
@@ -130,9 +130,9 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
     ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))  # 设置纵轴数字显示为一位小数
     ax.axvline(x=LOC_CREST, color='black', linestyle='--', linewidth=1.0)  # 绘制坡顶位置虚线
     ax.axvline(x=toe_x, color='black', linestyle='--', linewidth=1.0)  # 绘制坡脚位置虚线
-    text_y = 0.56  # 设置中文标注统一高度
-    ax.text(LOC_CREST + 0.06, text_y, '坡顶', fontsize=11, fontproperties=CN_FONT, va='bottom')  # 在坡顶虚线旁添加“坡顶”标注
-    ax.text(toe_x + 0.06, text_y, '坡脚', fontsize=11, fontproperties=CN_FONT, va='bottom')  # 在坡脚虚线旁添加“坡脚”标注
+    text_y = 2.92  # 设置中文标注位于图上部的统一高度
+    ax.text(LOC_CREST - 0.06, text_y, '坡顶', fontsize=11, fontproperties=CN_FONT, va='top', ha='right')  # 在坡顶虚线左侧上部添加“坡顶”标注
+    ax.text(toe_x + 0.06, text_y, '坡脚', fontsize=11, fontproperties=CN_FONT, va='top', ha='left')  # 在坡脚虚线右侧上部添加“坡脚”标注
     ax.grid(True, linestyle=(0, (3, 3)), linewidth=0.8, color='#d0d0d0')  # 设置浅灰短虚线网格
     ax.tick_params(direction='in', top=True, right=True, labelsize=12)  # 设置刻度朝内并显示上右刻度
     ax.legend(loc='upper right', frameon=True, edgecolor='#666666', prop=EN_FONT, fontsize=10)  # 设置角度图例位置与样式
@@ -143,13 +143,17 @@ def plot_group_curves(h_value, i_value, group_items, output_dir):  # 定义绘�
     plt.close(fig)  # 关闭图对象释放内存
     print(f'已输出: {output_path}')  # 输出当前图像保存结果
 def main():  # 定义主函数
-    batch_root = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BATCH_ROOT  # 读取命令行目录参数并在缺省时使用默认目录
-    batch_root = os.path.abspath(batch_root)  # 标准化批处理目录为绝对路径
-    if not os.path.isdir(batch_root):  # 判断批处理目录是否存在
-        raise NotADirectoryError(f'批处理目录不存在: {batch_root}')  # 抛出目录不存在错误
-    records = collect_taf_records(batch_root)  # 收集所有有效算例记录
+    if len(sys.argv) > 1:  # 判断是否传入了额外命令行参数
+        print('提示：该脚本固定使用当前目录，已忽略命令行目录参数。')  # 输出忽略参数提示
+    batch_root = WORK_ROOT  # 设置批处理根目录为脚本当前目录
+    if not os.path.isdir(batch_root):  # 判断当前目录是否存在
+        raise NotADirectoryError(f'当前目录不存在: {batch_root}')  # 抛出目录不存在错误
+    output_dir = os.path.join(batch_root, OUTPUT_FIG_DIR_NAME)  # 组装统一图片输出目录路径
+    if not os.path.isdir(output_dir):  # 判断统一图片输出目录是否已存在
+        os.makedirs(output_dir, exist_ok=True)  # 创建统一图片输出目录
+    records = collect_taf_records(batch_root)  # 从当前目录收集所有有效算例记录
     grouped = group_records_by_hi(records)  # 按 h 与 i 对记录进行分组
     for (h_value, i_value), group_items in sorted(grouped.items(), key=lambda kv: (kv[0][0], kv[0][1])):  # 按 h 与 i 升序遍历分组
-        plot_group_curves(h_value, i_value, group_items, batch_root)  # 对当前分组绘图并保存到批处理目录
+        plot_group_curves(h_value, i_value, group_items, output_dir)  # 对当前分组绘图并保存到统一图片输出目录
 if __name__ == '__main__':  # 判断是否作为主脚本直接运行
     main()  # 调用主函数执行流程

@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import glob
+import re
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==========================================
 # 1. 配置文件路径与参数
@@ -10,8 +13,22 @@ import glob
 # 自动读取当前目录下的所有 CSV 文件
 CSV_GLOB_PATTERN = '*.csv'
 
-# 当前绘制的入射角度 (用于图表标题)
-INCIDENT_ANGLE = 0  
+# 当前绘制的入射角度 (用于图表标题): 从同目录 CAE 文件名解析 a 后数字
+# 例如: h100_i45_a0.cae -> INCIDENT_ANGLE = 0
+def parse_incident_angle_from_cae(script_dir):
+    cae_files = sorted(glob.glob(os.path.join(script_dir, '*.cae')))
+    if not cae_files:
+        raise FileNotFoundError('脚本目录下未找到 .cae 文件，无法自动解析入射角度。')
+
+    # 若有多个 CAE，默认取排序后的第一个
+    cae_name = os.path.splitext(os.path.basename(cae_files[0]))[0]
+    match = re.search(r'a(-?\d+(?:\.\d+)?)$', cae_name)
+    if not match:
+        raise ValueError(f"CAE 文件名 {cae_name}.cae 不符合要求，未找到末尾 'a' 后数字。")
+    return float(match.group(1))
+
+
+INCIDENT_ANGLE = parse_incident_angle_from_cae(SCRIPT_DIR)
 
 # 要绘制的 PGA 列：
 # 可选值：'PGA_h' (对应图12a), 'PGA_v' (对应图12b)
@@ -20,8 +37,8 @@ TARGET_COLUMNS = ['PGA_h', 'PGA_v']
 
 # 各分量的默认 Y 轴范围 (请按你的数据微调)
 YLIMS = {
-    'PGA_h': (0.40, 1.20),  # 如 30 度入射可改为 (0.40, 2.00)
-    'PGA_v': (0.00, 0.40),
+    'PGA_h': (0.2, 1.2),  
+    'PGA_v': (0.0, 0.4),
 }
 
 # 坡顶和坡脚的归一化横坐标位置 (h=100, i=45° 时为 3.0 和 4.0)
@@ -43,9 +60,10 @@ def load_pga_data(filepath, target_col):
 
 
 def collect_csv_files(pattern):
-    csv_files = sorted(glob.glob(pattern))
+    search_pattern = os.path.join(SCRIPT_DIR, pattern)
+    csv_files = sorted(glob.glob(search_pattern))
     if not csv_files:
-        raise FileNotFoundError(f"当前目录下未找到匹配 {pattern} 的 CSV 文件。")
+        raise FileNotFoundError(f"脚本目录下未找到匹配 {pattern} 的 CSV 文件。")
     return csv_files
 
 
@@ -62,14 +80,14 @@ def plot_component(ax, x_h, pga_series, component, labels):
     ax.plot(x_h, pga_mean, color='#d62728', linestyle='-', linewidth=2.0, label='mean value')
 
     # 标题与坐标轴标签
-    ax.set_title(rf'$\\theta_s = {INCIDENT_ANGLE}^\\circ$ ({component})', fontsize=14)
+    ax.set_title(rf'$\theta_s = {INCIDENT_ANGLE}^\circ$ ({component})', fontsize=14)
     ax.set_xlabel('$x/h$', fontsize=12)
 
     # 根据目标列设置 Y 轴标签
     if component == 'PGA_h':
-        ax.set_ylabel(r'$a_{h,max} \\ \rm{(g)}$', fontsize=12)
+        ax.set_ylabel(r'$a_{h,max}\,(\mathrm{g})$', fontsize=12)
     else:
-        ax.set_ylabel(r'$a_{v,max} \\ \rm{(g)}$', fontsize=12)
+        ax.set_ylabel(r'$a_{v,max}\,(\mathrm{g})$', fontsize=12)
 
     # 设置 X 轴范围和刻度 (固定为 0~8)
     ax.set_xlim(0, 8)

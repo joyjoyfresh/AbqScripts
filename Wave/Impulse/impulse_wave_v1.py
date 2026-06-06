@@ -1,88 +1,90 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-# 1. 参数定义
-P0 = 0.1   # 位移振幅 (m)
-T = 0.3    # 脉冲持续时间 (s)
-total_duration = 1.5 # 总绘图时长 (s)
+# ============================================================
+# 脉冲波（Impulse Wave）位移与速度时程
+#
+# 位移公式：
+#   P(tau) = 16*P0 * [G(tau) - 4*G(tau-1/4) + 6*G(tau-1/2)
+#                     - 4*G(tau-3/4) + G(tau-1)]
+#   其中 tau = t/T，G(tau) = tau^3 * H(tau)
+#
+# 速度由位移对时间求导得到：
+#   v(t) = dP/dt = (1/T) * dP/dtau
+# ============================================================
 
-# 2. 时间轴
-t = np.linspace(0, total_duration, 1500)
+# 参数定义
+P0 = 0.1   # 位移振幅 (m)
+T  = 0.3   # 脉冲持续时间 (s)
+total_duration = 1.5  # 总时长 (s)
+dt             = 0.001  # 时间步长 (s)
+
+# 时间轴：0, 0.001, 0.002, ..., 1.5（共 1501 点）
+num_points = int(total_duration / dt) + 1
+t   = np.linspace(0, total_duration, num_points)
 tau = t / T  # 归一化时间
 
-# 3. 定义函数
+# 基函数
 def H(x):
-    """Heaviside 阶跃函数"""
+    """Heaviside 单位阶跃函数"""
     return np.heaviside(x, 1.0)
 
-# G(tau) 用于计算位移
 def G(x):
-    return (x**3) * H(x)
+    """G(x) = x^3 * H(x)"""
+    return (x ** 3) * H(x)
 
-# G'(tau) 用于计算速度
-# G'(tau) = d/dtau (tau^3 * H(tau)) = 3*tau^2 * H(tau)
 def G_prime(x):
-    return 3 * (x**2) * H(x)
+    """G'(x) = 3*x^2 * H(x)"""
+    return 3 * (x ** 2) * H(x)
 
-# 4. 计算位移 P(t)
-# P(tau) = 16*P0 * Sum( c_i * G(tau - shift_i) )
-# 系数: 1, -4, 6, -4, 1
-# 偏移: 0, 0.25, 0.5, 0.75, 1.0
-poly_P = (G(tau) 
-            - 4*G(tau - 0.25) 
-            + 6*G(tau - 0.5) 
-            - 4*G(tau - 0.75) 
-            + G(tau - 1.0))
+# 二项式系数与偏移量
+coeffs  = [1, -4, 6, -4, 1]
+shifts  = [0, 0.25, 0.50, 0.75, 1.0]
+
+# 位移 P(t)
+poly_P = sum(c * G(tau - s) for c, s in zip(coeffs, shifts))
 P = 16 * P0 * poly_P
 
-# 5. 计算速度 v(t)
-# v(t) = (1/T) * 16*P0 * Sum( c_i * G'(tau - shift_i) )
-poly_V = (G_prime(tau) 
-            - 4*G_prime(tau - 0.25) 
-            + 6*G_prime(tau - 0.5) 
-            - 4*G_prime(tau - 0.75) 
-            + G_prime(tau - 1.0))
-
-# 注意系数 1/T 来自链式法则 dt = T * dtau
+# 速度 v(t) = dP/dt，链式法则引入 1/T
+poly_V = sum(c * G_prime(tau - s) for c, s in zip(coeffs, shifts))
 V = (16 * P0 / T) * poly_V
 
-# 6. 绘图
-plt.figure(figsize=(10, 8))
+# ============================================================
+# 绘图
+# ============================================================
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+fig.suptitle('Impulse Wave — Displacement & Velocity', fontsize=14)
 
-# 子图1: 位移
-plt.subplot(2, 1, 1)
-plt.plot(t, P, label=r'Displacement $P(t)$', color='#1f77b4', linewidth=2)
-plt.ylabel('Displacement (m)', fontsize=12)
-plt.title('Displacement and Velocity of Impulse', fontsize=14)
-plt.grid(True, linestyle='--', alpha=0.7)
-plt.axvline(T, color='red', linestyle=':', label='Pulse End ($T=0.3s$)')
-plt.legend(loc='upper right')
+# 位移
+ax1.plot(t, P, color='#1f77b4', linewidth=2, label=r'Displacement $P(t)$')
+ax1.axvline(T, color='red', linestyle=':', label=f'Pulse End ($T={T}$ s)')
+ax1.set_ylabel('Displacement (m)', fontsize=12)
+ax1.grid(True, linestyle='--', alpha=0.7)
+ax1.legend(loc='upper right')
 
-# 子图2: 速度
-plt.subplot(2, 1, 2)
-plt.plot(t, V, label=r'Velocity $v(t)$', color='#ff7f0e', linewidth=2)
-plt.xlabel('Time $t$ (s)', fontsize=12)
-plt.ylabel('Velocity (m/s)', fontsize=12)
-plt.grid(True, linestyle='--', alpha=0.7)
-plt.axvline(T, color='red', linestyle=':', label='Pulse End ($T=0.3s$)')
+# 速度
+ax2.plot(t, V, color='#ff7f0e', linewidth=2, label=r'Velocity $v(t)$')
+ax2.axvline(T, color='red', linestyle=':', label=f'Pulse End ($T={T}$ s)')
 
-# 标记速度的最大值和最小值
-v_max = np.max(V)
-v_min = np.min(V)
-t_max = t[np.argmax(V)]
-t_min = t[np.argmin(V)]
+# 标注速度极值
+for func, sign, offset in [(np.argmax, 1, +0.1), (np.argmin, -1, -0.4)]:
+    idx = func(V)
+    ax2.plot(t[idx], V[idx], 'ro', markersize=4)
+    label = f'{"Max" if sign > 0 else "Min"}: {V[idx]:.2f} m/s'
+    ax2.text(t[idx], V[idx] + offset, label, ha='center', fontsize=9)
 
-plt.plot(t_max, v_max, 'ro', markersize=4)
-plt.text(t_max, v_max + 0.1, f'Max: {v_max:.2f} m/s', ha='center', fontsize=9)
-plt.plot(t_min, v_min, 'ro', markersize=4)
-plt.text(t_min, v_min - 0.4, f'Min: {v_min:.2f} m/s', ha='center', fontsize=9)
-
-plt.legend(loc='upper right')
+ax2.set_xlabel('Time $t$ (s)', fontsize=12)
+ax2.set_ylabel('Velocity (m/s)', fontsize=12)
+ax2.grid(True, linestyle='--', alpha=0.7)
+ax2.legend(loc='upper right')
 
 plt.tight_layout()
 plt.show()
 
-
-# --- Save to TXT ---
+# ============================================================
+# 保存数据（时间 — 速度）
+# ============================================================
+output_path = r'C:\Users\12462\Documents\Master\Abaqus\Scripts\Seiswave\impulse_wave_v2.txt'
 data = np.column_stack((t, V))
-np.savetxt('C:\\Users\\12462\\Documents\\硕士\\2025科研\\模拟\\impulse_wave\\impulse_wave.txt', data, fmt='%.6f', delimiter='\t', comments='')
+np.savetxt(output_path, data, fmt='%.6f', delimiter='\t', comments='')
+print(f'Data saved to: {output_path}')
