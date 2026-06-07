@@ -232,6 +232,20 @@ COLUMNS = [  # 子图列定义：(数据键, 纵轴标签, 纵轴范围或None�
 ]
 GROUP_LETTERS = ['a', 'b', 'c', 'd', 'e', 'f']  # 宏观大组的子标签 (a)/(b)/...
 
+# 用户指定：只出 i=30 与 i=60 两个大组，且每组的水平/垂直 TAF 纵轴范围分别固定（无量纲）
+YLIM_BY_I = {  # 键=坡角 i(度)，值={分量键: (纵轴下限, 纵轴上限)}
+    30: {'taf_h': (0.5, 2.0), 'taf_v': (0.0, 1.0)},  # (a) i=30°：水平 0.5–2.0、垂直 0.0–1.0
+    60: {'taf_h': (0.5, 2.5), 'taf_v': (0.0, 1.2)},  # (b) i=60°：水平 0.5–2.5、垂直 0.0–1.2
+}
+
+
+def ylim_for(i_ang, key, cases):  # 取某 (坡角 i, 分量) 的纵轴范围
+    """优先用 YLIM_BY_I 指定的固定范围；该坡角/分量未指定时按数据自适应。"""
+    by_comp = YLIM_BY_I.get(int(round(i_ang)))  # 该坡角的固定范围表
+    if by_comp and key in by_comp:  # 命中用户指定范围
+        return by_comp[key]  # 返回固定 (下限, 上限)
+    return auto_ylim([c[key] for c in cases], None)  # 否则按数据自适应
+
 # ==============================================================================
 #  坐标轴样式（字体由 setup_cn_journal_style 经 rcParams 统一管理）
 # ==============================================================================
@@ -418,15 +432,15 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
 
     合成图与各子图统一输出到 out_dir/Fig8_TAF_compare/（子图在其下 panels/），见 save_composite_with_panels。
     """
-    slope_angles = sorted({c['slope_i'] for c in cases})  # 出现的坡角（升序，决定宏观大组顺序）
+    slope_angles = sorted({c['slope_i'] for c in cases  # 出现的坡角（升序，决定宏观大组顺序）
+                           if int(round(c['slope_i'])) in YLIM_BY_I})  # 仅保留用户指定的 i（30/60）
     thetas = sorted({c['theta'] for c in cases})  # 出现的入射角（升序，决定组内行顺序）
     n_groups = len(slope_angles)  # 宏观大组数量
     n_theta = max(1, len(thetas))  # 每组行数（入射角数）
     n_col = len(COLUMNS)  # 列数（H/V）
     total_rows = n_groups * n_theta  # 总行数 = 大组数 × 每组行数
     ctx = {'cases': cases, 'x_crest': x_crest, 'x_toe': x_toe, 'total_L': total_L}  # 面板绘制上下文
-    # 预先按列计算自适应纵轴范围（同一列所有面板共用，便于跨组对比）
-    col_ylim = [auto_ylim([c[key] for c in cases], fixed) for key, _yl, fixed in COLUMNS]  # 每列纵轴范围
+    # 纵轴范围按 (坡角 i, 分量) 取（YLIM_BY_I 固定值优先），见 ylim_for；不同 i 用各自范围
     # ---- 合成图：总网格 ----
     comp_size = (3.15 * n_col, max(2.6, 2.4 * total_rows))  # 中文核心期刊双栏宽 ≈16cm；高随行数
     fig, axes = plt.subplots(total_rows, n_col, figsize=comp_size, squeeze=False)  # 创建总网格画布
@@ -434,7 +448,8 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
         for ti, theta in enumerate(thetas):  # 遍历组内行（入射角）
             grid_row = gi * n_theta + ti  # 当前面板所在的总行号
             for ci, (key, ylabel, _fixed) in enumerate(COLUMNS):  # 遍历列（H/V 分量）
-                draw_taf_panel(axes[grid_row][ci], i_ang, theta, key, ylabel, col_ylim[ci], ctx,  # 画该面板
+                draw_taf_panel(axes[grid_row][ci], i_ang, theta, key, ylabel,  # 画该面板
+                               ylim_for(i_ang, key, cases), ctx,  # 纵轴范围按 (该坡角, 该分量) 固定
                                title=r'$\theta_s = %g^\circ$' % theta, show_xlabel=(grid_row == total_rows - 1))
     fig.tight_layout(rect=(0, 0, 1, 0.985), h_pad=1.8)  # 调整布局并为大组标签留出顶部空隙
     for gi, i_ang in enumerate(slope_angles):  # 在每个宏观大组顶部左侧标注 (a) i=30° …
@@ -450,7 +465,7 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
                 comp = 'H' if key == 'taf_h' else 'V'  # 分量缩写
                 name = 'i%g_ths%g_TAF-%s' % (i_ang, theta, comp)  # 语义子图名（如 i45_ths15_TAF-H）
                 draw_fn = functools.partial(draw_taf_panel, i_ang=i_ang, theta=theta, key=key,  # 绑定该子图参数
-                                            ylabel=ylabel, ylim=col_ylim[ci], ctx=ctx,
+                                            ylabel=ylabel, ylim=ylim_for(i_ang, key, cases), ctx=ctx,
                                             title=r'$i=%g^\circ,\ \theta_s=%g^\circ$' % (i_ang, theta),
                                             show_xlabel=True)  # 单独子图自带横轴标签
                 panel_specs.append((name, draw_fn))  # 收集子图规格
