@@ -2,7 +2,7 @@
 """复现论文【图8】风格的跨工况 TAF 对比图（v4：集中 results/index 模式 + 图8 排版）。
 
 论文图8：基岩-覆盖层双层模型，阻抗比 Vr/Vs2=1.25、覆盖层厚度比 h/H=0.50 的典型工况。
-  整张大图竖向分为两个宏观大组：
+  整张大图垂直向分为两个宏观大组：
     (a) 缓边坡 i=30°  在上；
     (b) 陡边坡 i=60°  在下。
   每个大组内部是 2×2 子图矩阵：
@@ -228,7 +228,7 @@ FALLBACK_STYLES = [  # a0 不在上表时按序兜底取用的样式（同样色
 
 COLUMNS = [  # 子图列定义：(数据键, 纵轴标签, 纵轴范围或None自适应)
     ('taf_h', '水平向 TAF', None),  # 左列：水平向 TAF
-    ('taf_v', '竖向 TAF', None),    # 右列：竖向 TAF
+    ('taf_v', '垂直向 TAF', None),    # 右列：垂直向 TAF
 ]
 GROUP_LETTERS = ['a', 'b', 'c', 'd', 'e', 'f']  # 宏观大组的子标签 (a)/(b)/...
 
@@ -350,7 +350,7 @@ def collect_cases_from_index(results_dir):  # 读取集中结果并整理为工�
             df = pd.read_csv(fpath)  # 读取 TAF 表
             x = df['x'].to_numpy(float)  # 地表 x 坐标
             th = df['TAF_h'].to_numpy(float)  # 水平向 TAF
-            tv = df['TAF_v'].to_numpy(float)  # 竖向 TAF
+            tv = df['TAF_v'].to_numpy(float)  # 垂直向 TAF
         except Exception as e:  # 读取失败
             print('  跳过(读取 TAF 失败 %s): %s' % (e, fname)); continue  # 提示并跳过
         cases.append({'folder': str(r.get('source_folder', fname)), 'x': x, 'taf_h': th, 'taf_v': tv,  # 追加工况记录
@@ -413,6 +413,12 @@ def draw_taf_panel(ax, i_ang, theta, key, ylabel, ylim, ctx, title=None, show_xl
                 linewidth=s['linewidth'], label=label)
     x_max = set_x_axis(ax, ctx['total_L'])  # 设置横轴范围与刻度
     ax.set_ylim(*ylim)  # 设置该列统一纵轴范围
+    if key == 'taf_h':  # 水平向 TAF
+        ax.yaxis.set_major_locator(mticker.LinearLocator(5))  # 纵轴分 4 格（5 个刻度点）
+    elif int(round(i_ang)) == 30:  # 图(a) i=30° 的垂直向 TAF
+        ax.yaxis.set_major_locator(mticker.LinearLocator(6))  # 纵轴分 5 格（6 个刻度点）
+    else:  # 图(b) i=60° 及其他坡角的垂直向 TAF
+        ax.yaxis.set_major_locator(mticker.LinearLocator(7))  # 纵轴分 6 格（7 个刻度点）
     if ctx['x_crest'] is not None:  # 标注坡顶/坡脚 #1/#2
         ax.axvline(x=ctx['x_crest'], color='black', linestyle='--', linewidth=0.9)  # 坡顶竖虚线
         ax.axvline(x=ctx['x_toe'], color='black', linestyle='--', linewidth=0.9)  # 坡脚竖虚线
@@ -428,7 +434,7 @@ def draw_taf_panel(ax, i_ang, theta, key, ylabel, ylim, ctx, title=None, show_xl
 
 
 def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风格大图 + 拆分子图
-    """宏观大组按坡角 i 竖向堆叠 (a)/(b)…；每组 行=入射角 θs（升序），列=H/V；面板内按 a0 画曲线。
+    """宏观大组按坡角 i 垂直向堆叠 (a)/(b)…；每组 行=入射角 θs（升序），列=H/V；面板内按 a0 画曲线。
 
     合成图与各子图统一输出到 out_dir/Fig8_TAF_compare/（子图在其下 panels/），见 save_composite_with_panels。
     """
@@ -442,7 +448,8 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
     ctx = {'cases': cases, 'x_crest': x_crest, 'x_toe': x_toe, 'total_L': total_L}  # 面板绘制上下文
     # 纵轴范围按 (坡角 i, 分量) 取（YLIM_BY_I 固定值优先），见 ylim_for；不同 i 用各自范围
     # ---- 合成图：总网格 ----
-    comp_size = (3.15 * n_col, max(2.6, 2.4 * total_rows))  # 中文核心期刊双栏宽 ≈16cm；高随行数
+    GROUP_GAP = 0.1  # 宏观大组之间的额外垂直间距（英寸），使 (a)(b) 两组视觉上明显分隔
+    comp_size = (3.15 * n_col, max(2.4, 2.3 * total_rows) + (n_groups - 1) * GROUP_GAP)  # 中文核心期刊双栏宽 ≈16cm；高随行数+组间间距
     fig, axes = plt.subplots(total_rows, n_col, figsize=comp_size, squeeze=False)  # 创建总网格画布
     for gi, i_ang in enumerate(slope_angles):  # 遍历宏观大组（坡角）
         for ti, theta in enumerate(thetas):  # 遍历组内行（入射角）
@@ -450,13 +457,24 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
             for ci, (key, ylabel, _fixed) in enumerate(COLUMNS):  # 遍历列（H/V 分量）
                 draw_taf_panel(axes[grid_row][ci], i_ang, theta, key, ylabel,  # 画该面板
                                ylim_for(i_ang, key, cases), ctx,  # 纵轴范围按 (该坡角, 该分量) 固定
-                               title=r'$\theta_s = %g^\circ$' % theta, show_xlabel=(grid_row == total_rows - 1))
-    fig.tight_layout(rect=(0, 0, 1, 0.985), h_pad=1.8)  # 调整布局并为大组标签留出顶部空隙
-    for gi, i_ang in enumerate(slope_angles):  # 在每个宏观大组顶部左侧标注 (a) i=30° …
-        pos = axes[gi * n_theta][0].get_position()  # 该组首行左面板位置
+                               title=r'$\theta_s = %g^\circ$' % theta, show_xlabel=True)
+    fig.tight_layout(rect=(0, 0, 1, 1), h_pad=0.5)  # 先对所有行做统一紧凑布局（组内间距一致）
+    # ---- 在宏观大组之间插入额外垂直间距 ----
+    if n_groups > 1:  # 有多组时才需要插入间距
+        for gi in range(1, n_groups):  # 从第二组 (gi=1) 开始，逐组向下平移
+            shift_down = gi * GROUP_GAP  # 该组需要下移的总量（英寸）
+            for ti in range(n_theta):  # 该组内的每一行
+                grid_row = gi * n_theta + ti  # 当前行在总网格中的行号
+                for ci in range(n_col):  # 该行的每一列
+                    pos = axes[grid_row][ci].get_position()  # 获取当前轴在画布中的位置（图坐标）
+                    axes[grid_row][ci].set_position(  # 向下平移该轴（图坐标 y 向下为减小）
+                        [pos.x0, pos.y0 - shift_down / comp_size[1], pos.width, pos.height])
+    for gi, i_ang in enumerate(slope_angles):  # 在每个宏观大组底部居中标注 (a) i=30° …（标签自动跟随已平移的轴位置）
+        last_row = (gi + 1) * n_theta - 1  # 该组末行行号
+        pos = axes[last_row][0].get_position()  # 该组末行左面板位置（已含组间偏移）
         letter = GROUP_LETTERS[gi] if gi < len(GROUP_LETTERS) else str(gi + 1)  # 大组子标签
-        fig.text(pos.x0, min(0.998, pos.y1 + 0.012), r'(%s)  $i=%g^\circ$' % (letter, i_ang),  # 放在首行面板左上方
-                 fontsize=9, va='bottom', ha='left', fontweight='bold')  # 加粗大组标签
+        fig.text(pos.x0 + pos.width * n_col / 2 + 0.04, pos.y0 - 0.04, r'(%s)  $i=%g^\circ$' % (letter, i_ang),  #! 放在末行面板下方居中
+                 fontsize=9, va='top', ha='center', fontweight='bold')  # 加粗大组标签
     # ---- 各子图：复用 draw_taf_panel，按语义命名 ----
     panel_specs = []  # [(语义名, 绘制函数), ...]
     for gi, i_ang in enumerate(slope_angles):  # 遍历坡角
@@ -470,7 +488,7 @@ def plot_fig8(cases, x_crest, x_toe, total_L, out_dir):  # 绘制论文图8 风�
                                             show_xlabel=True)  # 单独子图自带横轴标签
                 panel_specs.append((name, draw_fn))  # 收集子图规格
     res = save_composite_with_panels(out_dir, 'Fig8_TAF_compare', fig, panel_specs,  # 合成图+子图统一输出
-                                            composite_size=comp_size, panel_size=(3.15, 2.5))
+                                            composite_size=comp_size, panel_size=(3.15, 2.0))
     print('  合成图: %s' % '; '.join(os.path.basename(p) for p in res['composite']))  # 提示合成图
     print('  子图 %d 张 -> %s' % (len(res['panels']), os.path.join(res['dir'], 'panels')))  # 提示子图目录
 

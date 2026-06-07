@@ -1,0 +1,18 @@
+# 数据处理与科学计算
+numpy
+pandas
+scipy
+
+# 绘图与可视化
+matplotlib
+scienceplots
+pillow
+
+# 机器学习与深度学习
+# torch (单独通过 CUDA 镜像安装 GPU 版本，以防被覆盖)
+scikit-learn
+lightgbm
+xgboost
+
+# 其他实用工具
+send2trash
