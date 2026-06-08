@@ -35,12 +35,12 @@ def numpy_cumtrapz(y, x, initial=0):
     return np.concatenate(([initial], cumulative))
 
 # --- Configuration ---
-f_center = 6.0       # Center frequency (Hz)
+f_center = 8.0       # Center frequency (Hz)
 time_duration = 2.0  # 0-2 seconds
 time_step = 0.001    # 0.001s step
 max_acc = 1.0        # Max amplitude of acceleration (m/s^2)
 peak_time = 1.0 / f_center  # Shift peak to 1.0/f_center so it matches the image
-save_plots = False    # Whether to save plots to disk
+save_plots = True    # Whether to save plots to disk
 
 # Colors matching the reference image
 colors_map = {
