@@ -22,10 +22,13 @@ build/
 # PDF 文件
 *.pdf
 
-# PNG 图片
+# 图片
 *.png
 *.PNG
+*.jpg
+*.jpeg
 
 # 自定义
 test/
 outputs*/
+images/

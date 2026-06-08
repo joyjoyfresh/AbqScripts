@@ -23,8 +23,8 @@ from collections import namedtuple  # 导入命名元组用于参数打包
 
 
 # ==========================================================
-#  【本版 = 合并版：multilayer_v2(三层图15) + multilayer_v3(双层验证) 同一引擎统一】
-#  引擎与 v2/v3 完全相同（自由场支持 1/2/3… 层）；本版增加【配置注入】：
+#  【本版 = v3：在 v2 基础上新增材料阻尼（瑞利阻尼，对齐论文 Q 衰减）与数值阻尼降低（TRANSIENT_FIDELITY）】
+#  引擎与 v2 完全相同（自由场支持 1/2/3… 层）；本版增加【配置注入】：
 #    运行时若工况文件夹内存在 case_config.json，则用其覆盖下面的【默认配置】
 #    （见 _load_case_config）。这样一个批处理脚本即可跑任意变参数工况——
 #    层数(单/双/三层)、各层波速比/厚度、几何(坡角/坡高/覆盖层/基岩厚)、入射角、网格等。
@@ -66,6 +66,16 @@ job_cfg = {  # 定义作业参数配置
 
 
 mesh_size = 4  # 网格尺寸设为 4 m
+
+damping_cfg = {                 # 材料阻尼配置（对齐论文 Q 衰减；可被 case_config.json 覆盖）
+    'enable': True,             # 是否施加材料阻尼
+    'method': 'rayleigh',       # 'rayleigh'=双频拟合(α+β) / 'stiffness'=仅刚度比例(β)
+    'qs_factor': 0.05,          # Qs = qs_factor*cs（论文 coarse-grain 法，cs 单位 m/s）
+    'q_bedrock': 999.0,         # 基岩品质因子(≈无衰减)
+    'fc': None,                 # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
+    'f1_factor': 0.5,           # 双频拟合下限 = f1_factor*fc
+    'f2_factor': 2.5,           # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
+}  # 结束阻尼配置
 
 
 # ==========================================================
@@ -115,7 +125,7 @@ FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
 # ==========================================================
 
 
-_DEFAULT_SCRIPT_NAME = 'VAB_oblique_TAF_multilayer_v2.py'  # 本脚本已知文件名（__file__ 缺失时的兜底）
+_DEFAULT_SCRIPT_NAME = 'VAB_oblique_TAF_multilayer_v3.py'  # 本脚本已知文件名（__file__ 缺失时的兜底）
 
 
 def _script_path():  # 安全获取当前脚本绝对路径（Abaqus 内核可能不定义 __file__）
@@ -219,6 +229,65 @@ def _compute_material_params(cs, vv, density):  # 定义材料参数计算函数
     lam = 2 * GG * vv / (1 - 2 * vv)  # 计算拉梅常数
     cp = math.sqrt((lam + 2 * GG) / density)  # 计算纵波波速
     return {'GG': GG, 'EE': EE, 'lam': lam, 'cp': cp, 'cs': cs, 'vv': vv, 'density': density}  # 返回材料参数字典
+
+
+def _estimate_dominant_freq(acc, dt):  # 从加速度时程估计主频
+    """对加速度时程做 FFT，返回幅值谱最大处频率（DC 置 0）。
+
+    acc : 一维加速度数组（可含均值偏移）
+    dt  : 时间步长 (s)
+    返回主导频率 (Hz)
+    """
+    acc_centered = acc - np.mean(acc)  # 去均值，避免 DC 分量干扰
+    n = len(acc_centered)  # 信号长度
+    spectrum = np.abs(np.fft.rfft(acc_centered))  # 单边幅值谱
+    freqs = np.fft.rfftfreq(n, dt)  # 对应频率轴
+    spectrum[0] = 0.0  # 置零 DC 分量
+    idx_max = np.argmax(spectrum)  # 幅值最大处索引
+    return float(freqs[idx_max])  # 返回主导频率
+
+
+def _damping_ratio_from_q(cs, is_bedrock, dcfg):  # 由 Q 值换算阻尼比 ξ
+    """根据剪切波速与是否基岩，计算品质因子 Q 与阻尼比 ξ=1/(2Q)。
+
+    cs         : 该层剪切波速 (m/s)
+    is_bedrock : 是否为基岩层
+    dcfg       : 阻尼配置 dict（含 qs_factor / q_bedrock）
+    返回 (Q, xi)
+    """
+    if is_bedrock:  # 基岩层
+        Q = dcfg['q_bedrock']  # 基岩 Q≈999（近乎无衰减）
+    else:  # 有限层
+        Q = dcfg['qs_factor'] * cs  # Qs = 0.05 * cs（论文 coarse-grain 法）
+    xi = 1.0 / (2.0 * Q)  # 阻尼比 ξ = 1/(2Q)
+    return Q, xi  # 返回品质因子与阻尼比
+
+
+def _rayleigh_coeffs(xi, dcfg, fc):  # 由阻尼比计算瑞利阻尼系数 α, β
+    """按指定方法将阻尼比 ξ 换算为 Abaqus 瑞利阻尼系数 (alpha, beta)。
+
+    xi   : 阻尼比 ξ
+    dcfg : 阻尼配置 dict（含 method / f1_factor / f2_factor）
+    fc   : 主频 (Hz)
+    返回 (alpha, beta)
+    """
+    if dcfg['method'] == 'stiffness':  # 仅刚度比例阻尼
+        alpha = 0.0  # 质量比例系数为零
+        beta = xi / (math.pi * fc)  # β = ξ/(π·fc)，使 fc 处 ξ 精确
+    else:  # 默认 rayleigh 双频拟合
+        w1 = 2.0 * math.pi * dcfg['f1_factor'] * fc  # 拟合下限圆频率
+        w2 = 2.0 * math.pi * dcfg['f2_factor'] * fc  # 拟合上限圆频率
+        alpha = 2.0 * xi * w1 * w2 / (w1 + w2)  # 瑞利 α（两端 ξ 相等≈恒定 Q）
+        beta = 2.0 * xi / (w1 + w2)  # 瑞利 β
+    return alpha, beta  # 返回瑞利阻尼系数
+
+
+def _resolve_damping(dcfg, fc_est):  # 解析阻尼配置（补全 fc 字段）
+    """拷贝阻尼配置，若 fc 为空则用 fc_est 填充，返回解析后的配置 dict。"""
+    resolved = dict(dcfg)  # 浅拷贝配置
+    if resolved['fc'] is None:  # 未显式指定主频
+        resolved['fc'] = fc_est  # 使用自动估计值
+    return resolved  # 返回解析后配置
 
 
 def _compute_interface_sv_coeff(alpha1, mat1, mat2):  # 定义界面 SV 波系数计算函数
@@ -731,16 +800,26 @@ def _interface_y_list(strat):  # 定义从分层带提取材料界面 y 的函�
     return [band['y1'] for band in strat[:-1]]  # 取每个带（除最顶带）的上界作为界面
 
 
-def _create_band_materials_sections(model, strat):  # 定义逐带创建材料与截面的函数
-    """为分层带（从下到上）逐带创建材料与均质截面，返回 [(band, sec_name), ...]。"""  # 说明函数用途
+def _create_band_materials_sections(model, strat, damping=None):  # 定义逐带创建材料与截面的函数（v3：支持材料阻尼）
+    """为分层带（从下到上）逐带创建材料与均质截面，返回 [(band, sec_name), ...]。
+
+    damping: 解析后的阻尼配置 dict（含 enable/method/fc/qs_factor/q_bedrock 等）；
+        若 enable=True，则为各材料施加瑞利阻尼（α, β）。
+    """  # 说明函数用途
     band_sections = []  # 初始化带-截面映射列表
-    for band in strat:  # 从下到上遍历每条材料带
+    for idx, band in enumerate(strat):  # 从下到上遍历每条材料带（带索引用于判基岩）
         mat = band['mat']  # 取该带材料输入
         EE = _compute_elastic_modulus_from_wave_speed(mat.cs, mat.vv, mat.density)  # 由波速反算弹性模量
         mat_name = _next_available_name('Material-%s' % band['name'], model.materials)  # 生成材料名（含层名）
         m = model.Material(name=mat_name)  # 创建材料
         m.Elastic(table=((EE, mat.vv),))  # 定义弹性参数
         m.Density(table=((mat.density,),))  # 定义密度
+        # ===== v3：施加材料瑞利阻尼（对齐论文 Q 衰减）=====
+        if damping and damping.get('enable'):  # 阻尼已启用
+            is_bedrock = (idx == 0)  # strat[0] 恒为基岩（_build_stratigraphy 保证）
+            Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping)  # 由波速与 Q 因子换算阻尼比
+            alpha, beta = _rayleigh_coeffs(xi, damping, damping['fc'])  # 阻尼比→瑞利系数
+            m.Damping(alpha=alpha, beta=beta)  # 施加 Abaqus 瑞利阻尼
         sec_name = _next_available_name('Section-%s' % band['name'], model.sections)  # 生成截面名（含层名）
         model.HomogeneousSolidSection(name=sec_name, material=mat_name, thickness=1.0)  # 创建均质实体截面
         band_sections.append((band, sec_name))  # 记录该带与其截面名
@@ -788,11 +867,12 @@ def _assign_sections_by_band(part, band_sections):  # 定义按质心 y 落带�
     return counts  # 返回各带面数统计
 
 
-def create_model(site, geom, mesh_size, cae_name=None, logger=None):
+def create_model(site, geom, mesh_size, damping=None, cae_name=None, logger=None):
     """创建二维平面应变斜坡模型：几何、材料、截面、装配、网格（不含分析步）。
 
     site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
     geom: Geometry 对象（斜坡几何，含派生量与固定层间界面）
+    damping: 解析后的阻尼配置 dict（v3 新增，传给材料创建）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-1'  # 设置基础模型名称
@@ -832,7 +912,7 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None):
 
     # ============ 逐层创建材料与截面（支持 1/2/3... 层）============
     strat = _build_stratigraphy(site, geom)  # 构造从下到上的分层带（基岩 + 各有限层）
-    band_sections = _create_band_materials_sections(model, strat)  # 逐带创建材料与截面
+    band_sections = _create_band_materials_sections(model, strat, damping)  # 逐带创建材料与截面（v3：传入阻尼配置）
     log_step(logger, '%s 已创建 %d 个材料带的材料与截面', model_name, len(strat))  # 记录材料/截面创建日志
 
     # 装配
@@ -934,11 +1014,12 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None):
     return model_name, part_name, inst_name
 
 
-def create_flat_model(site, geom, mesh_size, logger=None):
+def create_flat_model(site, geom, mesh_size, damping=None, logger=None):
     """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。
 
     site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
     geom: Geometry 对象（取其总长、平坦总高 H_flat、基岩厚度；全场各层带齐全）
+    damping: 解析后的阻尼配置 dict（v3 新增，传给材料创建）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-2'  # 设置平坦自由场模型名称
@@ -963,7 +1044,7 @@ def create_flat_model(site, geom, mesh_size, logger=None):
 
     # ============ 逐层创建材料与截面（平坦自由场，全场各带齐全）============
     strat = _build_stratigraphy(site, geom)  # 构造从下到上的分层带（平坦模型高度=H_upper，各带齐全）
-    band_sections = _create_band_materials_sections(model, strat)  # 逐带创建材料与截面
+    band_sections = _create_band_materials_sections(model, strat, damping)  # 逐带创建材料与截面（v3：传入阻尼配置）
     log_step(logger, '%s 已创建 %d 个材料带的材料与截面（平坦自由场）', model_name, len(strat))  # 记录材料/截面创建日志
 
     # 装配
@@ -1316,7 +1397,7 @@ def build_models(acc_info, base_model, part_name, inst_name,
             name=step_name, previous='Initial',  # 设置分析步名称和前置步
             timePeriod=tp, timeIncrementationMethod=FIXED, initialInc=inc,  # 设置时长和初始增量
             maxNumInc=1000000,  # 设置最大增量步数
-            nlgeom=OFF, application=MODERATE_DISSIPATION)  # 关闭几何非线性并设置阻尼
+            nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 关闭几何非线性，使用 TRANSIENT_FIDELITY（α≈-0.05，让物理阻尼主导）
 
         model.fieldOutputRequests['F-Output-1'].setValues(  # 设置场输出请求
             variables=variables, frequency=frequency)  # 指定输出变量和频率
@@ -1410,18 +1491,18 @@ def _deep_merge(base, override):  # 递归合并两份配置字典
     return out  # 返回合并结果
 
 
-def _load_case_config(material_cfg, geometry_cfg, mesh_size, logger):  # 加载工况配置注入
-    """若当前工况文件夹存在 case_config.json，则用其覆盖默认配置（支持部分覆盖或整体改 layers/几何/网格）。
+def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger):  # 加载工况配置注入（v3：支持 damping_cfg）
+    """若当前工况文件夹存在 case_config.json，则用其覆盖默认配置（支持部分覆盖或整体改 layers/几何/网格/阻尼）。
 
     case_config.json 结构（各键可选，缺省即用默认）：
-      {"material_cfg": {...部分或全部...}, "geometry_cfg": {...}, "mesh_size": 4}
-    返回覆盖后的 (material_cfg, geometry_cfg, mesh_size)。无文件或解析失败则原样返回默认。
+      {"material_cfg": {...部分或全部...}, "geometry_cfg": {...}, "mesh_size": 4, "damping_cfg": {...}}
+    返回覆盖后的 (material_cfg, geometry_cfg, mesh_size, damping_cfg)。无文件或解析失败则原样返回默认。
     """
     path = os.path.join(os.getcwd(), 'case_config.json')  # 约定的配置注入文件
     if not os.path.isfile(path):  # 无注入文件 → 用默认配置单独运行
         if logger:  # 记录提示
             log_step(logger, '未发现 case_config.json，使用脚本内默认配置')  # 输出默认配置提示
-        return material_cfg, geometry_cfg, mesh_size  # 原样返回默认
+        return material_cfg, geometry_cfg, mesh_size, damping_cfg  # 原样返回默认
     try:  # 尝试读取并覆盖
         import json  # 导入 JSON 模块
         with io.open(path, 'r', encoding='utf-8') as f:  # 打开配置文件（io.open：Py2 内置 open 不支持 encoding 关键字）
@@ -1432,13 +1513,15 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, logger):  # 加载�
             geometry_cfg = _deep_merge(geometry_cfg, cfg['geometry_cfg'])  # 合并几何配置
         if cfg.get('mesh_size') is not None:  # 提供了网格覆盖
             mesh_size = cfg['mesh_size']  # 覆盖网格尺寸
+        if isinstance(cfg.get('damping_cfg'), dict):  # v3 新增：提供了阻尼覆盖
+            damping_cfg = _deep_merge(damping_cfg, cfg['damping_cfg'])  # 合并阻尼配置
         if logger:  # 记录成功
             log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, i=%s',  # 输出关键覆盖项
                      material_cfg.get('angle'), len(material_cfg.get('layers', [])), geometry_cfg.get('i'))
     except Exception as _e:  # 解析失败
         if logger:  # 记录告警
             log_step(logger, '加载 case_config.json 失败(改用默认配置): %s', str(_e))  # 输出失败告警
-    return material_cfg, geometry_cfg, mesh_size  # 返回（可能被覆盖的）配置
+    return material_cfg, geometry_cfg, mesh_size, damping_cfg  # 返回（可能被覆盖的）配置
 
 
 def _meta_f(value):  # 把数值安全转为内置 float（兼容 numpy 标量）
@@ -1457,11 +1540,12 @@ def _meta_material(name, cs, vv, density, thickness=None):  # 打包单层材料
             'density': _meta_f(density), 'thickness': _meta_f(thickness)}  # 密度与厚度
 
 
-def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger):  # 写出统一工况元数据
+def _write_case_meta(material_cfg, geom, site, mesh_size, damping, script_name, logger):  # 写出统一工况元数据（v3：含阻尼信息）
     """把本工况参数固化为当前工况文件夹的 case_meta.json（自包含、不依赖任何外部模块）。失败仅告警、不中断建模。
 
     本函数是工况元数据的【唯一写入者 / 单一真相源】：所有派生量公式（a0_base、波速比、模型类型等）只在此处定义；
     下游 Collect/Plot 仅读取生成的 JSON 数据、不共享本处代码，因此不存在跨 Abaqus/普通 Python 的字段口径漂移。
+    damping: 解析后的阻尼配置 dict（v3 新增），写出逐层阻尼参数供下游核对。
     """
     try:  # 元数据写出不应影响建模主流程
         bedrock = _meta_material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料字典
@@ -1496,6 +1580,24 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger): 
             'a0_base': _meta_f(a0_base),  # a0 换算基数
         }
         out_dir = os.path.abspath(os.getcwd())  # 当前工况文件夹（建模运行目录）
+        # ===== v3：构建阻尼元数据块 =====
+        damping_meta = None  # 默认无阻尼信息
+        if damping and damping.get('enable'):  # 阻尼已启用
+            strat = _build_stratigraphy(site, geom)  # 重建分层带（用于逐层阻尼）
+            damping_layers = []  # 逐层阻尼信息列表
+            for idx, band in enumerate(strat):  # 从下到上遍历每条带
+                mat = band['mat']  # 取材料
+                is_bedrock = (idx == 0)  # 基岩判定
+                Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping)  # 计算 Q 与 ξ
+                alpha, beta = _rayleigh_coeffs(xi, damping, damping['fc'])  # 计算瑞利系数
+                damping_layers.append({  # 记录该层阻尼参数
+                    'name': band['name'], 'cs': _meta_f(mat.cs),  # 层名与波速
+                    'Q': _meta_f(Q), 'xi': _meta_f(xi),  # 品质因子与阻尼比
+                    'alpha': _meta_f(alpha), 'beta': _meta_f(beta)})  # 瑞利系数
+            damping_meta = {  # 阻尼元数据
+                'method': damping['method'], 'fc': _meta_f(damping['fc']),  # 方法与主频
+                'qs_factor': _meta_f(damping['qs_factor']), 'q_bedrock': _meta_f(damping['q_bedrock']),  # Q 因子
+                'layers': damping_layers}  # 逐层阻尼
         meta = {  # 组装规范元数据（嵌套结构，供下游通用展平）
             'schema_version': 1,  # schema 版本号
             'model_type': model_type,  # 模型类型 single/double/multilayer
@@ -1508,6 +1610,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger): 
             'derived': derived,  # 派生量
             'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
             'extra': {},  # 附加自定义键值
+            'damping': damping_meta,  # v3：材料阻尼元数据（None=未启用）
             'folder': os.path.basename(out_dir.rstrip('/\\')),  # 工况文件夹名（来源标识）
         }
         text = json.dumps(meta, ensure_ascii=False, indent=2, default=_meta_f)  # 序列化为字符串（保留中文，default 兜底 numpy 标量）
@@ -1525,15 +1628,16 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger): 
 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
-    global material_cfg, geometry_cfg, mesh_size  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
-    logger = log_step('VAB_oblique_TAF_multilayer.log')  # 初始化日志并写入当前版本日志文件
+    global material_cfg, geometry_cfg, mesh_size, damping_cfg  # 声明为全局以便用注入配置整体覆盖（v3：增加 damping_cfg）
+    logger = log_step('VAB_oblique_TAF_multilayer_v3.log')  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
 
     try:
         log_step(logger, '脚本开始执行')  # 写入脚本启动日志
 
-        # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（支持任意变参数/层数）
-        material_cfg, geometry_cfg, mesh_size = _load_case_config(material_cfg, geometry_cfg, mesh_size, logger)  # 加载并覆盖
+        # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（支持任意变参数/层数/阻尼）
+        material_cfg, geometry_cfg, mesh_size, damping_cfg = _load_case_config(
+            material_cfg, geometry_cfg, mesh_size, damping_cfg, logger)  # 加载并覆盖（v3：含阻尼配置）
 
         # 构建场地材料（基岩 + 有限层列表）并校验层厚
         site, fixed_thicknesses = build_site(material_cfg, geometry_cfg)  # 由配置构建场地对象与固定层厚度
@@ -1551,17 +1655,38 @@ def main():
             fixed_thicknesses=fixed_thicknesses)  # 顶部固定层厚度（推算固定层间界面）
         geom_flat = make_flat_geometry(geom)  # 派生平坦自由场几何
 
-        _write_case_meta(material_cfg, geom, site, mesh_size, _script_name(), logger)  # 写出统一工况元数据 case_meta.json（脚本名不依赖 __file__）
-
         cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),  # 生成工程文件名（含层数）
                                                 int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数
         acc_info = find_acc_txt(logger)  # 读取当前目录内全部加速度时程信息
 
+        # ===== v3：估计输入波主频并解析阻尼配置 =====
+        fc_est = None  # 初始化主频估计值
+        if damping_cfg['enable'] and damping_cfg['fc'] is None:  # 需要自动估计主频
+            try:  # 尝试从第一条加速度记录估计 fc
+                acc_data = np.loadtxt(acc_info[0][0])  # 读取第一条加速度文件
+                if acc_data.ndim == 2 and acc_data.shape[1] >= 2:  # 格式检查
+                    dt = acc_info[0][2]  # 时间步长
+                    fc_est = _estimate_dominant_freq(acc_data[:, 1], dt)  # 估计主频
+                    log_step(logger, '从加速度记录 %s 估计主频 fc=%.2f Hz', acc_info[0][0], fc_est)  # 记录估计结果
+            except Exception as _e:  # 估计失败
+                log_step(logger, '主频估计失败(将使用默认 fc=4.0): %s', str(_e))  # 告警
+                fc_est = 4.0  # 兜底默认值（Ricker 波典型 fc）
+        if damping_cfg['fc'] is not None:  # 已显式指定 fc
+            fc_est = damping_cfg['fc']  # 直接使用显式值
+        damping = _resolve_damping(damping_cfg, fc_est)  # 解析阻尼配置（补全 fc）
+        if damping['enable']:  # 阻尼已启用
+            log_step(logger, '材料阻尼已启用: method=%s, fc=%.2f Hz, qs_factor=%.2f',
+                     damping['method'], damping['fc'], damping['qs_factor'])  # 记录阻尼参数
+
+        _write_case_meta(material_cfg, geom, site, mesh_size, damping, _script_name(), logger)  # 写出统一工况元数据（v3：含阻尼信息）
+
         base_model, part_name, inst_name = create_model(  # 创建斜坡基础几何与网格模型
-            site=site, geom=geom, mesh_size=mesh_size, cae_name=cae_name, logger=logger)  # 传入场地/几何/网格/文件名
+            site=site, geom=geom, mesh_size=mesh_size, damping=damping,  # v3：传入阻尼配置
+            cae_name=cae_name, logger=logger)  # 传入场地/几何/网格/文件名
 
         flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
-            site=site, geom=geom, mesh_size=mesh_size, logger=logger)  # 传入场地/几何/网格
+            site=site, geom=geom, mesh_size=mesh_size, damping=damping,  # v3：传入阻尼配置
+            logger=logger)  # 传入场地/几何/网格
 
         slope_model_names = build_models(  # 批量复制斜坡模型并施加等效边界
             acc_info=acc_info, base_model=base_model, part_name=part_name, inst_name=inst_name,  # 地震动信息与基础模型/零件/实例
