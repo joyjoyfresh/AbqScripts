@@ -285,9 +285,11 @@ TAF 曲线大部分区域 ≈ 1（远场平坦），只有坡面附近有峰。�
 
 | 模型 | TAF_h R² | TAF_h MAE | 训练耗时 | 参数量 | 不确定性 |
 |------|---------|-----------|---------|--------|---------|
-| v2 DeepONet（最强深度）| 0.836 | 0.0506 | 小时级 | ~40 万 | 无 |
-| v3 XGBoost | 待填 | 待填 | 秒级 | — | 无 |
-| v3 GPR | 待填 | 待填 | 秒级 | — | **有** |
+| v2 DeepONet（最强深度）| 0.835 | 0.0506 | 小时级 · GPU | ~40 万 | 无 |
+| v3 XGBoost | **0.920** | **0.0330** | 秒级 · CPU | — | 无 |
+| v3 GPR | **0.947** | **0.0244** | 秒级 · CPU | — | **有** |
+
+> ✅ **实测结论（2026-06-08，5 折 GroupKFold）**：v3 GPR / XGBoost 在 TAF_h 上的 MAE（0.0244 / 0.0330）**全面优于** v2 全部四个深度模型（0.0506~0.0572），且训练成本低几个数量级（CPU 秒级 vs GPU 小时级）。**「小数据 + 物理特征 + 经典 ML 优于端到端深度学习」的论文结论已被实测证实。** 完整数据见 `outputs_v3/table_final.md` 与对照图 `outputs_v3/figures_pub/fig_v2_vs_v3/`。
 
 ---
 
@@ -326,11 +328,11 @@ AbqScripts/ML/
 
 | 阶段 | 内容 | 产出 |
 |------|------|------|
-| **Stage 0 诊断** | 复现第 3 节所有数字（附录 A 脚本），画诊断图 | 「为什么换方案」的论文素材 |
-| **Stage 1 基线** | 全局均值 / per-geometry 均值 / 网格线性插值 | 成败下限（0.0469）|
-| **Stage 2 主模型** | 波特征提取 → POD → XGBoost & GPR（先形式 A 跑通，再上形式 B）| 主模型权重 + 指标 |
-| **Stage 3 评估** | GroupKFold + 留一波 + 留一高度 + 分区指标 + TAF_v 专项 | 完整评估报告 |
-| **Stage 4 对照可视化** | 读 v2 的 outputs 做对照 + 全部图 | 论文级图表 |
+| **Stage 0 诊断** ✅ | 复现第 3 节所有数字（附录 A 脚本），画诊断图 | `diagnose_v3.py` → 5 图 + `diagnostics_v3.json` |
+| **Stage 1 基线** ✅ | 全局均值 / per-geometry 均值 / 网格线性插值 | `baseline_v3.py` → B3 网格插值=0.0708 是真正下限 |
+| **Stage 2 主模型** ✅ | 波特征提取 → POD → XGBoost & GPR（形式 B）| `train_v3.py` → GPR TAF_h MAE=0.0244/R²0.947 完胜 v2 |
+| **Stage 3 评估** ✅ | GroupKFold + 留一波 + 留一高度/角度 + 分区指标 + TAF_v 专项 | `evaluate_v3.py` → 内插强外插弱；fig12~14 |
+| **Stage 4 对照可视化** ✅ | 读 v2 的 outputs 做对照 + 出版级图表 | `figures_v3.py` → `figures_pub/fig_v2_vs_v3/` + `table_final.md` |
 
 ---
 
