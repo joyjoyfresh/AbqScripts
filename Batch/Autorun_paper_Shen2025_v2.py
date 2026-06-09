@@ -38,7 +38,7 @@ import concurrent.futures  # 导入并发模块（本脚本 MAX_WORKERS=1，但�
 # ==============================================================================
 
 FOLDER_PREFIX = "shen2025-"  # 工况文件夹统一前缀（与旧 multi- 前缀区分）
-MAX_WORKERS = 2  # 并行处理文件夹数：每个 Abaqus 作业已用 8 CPU，设为 1 避免超订
+MAX_WORKERS = 3  # 并行处理文件夹数：每个 Abaqus 作业已用 8 CPU，设为 1 避免超订
 CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名
 
 # 建模、提取、计算 TAF 三步脚本（直接指定绝对路径）
