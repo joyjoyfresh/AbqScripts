@@ -2,7 +2,7 @@
 """批量跑【多种变参数工况】的合并版 Autorun（配置注入方式）。
 
 合并了原 Autorun_TAF_multilayer_v1（三层图15 扫描）与 Autorun_TAF_multilayer_verify_v1（双层 i/angle 扫描），
-统一调用合并版建模脚本 Modeling/Multi/VAB_oblique_TAF_multilayer_v4.py。
+统一调用合并版建模脚本 Modeling/Multi/VAB_oblique_TAF_multilayer_v5.py。
 
 与旧版"正则替换标量"不同，本版用【配置注入】：每个工况在 PARAMETER_CASES 里给一份 config 覆盖
 （material_cfg/geometry_cfg/mesh_size 的部分或全部），脚本把它写进工况文件夹的 case_config.json，
@@ -26,7 +26,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根�
 FOLDER_PREFIX = "multi-"  # 设置目标文件夹前缀
 DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".com"]  # 每个文件夹脚本执行后要直接删除的文件类型；为空则不删除
 MAX_WORKERS = 3  # 并行处理文件夹的最大线程数
-CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名（建模脚本 v4 会读取它）
+CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名（建模脚本 v5 会读取它）
 
 # 固定源文件（随每个工况文件夹拷入）：仅输入波 .txt（建模脚本已自包含写出 case_meta.json，无需再拷模块）
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
@@ -37,7 +37,7 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v2.py",  # 合并版建模脚本（读取 case_config.json，自包含写出 case_meta.json）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v5.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v1.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
