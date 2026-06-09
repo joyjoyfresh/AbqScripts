@@ -24,6 +24,7 @@
 import os  # 导入系统接口模块
 import sys  # 导入系统参数模块
 import glob  # 导入文件匹配模块
+import json  # 导入 JSON（解析 layers_json）
 import numpy as np  # 导入数值计算库
 import pandas as pd  # 导入数据分析库
 import matplotlib  # 导入绘图框架
@@ -46,6 +47,21 @@ FALLBACK_STYLES = [  # 比值不在上表时按序兜底取用
     {'color': '#9467bd', 'linestyle': ':', 'linewidth': 1.6},
     {'color': '#ff7f0e', 'linestyle': '-', 'linewidth': 1.6},
 ]
+
+
+def _h1_over_from_row(r):  # 从 layers_json 推算 h1/(H-h)
+    """从 index.csv 行的 H_minus_h 与 layers_json[0].thickness 推算 h1/(H-h)。"""
+    hmh = r.get('H_minus_h')  # 读取 H-h 值
+    if hmh is None or pd.isna(hmh): return None  # 缺失则返回 None
+    try:
+        hmh = float(hmh)  # 转浮点
+        if hmh <= 0: return None  # 无效值
+        layers = json.loads(str(r.get('layers_json', '[]')))  # 解析 layers_json
+        if layers and layers[0].get('thickness') is not None:  # 有表层厚度
+            return round(float(layers[0]['thickness']) / hmh, 3)  # 计算 h1/(H-h)
+    except Exception:
+        pass
+    return None  # 无法计算
 
 
 # ==============================================================================
@@ -126,7 +142,10 @@ def collect_cases_from_index(results_dir):  # 从 results/index.csv 读取集中
         if not os.path.isfile(fpath):  # 文件缺失
             print('  跳过(文件不存在): %s' % fname); continue  # 提示并跳过
         try:
-            vs1_vs2 = float(r['vs1_vs2']); h1_over = float(r['h1_over']); angle = float(r['angle'])  # 工况属性
+            vs1_vs2 = float(r['vs1_over_vs2'])  # 读 Vs1/Vs2（规范列名）
+            angle = float(r['incident_angle'])  # 读入射角（规范列名）
+            h1_over = _h1_over_from_row(r)  # 从 layers_json 推算 h1/(H-h)
+            if h1_over is None: raise ValueError('无法推算 h1/(H-h)')  # 推算失败
         except (TypeError, ValueError):  # 属性缺失/非数值
             print('  跳过(index.csv 工况属性缺失): %s' % fname); continue  # 提示并跳过
         try:

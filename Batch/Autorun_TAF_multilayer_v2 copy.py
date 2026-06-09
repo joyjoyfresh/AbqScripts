@@ -60,7 +60,6 @@ def _layers3(surf_vr, surf_thick):  # 生成三层 layers（表层软硬/厚度�
 
 
 PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 config 生成）
-    # ---- B) 双层（沿用默认 overlying，仅扫坡角与入射角）= 4 工况 ----
     {"config": {"material_cfg": {"angle": 0},  "geometry_cfg": {"i": 30.0}}},  # 双层, i=30, 0°
     {"config": {"material_cfg": {"angle": 15}, "geometry_cfg": {"i": 30.0}}},  # 双层, i=30, 15°
 ]  # 结束变参数工况列表定义
