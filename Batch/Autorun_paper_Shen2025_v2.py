@@ -43,7 +43,7 @@ CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名
 
 # 建模、提取、计算 TAF 三步脚本（直接指定绝对路径）
 SCRIPT_SEQUENCE = [  # 每工况文件夹内按序执行的脚本
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v3.py",  # 建模（v3：配置注入 + 材料阻尼 + 写 case_meta.json）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v4.py",  # 建模（v4：配置注入 + 材料阻尼 + 写 case_meta.json）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取（需 Abaqus Python + odbAccess）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v1.py",  # TAF 计算（需 pandas/numpy，详见模块顶部注释）
 ]
@@ -343,8 +343,9 @@ def main():  # 主入口：组织工况 → 检查 → 并行建模/后处理 �
             print("错误：工况 #{} 与工况 #{} 生成了相同的文件夹名 -> {}".format(
                 idx, seen[folder_name], folder_name)); sys.exit(1)  # 报错退出
         seen[folder_name] = idx  # 记录已用名
-        folder_plan.append((folder_name, case["config"], case.get("fc")))  # 记录(文件夹,配置,fc)
-        s = case.get("_set", "?")  # 工况集标签
+        _set_label = case.get("_set", "?")  # 工况集标签
+        folder_plan.append((folder_name, case["config"], case.get("fc"), _set_label))  # 记录(文件夹,配置,fc,集标签)
+        s = _set_label  # 工况集标签
         set_counts[s] = set_counts.get(s, 0) + 1  # 统计各集数量
 
     # 打印各集工况数汇总（用于人工核对）
@@ -356,12 +357,12 @@ def main():  # 主入口：组织工况 → 检查 → 并行建模/后处理 �
     failed_folders = []  # 失败目录列表
 
     def process_folder(item):  # 处理单个工况文件夹的工作函数
-        """item=(folder_name, config, fc)；按 fc 选 Ricker、写 config、执行脚本序列；返回(path,ok)。"""
-        folder_name, config, fc = item  # 解包
+        """item=(folder_name, config, fc, _set)；按 fc 选 Ricker、写 config、执行脚本序列；返回(path,ok)。"""
+        folder_name, config, fc, _set = item  # 解包
         folder_path = os.path.join(root_dir, folder_name)  # 文件夹完整路径
         print("\n==============================")  # 分隔符
         print("开始处理文件夹：{} (fc={} Hz, 集={})".format(
-            folder_path, fc, config.get("_set", "?")))  # 当前文件夹与工况信息
+            folder_path, fc, _set))  # 当前文件夹与工况信息
 
         # 为该工况构建源文件映射：脚本 + 单一 Ricker
         ricker_path = _ricker_path(fc)  # 该工况对应的 Ricker 波文件路径
