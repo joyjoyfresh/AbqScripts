@@ -25,12 +25,14 @@ import concurrent.futures  # 导入并发模块以实现多文件夹并行执行
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置目标模型根目录（各工况文件夹建在此）
 FOLDER_PREFIX = "multi-"  # 设置目标文件夹前缀
 DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".com"]  # 每个文件夹脚本执行后要直接删除的文件类型；为空则不删除
-MAX_WORKERS = 4  # 并行处理文件夹的最大线程数
+MAX_WORKERS = 2  # 并行处理文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名（建模脚本 v5 会读取它）
 
 # 固定源文件（随每个工况文件夹拷入）：仅输入波 .txt（建模脚本已自包含写出 case_meta.json，无需再拷模块）
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",  # 4 Hz Ricker 输入波（a0=2.0 @ Vs2=800）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_6Hz.txt",  # 6 Hz Ricker 输入波
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_8Hz.txt",  # 8 Hz Ricker 输入波
 ]  # 结束固定源文件完整路径定义
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
@@ -58,11 +60,8 @@ def _layers3(surf_vr, surf_thick):  # 生成三层 layers（表层软硬/厚度�
 
 
 PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 config 生成）
-    # ---- A) 三层（论文图15）：i=45 固定，软/硬×厚度×角度 = 8 工况 ----
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软 Vs1/Vs2=0.5, h1/(H-h)=0.25, 0°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软, 0.25, 15°
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬 Vs1/Vs2=2.0, 0.25, 0°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬, 0.25, 15°
+    {"config": {"material_cfg": {"angle": 0},  "geometry_cfg": {"i": 30.0}}},  # 双层, i=30, 0°
+    {"config": {"material_cfg": {"angle": 15}, "geometry_cfg": {"i": 30.0}}},  # 双层, i=30, 15°
 ]  # 结束变参数工况列表定义
 
 
