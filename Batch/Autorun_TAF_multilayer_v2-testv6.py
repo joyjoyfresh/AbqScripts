@@ -35,9 +35,9 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v5.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v6.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v1.py",  # TAF 计算
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
 
 # ============================================================

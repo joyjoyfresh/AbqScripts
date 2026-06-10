@@ -214,10 +214,8 @@ RECORD_PREFER = '4Hz'  # 优先选用的输入记录标识（图15 用 4 Hz Rick
 
 # 不同 Vs1/Vs2（软/硬）曲线样式：键为四舍五入到 2 位的比值（色盲安全配色）
 RATIO_STYLES = {
-    0.5: {'color': CB_PALETTE['vermillion'], 'linestyle': '-', 'linewidth': 1.2,   # 软表层：朱红实线
-          'label': r'$V_{s1}/V_{s2}=0.5$'},
-    2.0: {'color': CB_PALETTE['blue'], 'linestyle': '--', 'linewidth': 1.2,        # 硬表层：蓝色虚线
-          'label': r'$V_{s1}/V_{s2}=2.0$'},
+    0.5: {'color': CB_PALETTE['vermillion'], 'linestyle': '-', 'linewidth': 1.2},   # 软表层：朱红实线
+    2.0: {'color': CB_PALETTE['blue'], 'linestyle': '--', 'linewidth': 1.2},        # 硬表层：蓝色虚线
 }
 FALLBACK_STYLES = [  # 比值不在上表时按序兜底取用（同样色盲安全）
     {'color': CB_PALETTE['green'], 'linestyle': '-.', 'linewidth': 1.2},       # 兜底1：绿色点划线
@@ -349,11 +347,10 @@ def set_x_axis(ax, total_L):  # 统一设置横轴范围与刻度
 def style_for_ratio(ratio, used):  # 为某 Vs1/Vs2 取曲线样式
     """返回 (style_dict, label)；优先用预设软/硬样式，否则按序兜底。"""
     key = round(ratio, 2)  # 比值键
+    label = r'$V_{s1}/V_{s2}=%.2f$' % ratio  # 图例文本（数学体）
     if key in RATIO_STYLES:  # 命中预设样式
-        s = RATIO_STYLES[key]  # 取预设样式
-        return dict(s), s['label']  # 返回样式副本与图例
-    s = dict(FALLBACK_STYLES[used % len(FALLBACK_STYLES)])  # 兜底样式
-    return s, r'$V_{s1}/V_{s2}=%.2f$' % ratio  # 兜底图例
+        return dict(RATIO_STYLES[key]), label  # 返回预设样式副本与图例
+    return dict(FALLBACK_STYLES[used % len(FALLBACK_STYLES)]), label  # 返回兜底样式与图例
 
 
 def draw_fig15_panel(ax, angle, key, ylabel, ylim, ctx, title=None, show_xlabel=True):  # 绘制单个图15 面板

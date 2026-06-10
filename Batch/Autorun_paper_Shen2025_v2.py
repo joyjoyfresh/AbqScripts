@@ -38,14 +38,14 @@ import concurrent.futures  # 导入并发模块（本脚本 MAX_WORKERS=1，但�
 # ==============================================================================
 
 FOLDER_PREFIX = "shen2025-"  # 工况文件夹统一前缀（与旧 multi- 前缀区分）
-MAX_WORKERS = 3  # 并行处理文件夹数：每个 Abaqus 作业已用 8 CPU，设为 1 避免超订
+MAX_WORKERS = 2  # 并行处理文件夹数：每个 Abaqus 作业已用 8 CPU，设为 1 避免超订
 CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名
 
 # 建模、提取、计算 TAF 三步脚本（直接指定绝对路径）
 SCRIPT_SEQUENCE = [  # 每工况文件夹内按序执行的脚本
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v4.py",  # 建模（v4：配置注入 + 材料阻尼 + 写 case_meta.json）
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取（需 Abaqus Python + odbAccess）
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v1.py",  # TAF 计算（需 pandas/numpy，详见模块顶部注释）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v6.py",  # 建模（v6：fd 频域精确自由场引擎）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算（v2：解析自由场分母，论文式(5) 口径）
 ]
 
 # Ricker 输入波文件夹（已有 2/4/6/8 Hz，覆盖全部 68 工况）
@@ -58,7 +58,7 @@ DELETE_FILE_TYPES = [".odb", ".jnl", ".inp", ".msg", ".prt", ".dat", ".sta", ".s
 POST_SCRIPT_SEQUENCE = [  # 汇总与跨工况出图脚本
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Collect_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Multi_TAF_v2.py",  # 图8 排版
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Fig15_compare_v2.py",  # 图15 对比
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Fig15_compare_v3.py",  # 图15 对比
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_dist_param_v1.py",  # 图11/13 分布参数
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_peakTAF_v1.py",  # 图9/12/16 峰值TAF
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_PGA_box_v1.py",  # 图20 PGA盒须
