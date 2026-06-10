@@ -51,7 +51,7 @@ CB_PALETTE = {  # Okabe-Ito 色盲安全配色（命名取色）
     'green': '#009E73',   # 绿
     'yellow': '#F0E442',  # 黄
     'blue': '#0072B2',    # 蓝
-    'vermillion': '#D55E00',  # 朱红
+    'vermillion': '#E41A1C',  # 朱红
     'purple': '#CC79A7',  # 紫
 }
 

@@ -214,16 +214,16 @@ def save_composite_with_panels(out_root, fig_name, composite_fig, panel_specs,  
 # ==============================================================================
 A0_DECIMALS = 1  # a0 数值四舍五入保留的小数位（用于分组与样式匹配）
 
-# 各 a0 对应的曲线样式（论文图8：1.0 虚线、1.5 点划线、2.0 实线，配不同颜色便于区分）
-A0_STYLES = {  # 色盲安全配色(Okabe-Ito) + 区分线型，灰度下仍可分
-    1.0: {'color': CB_PALETTE['blue'], 'linestyle': '--', 'linewidth': 1.2},    # a0=1.0：蓝色虚线
-    1.5: {'color': CB_PALETTE['orange'], 'linestyle': '-.', 'linewidth': 1.2},  # a0=1.5：橙色点划线
-    2.0: {'color': CB_PALETTE['black'], 'linestyle': '-', 'linewidth': 1.3},    # a0=2.0：黑色实线
+# 各 a0 对应的曲线样式（按用户给定图例：1.0 绿色虚线、1.5 蓝色虚线、2.0 红色实线）
+A0_STYLES = {  # 使用与参考图片一致的颜色和线型
+    1.0: {'color': '#55A868', 'linestyle': '--', 'linewidth': 1.2},  # a0=1.0：绿色虚线
+    1.5: {'color': '#56B4E9', 'linestyle': '--', 'linewidth': 1.2},  # a0=1.5：蓝色虚线
+    2.0: {'color': '#E41A1C', 'linestyle': '-', 'linewidth': 1.3},   # a0=2.0：红色实线
 }
-FALLBACK_STYLES = [  # a0 不在上表时按序兜底取用的样式（同样色盲安全）
-    {'color': CB_PALETTE['green'], 'linestyle': ':', 'linewidth': 1.2},       # 兜底1：绿色点线
-    {'color': CB_PALETTE['vermillion'], 'linestyle': '-', 'linewidth': 1.2},  # 兜底2：朱红实线
-    {'color': CB_PALETTE['purple'], 'linestyle': '--', 'linewidth': 1.2},     # 兜底3：紫色虚线
+FALLBACK_STYLES = [  # a0 不在上表时按序兜底取用的样式
+    {'color': CB_PALETTE['orange'], 'linestyle': '-.', 'linewidth': 1.2},     # 兜底1：橙色点划线
+    {'color': CB_PALETTE['purple'], 'linestyle': ':', 'linewidth': 1.2},      # 兜底2：紫色点线
+    {'color': CB_PALETTE['black'], 'linestyle': '--', 'linewidth': 1.2},      # 兜底3：黑色虚线
 ]
 
 COLUMNS = [  # 子图列定义：(数据键, 纵轴标签, 纵轴范围或None自适应)
@@ -413,7 +413,9 @@ def draw_taf_panel(ax, i_ang, theta, key, ylabel, ylim, ctx, title=None, show_xl
                 linewidth=s['linewidth'], label=label)
     x_max = set_x_axis(ax, ctx['total_L'])  # 设置横轴范围与刻度
     ax.set_ylim(*ylim)  # 设置该列统一纵轴范围
-    if key == 'taf_h':  # 水平向 TAF
+    if key == 'taf_h' and int(round(i_ang)) == 30:  # 图(a) i=30° 的水平向 TAF
+        ax.yaxis.set_major_locator(mticker.LinearLocator(4))  # 纵轴分 3 格（4 个刻度点）
+    elif key == 'taf_h':  # 图(b) i=60° 及其他坡角的水平向 TAF
         ax.yaxis.set_major_locator(mticker.LinearLocator(5))  # 纵轴分 4 格（5 个刻度点）
     elif int(round(i_ang)) == 30:  # 图(a) i=30° 的垂直向 TAF
         ax.yaxis.set_major_locator(mticker.LinearLocator(6))  # 纵轴分 5 格（6 个刻度点）
