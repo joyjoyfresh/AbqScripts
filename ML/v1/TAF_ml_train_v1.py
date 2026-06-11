@@ -4,13 +4,15 @@ TAF 地形放大系数 机器学习预测模型 v1
 =====================================
 多模型对比训练与评估脚本
 
-数据源: E:\Abaqus\fuke-ALL\1-TAF_grouped\TAF-El_Centro-all.csv
+数据源: E:\\Abaqus\\fuke-ALL\\1-TAF_grouped\\TAF-El_Centro-all.csv
 划分策略: 按工况 (h, i, angle) 整体划分 80/20
 模型: LinearRegression, Ridge, KNN, SVR, RandomForest,
       GradientBoosting, XGBoost, LightGBM, MLP
 """
 
 import os
+import sys
+import io
 import time
 import json
 import pickle
@@ -18,6 +20,12 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+# 修复 Windows 终端 GBK 编码问题
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 from matplotlib import rcParams
 
 from sklearn.model_selection import GroupShuffleSplit
@@ -37,7 +45,9 @@ warnings.filterwarnings('ignore')
 # 配置
 # ============================================================
 ROOT_DIR = r"E:\Abaqus\fuke-ALL"
-OUTPUT_DIR = r"E:\Abaqus\fuke-ALL\ML_results"
+# 输出到脚本同目录下的 outputs 文件夹
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, 'outputs')
 RANDOM_STATE = 42
 TEST_SIZE = 0.2  # 20% 验证集
 EARTHQUAKE_NAMES = ['El_Centro', 'Loma_Prieta', 'Northridge']
@@ -275,7 +285,7 @@ def train_all_models(X_train, X_val, X_train_s, X_val_s, y_train, y_val):
 def summarize_results(results):
     """生成对比汇总表"""
     print("\n" + "=" * 60)
-    print("4. 模型对比排名 (按验证集 R² 降序)")
+    print("4. 模型对比排名 (按验证集 R2 降序)")
     print("=" * 60)
 
     rows = []

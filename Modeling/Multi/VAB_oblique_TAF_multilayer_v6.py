@@ -117,7 +117,7 @@ time_cfg = {                    # 时间步充分性校验配置（项③：安�
 
 
 freefield_cfg = {               # v6 新增：自由场引擎配置（可被 case_config.json 覆盖）
-    'engine': 'ray',            #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=v5 射线法（回归对比用）
+    'engine': 'fd',             #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=v5 射线法（回归对比用）
     'include_damping': True,    # fd 引擎是否在自由场中计入与模型介质一致的瑞利阻尼
     'spectrum_tol': 1e-7,       # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
     'fcut': None,               # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
