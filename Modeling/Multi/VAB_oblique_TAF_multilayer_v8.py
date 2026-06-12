@@ -52,7 +52,7 @@ from collections import namedtuple  # 导入命名元组用于参数打包
 
 # 默认材料参数配置
 material_cfg = {
-    'angle': 15,                # 设置 SV 波入射角度（度）：与 double_v4 一致（批处理可替换 0/15）
+    'angle': 15,                # 设置 SV 波入射角度（度）
     'surface_geometry': 'horizontal',  #! 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
     # 定义基岩材料参数
     'bedrock': {                
@@ -105,14 +105,14 @@ mesh_cfg = {
     'elems_per_wavelength': 10, # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
     'fmax_factor': 2.5,         # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
     'min_size': 0.5,            # 网格下限（m）：防止过软层或超高频时计算量爆炸
-    'elem': 'CPE4',             # v7：单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
+    'elem': 'CPE4R',             # v7：单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
 }
 
 # 时间步充分性校验配置（安全护栏，当前 dt=1e-3 均达标不触发重采样）
 time_cfg = {
-    'check': True,              # True=检查输入记录 dt 是否满足最低步/周期要求
+    'check': False,              # True=检查输入记录 dt 是否满足最低步/周期要求
     'min_steps_per_fmax_period': 20,  # 每 fmax 周期最少采样步数（dt <= 1/(fmax*20) 才达标）
-    'resample_if_violate': True,   # 不满足时是否自动重采样（np.interp 升采样）
+    'resample_if_violate': False,   # 不满足时是否自动重采样（np.interp 升采样）
     'tail_seconds': 0.0,        # v8：静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
 }
 
@@ -128,7 +128,8 @@ freefield_cfg = {
 # 运行控制配置
 run_cfg = {
     'run_flat': False,          #! 是否建模并求解平坦对照模型（v6 起 TAF 分母为解析值，flat 仅作 QA；量产可设 False 省一半算力）
-    'surface_only': True,      # v8：True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
+    'surface_only': True,       # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
+    'critical_angle_check': False,  # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
 }
 
 
@@ -1784,7 +1785,8 @@ def _apply_amplitudes_and_loads(model_name, inst_name, nodes_by_boundary, field_
 def VAB_oblique(site, geom, angle,
                 model_name='Model-1', part_name='Part-1', inst_name='Part-1-1',
                 acc_file=None, step_name=None, logger=None, tcfg=None, fc_used=None,
-                ffcfg=None, damping=None, surface_geometry='horizontal'):
+                ffcfg=None, damping=None, surface_geometry='horizontal',
+                critical_angle_check=True):
     """为二维模型施加粘弹性人工边界（弹簧-阻尼器）与斜入射 SV 波等效节点力。
 
     site     : Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
@@ -1795,6 +1797,7 @@ def VAB_oblique(site, geom, angle,
     ffcfg    : freefield_cfg 配置 dict（v6：'fd'=频域精确分层自由场 / 'ray'=v5 射线法）
     damping  : 解析后的阻尼配置 dict（v6：fd 引擎据此使自由场衰减与 FE 介质一致）
     surface_geometry: v7 表层几何模式（与建模同口径，决定边界弹簧选材与自由场柱分层）
+    critical_angle_check: v8 临界角校验开关（True=超临界拒绝建模 / False=仅告警不中断）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     t0 = time.time()  # 记录函数开始时间
@@ -1869,13 +1872,17 @@ def VAB_oblique(site, geom, angle,
 
     cs1 = mat_bedrock['cs']  # 基岩剪切波速
     cp1 = mat_bedrock['cp']  # 基岩纵波波速
-    # ── v8：SV 入射临界角校验（§3.1-A2 硬化） ──────────────────────────────────
+    # ── v8：SV 入射临界角校验（§3.1-A2 硬化，可由 run_cfg['critical_angle_check'] 关闭） ──
     # 基岩中 SV→P 临界角 = asin(cs/cp)（ν=0.3 时≈32.31°）；超临界后自由面反射 P 为非均匀波，
-    # ray 引擎实角公式与 TAF 解析分母 factor_h 均失效，故达到临界角直接拒绝建模；
-    # 论文工况以 30° 为上限，超过时仅告警。
+    # ray 引擎实角公式与 TAF 解析分母 factor_h 均失效，故默认达到临界角直接拒绝建模；
+    # 关闭校验时仅输出警告、不中断，便于探索超临界工况。论文工况以 30° 为上限。
     crit_deg = math.degrees(math.asin(cs1 / cp1))  # 基岩 SV 临界角（度）
     if angle >= crit_deg - 1e-6:  # 入射角达到/超过临界角
-        raise ValueError('入射角 %.2f° >= 基岩临界角 %.2f°（超临界非均匀波不在本方法适用域内）' % (angle, crit_deg))  # 拒绝建模
+        if critical_angle_check:  # 启用校验：硬性拦截
+            raise ValueError('入射角 %.2f° >= 基岩临界角 %.2f°（超临界非均匀波不在本方法适用域内）' % (angle, crit_deg))  # 拒绝建模
+        else:  # 关闭校验：仅告警不中断
+            log_step(logger, '%s 警告: 入射角 %.2f° >= 基岩临界角 %.2f°（已关闭临界角校验，超临界结果可能不可靠）',
+                     model_name, angle, crit_deg)  # 输出告警
     if angle > 30.0:  # 超过论文采用的上限
         log_step(logger, '%s 警告: 入射角 %.2f° > 30°（论文上限），已接近临界角 %.2f°，结果须谨慎使用',
                  model_name, angle, crit_deg)  # 输出告警
@@ -1960,7 +1967,7 @@ def build_models(acc_info, base_model, part_name, inst_name,
                  site, geom, angle, job,
                  step_name=DEFAULT_STEP_NAME, model_scene='slope', logger=None,
                  tcfg=None, fc_used=None, ffcfg=None, damping=None, surface_geometry='horizontal',
-                 surface_only=False):
+                 surface_only=False, critical_angle_check=True):
     """根据加速度时程信息批量复制模型、创建分析步、施加人工边界。
 
     site/geom : 场地材料与几何对象（直接转发给 VAB_oblique）
@@ -2009,7 +2016,8 @@ def build_models(acc_info, base_model, part_name, inst_name,
                     model_name=new_model_name, part_name=part_name, inst_name=inst_name,  # 传入模型/零件/实例名称
                     acc_file=acc_file, step_name=step_name, logger=logger,  # 传入加速度文件、分析步与日志器
                     tcfg=tcfg, fc_used=fc_used, ffcfg=ffcfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼配置
-                    surface_geometry=surface_geometry)  # v7：表层几何模式（与建模同口径）
+                    surface_geometry=surface_geometry,  # v7：表层几何模式（与建模同口径）
+                    critical_angle_check=critical_angle_check)  # v8：临界角校验开关透传
         model_names.append(new_model_name)  # 记录新模型名称
 
     return model_names  # 返回模型名称列表
@@ -2445,7 +2453,8 @@ def main():
             site=site, geom=geom, angle=material_cfg['angle'],  # 场地、斜坡几何与入射角
             job=job_cfg, model_scene='slope', logger=logger,  # 作业配置与斜坡场景标签
             tcfg=_time_cfg, fc_used=fc_resolved, ffcfg=_ff_cfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼
-            surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)))  # v7 表层几何 + v8 输出瘦身
+            surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)),  # v7 表层几何 + v8 输出瘦身
+            critical_angle_check=bool(_run_cfg.get('critical_angle_check', True)))  # v8：临界角校验开关
 
         flat_model_names = []  # 平坦模型名称列表（默认空）
         if run_flat:  # 需要平坦对照模型时才建模
@@ -2454,7 +2463,8 @@ def main():
                 site=site, geom=geom_flat, angle=material_cfg['angle'],  # 场地、平坦几何与入射角
                 job=job_cfg, model_scene='flat', logger=logger,  # 作业配置与平坦场景标签
                 tcfg=_time_cfg, fc_used=fc_resolved, ffcfg=_ff_cfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼
-                surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)))  # v7 表层几何 + v8 输出瘦身
+                surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)),  # v7 表层几何 + v8 输出瘦身
+                critical_angle_check=bool(_run_cfg.get('critical_angle_check', True)))  # v8：临界角校验开关
 
         model_names = slope_model_names + flat_model_names  # 合并两类模型名称用于统一提交作业
 

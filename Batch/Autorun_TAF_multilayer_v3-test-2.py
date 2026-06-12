@@ -35,10 +35,16 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v6.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_v7.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
+
+# 全部工况求解完成后自动执行的后处理脚本（直接指定绝对路径）
+POST_SCRIPT_SEQUENCE = [  # 汇总与跨工况出图脚本
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Collect_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Fig15_compare_v3.py",  # 三层图15 出图
+]
 
 # ============================================================
 #  变参数工况表：每项只需写 {config: 注入给建模脚本的配置覆盖}。
@@ -262,12 +268,34 @@ def main():  # 主控制流程
                 failed_folders.append(folder_path)  # 记录失败
     print("\n==============================")  # 总结分隔符
     if failed_folders:  # 有失败
-        print("批处理结束：存在失败文件夹。")  # 失败标题
+        print("批处理结束：存在失败文件夹（{}个）。".format(len(failed_folders)))  # 失败标题
         for path in failed_folders:  # 遍历失败
             print("  - {}".format(path))  # 打印路径
         sys.exit(2)  # 异常退出
-    print("批处理结束：全部文件夹处理完成。")  # 全部成功
-    print("提示：随后运行 Postprocess/General/Collect_results_v2.py 汇总，再用 Postprocess/Multi/Plot_Multi_TAF_v4.py 跨工况出图。")  # 后续步骤提示
+    print("批处理结束：全部 {} 个工况文件夹处理完成。".format(len(folder_plan)))  # 全部成功
+
+    # 后处理阶段：拷贝后处理脚本到根目录并顺序执行
+    print("\n==============================")  # 后处理分隔符
+    print("开始自动后处理脚本阶段...")  # 阶段标题
+    post_run_order = []  # 收集后处理脚本文件名
+    for src_path in POST_SCRIPT_SEQUENCE:  # 遍历后处理脚本
+        if not os.path.isfile(src_path):  # 源脚本不存在
+            print("错误：后处理脚本缺失 -> {}".format(src_path))  # 报错
+            sys.exit(3)  # 退出
+        target_name = os.path.basename(src_path)  # 目标文件名
+        dst_path = os.path.join(root_dir, target_name)  # 目标路径
+        shutil.copy2(src_path, dst_path)  # 拷贝到根目录
+        post_run_order.append(target_name)  # 记录执行顺序
+        print("已拷贝后处理脚本：{}".format(target_name))  # 确认拷贝
+
+    for script_name in post_run_order:  # 按顺序执行后处理脚本
+        script_path = os.path.join(root_dir, script_name)  # 脚本完整路径
+        print("开始执行后处理：{}".format(script_path))  # 开始日志
+        result = subprocess.run([sys.executable, script_name, root_dir], cwd=root_dir, check=False)  # 在根目录执行并传入目录参数
+        if result.returncode != 0:  # 执行失败
+            print("错误：{} 执行失败，返回码={}".format(script_name, result.returncode))  # 报错
+            sys.exit(4)  # 后处理失败退出
+        print("完成后处理：{}".format(script_name))  # 完成日志
 
 
 if __name__ == "__main__":  # 主入口
