@@ -99,6 +99,7 @@ job_cfg = {
 damping_cfg = {
     'enable': True,             # 是否施加材料阻尼（False 则退化为无阻尼行为）
     'method': 'rayleigh',       # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定 Q) / 'stiffness'=仅刚度比例(β)
+    'constant_xi': 0.02,        #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
     'qs_factor': 0.05,          # Qs = qs_factor*cs（论文 coarse-grain 法，cs 单位 m/s）
     'q_bedrock': 999.0,         # 基岩品质因子(≈无衰减)
     'fc': None,                 # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
@@ -127,7 +128,7 @@ mesh_cfg = {
 time_cfg = {
     'check': False,              # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
     'min_steps_per_fmax_period': 20,  # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
-    'tail_seconds': 0.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
+    'tail_seconds': 2.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
 }
 
 # 自由场引擎配置
@@ -332,15 +333,22 @@ def _estimate_dominant_freq(acc, dt):  # 从加速度时程估计主频 fc
 
 def _damping_ratio_from_q(cs, is_bedrock, dcfg):  # 由 Q 值换算阻尼比 ξ
     """根据剪切波速与是否基岩，计算品质因子 Q 与阻尼比 ξ=1/(2Q)。
-
-    cs : 该层剪切波速 (m/s)；is_bedrock：是否基岩层；dcfg：阻尼配置（含 qs_factor/q_bedrock）。
+    
+    支持通过 dcfg['constant_xi'] 指定全场有限土层的统一恒定阻尼比。
+    cs : 该层剪切波速 (m/s)；is_bedrock：是否基岩层；dcfg：阻尼配置（含 qs_factor/q_bedrock/constant_xi）。
     返回 (Q, xi)。
     """
     if is_bedrock:  # 基岩层
         Q = dcfg['q_bedrock']  # 基岩 Q≈999（近乎无衰减）
+        xi = 1.0 / (2.0 * Q)
     else:  # 有限层
-        Q = dcfg['qs_factor'] * cs  # Qs = qs_factor * cs（论文 coarse-grain 法）
-    xi = 1.0 / (2.0 * Q)  # 阻尼比 ξ = 1/(2Q)
+        constant_xi = dcfg.get('constant_xi')
+        if constant_xi is not None:
+            xi = float(constant_xi)  # 使用统一恒定阻尼比
+            Q = 1.0 / (2.0 * xi)     # 反推 Q 值供记录使用
+        else:
+            Q = dcfg['qs_factor'] * cs  # Qs = qs_factor * cs（论文 coarse-grain 法）
+            xi = 1.0 / (2.0 * Q)  # 阻尼比 ξ = 1/(2Q)
     return Q, xi  # 返回品质因子与阻尼比
 
 
