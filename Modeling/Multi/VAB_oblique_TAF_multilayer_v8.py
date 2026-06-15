@@ -37,12 +37,20 @@ from collections import namedtuple  # 导入命名元组用于参数打包
 #    3. 自动对拍与建模自检：
 #       - 建模前自动执行一维解析解对拍（半空间退化 + 单层 SH 校验），误差 > 1e-3 即强行中止。
 #       - 自动计算远场一维地表 PGA 理论值，并向 case_meta.json 写入 ff_theory 块用于精度 QA。
-#    4. 双控锚定阻尼：瑞利阻尼拟合下限 f1 取 min(f1_factor·fc, f_site)（f_site 为垂直走时估算
-#       的上平台场地基频），保证拟合频带可有效覆盖场地基频与输入主频。
+#    4. 逐层重锚定阻尼 (damping_cfg['anchor']='perband')：每层瑞利拟合频带按【该层自身共振基频
+#       f_layer=Vs/(4·d) 及其谐波】重锚定——f1=min(f1_factor·fc, f_layer)、
+#       f2=max(f2_factor·fc, harmonics_cover·f_layer)，把软薄层混响频段纳入拟合带，
+#       避免其落在刚度比例项 β 主导的高频段被严重过阻尼（旧 'input'/'dual' 模式保留可选）。
 #    5. ODB 瘦身与频域提取前置：
 #       - 延长 time_cfg['tail_seconds'] 静默尾段，便于捕捉坡体混响衰减并提取频域传递函数 H(f)；
 #       - run_cfg['surface_only']=True 可只输出地表节点全时程并对整体场输出降频，急剧骤降 ODB 体积。
-#    6. 网格与时间步自适应：基于最软层 K-L 判据自适应划分网格（mesh_cfg.auto），自动校验 dt 采样。
+#    6. 网格自适应与时间步诊断：基于最软层 K-L 判据自适应划分网格（mesh_cfg.auto）；
+#       分层非均匀网格（mesh_cfg.graded，默认开）——按层波速比缩放单元尺寸(软层细/深部粗，
+#       自由四边形平滑过渡)，在保证各层 K-L 精度的同时大幅减少深部基岩单元数；
+#       软层谐波自适应加密（resolve_harmonics + min_elems_through_thickness）：薄软层按其
+#       共振谐波 resolve_harmonics·f_layer 与穿层单元数判据自动加密(与 perband 阻尼保留频带对齐)，
+#       下限优先满足穿层判据(不被 min_size 钳)，解决薄软层混响高次谐波的空间欠采样；
+#       模拟步长始终 = 输入地震动 txt 的 dt，不再重采样（避免改变步数），仅在输入偏粗时给出警告。
 # ==========================================================
 
 
@@ -96,29 +104,35 @@ damping_cfg = {
     'fc': None,                 # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
     'f1_factor': 0.5,           # 双频拟合下限 = f1_factor*fc
     'f2_factor': 2.5,           # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
-    'anchor': 'input',          # v8：拟合锚定 'input'=仅输入主频(=v7) / 'dual'=场地基频+输入主频双控
+    'anchor': 'perband',        # 拟合锚定 'perband'=逐层按各层共振频带重锚定(默认,解决软层高频过阻尼) / 'input'=仅输入主频 / 'dual'=场地基频+输入主频双控
+    'harmonics_cover': 3.0,     # perband 模式下拟合上限覆盖到各层共振基频的几次谐波（f2≥harmonics_cover·f_layer，默认3≈保留前两三阶混响谐波）
 }
 
 # 网格自适应配置（对齐论文式1 Kuhlemeyer-Lysmer 判据）
 mesh_cfg = {
-    'auto': True,               # True=自动按最软层/最高频率计算 Δl_max；False=强制使用 mesh_size
+    'size': 4.0,                # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
+    'auto': True,               # True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
     'elems_per_wavelength': 10, # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
     'fmax_factor': 2.5,         # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
     'min_size': 0.5,            # 网格下限（m）：防止过软层或超高频时计算量爆炸
-    'elem': 'CPE4R',             # v7：单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
+    'elem': 'CPE4R',             # 单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
+    'graded': True,             # 分层非均匀网格——按层波速比缩放单元尺寸(软层细/深部粗,自由四边形平滑过渡)；False=全局均匀
+    'max_band_ratio': 4.0,      # 最粗层单元 ≤ 该倍数×最细层(=mesh_used)，限制过渡比以保证网格质量
+    'max_size': None,           # 单元绝对上限(m)，None=不额外限制(仅受 max_band_ratio 约束)
+    'resolve_harmonics': 3.0,   # 薄软层加密——网格至少解析到各层共振基频 f_layer=cs/(4h) 的该倍数谐波(与 perband 阻尼 harmonics_cover 对齐)；0/None=关闭
+    'min_elems_through_thickness': 6,  # 每个有限层厚度方向至少单元数(保证薄层驻波/混响形态)；该判据优先于 min_size
 }
 
-# 时间步充分性校验配置（安全护栏，当前 dt=1e-3 均达标不触发重采样）
+# 时间步配置：模拟步长【始终等于输入地震动 txt 的 dt】，脚本不再重采样（避免步数被改变）
 time_cfg = {
-    'check': False,              # True=检查输入记录 dt 是否满足最低步/周期要求
-    'min_steps_per_fmax_period': 20,  # 每 fmax 周期最少采样步数（dt <= 1/(fmax*20) 才达标）
-    'resample_if_violate': False,   # 不满足时是否自动重采样（np.interp 升采样）
-    'tail_seconds': 0.0,        # v8：静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
+    'check': False,              # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
+    'min_steps_per_fmax_period': 20,  # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
+    'tail_seconds': 0.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
 }
 
 # 自由场引擎配置
 freefield_cfg = {
-    'engine': 'fd',             #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=v5 射线法（回归对比用）
+    'engine': 'fd',             #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=射线法（回归对比用）
     'include_damping': True,    # fd 引擎是否在自由场中计入与模型介质一致的瑞利阻尼
     'spectrum_tol': 1e-7,       # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
     'fcut': None,               # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
@@ -127,7 +141,7 @@ freefield_cfg = {
 
 # 运行控制配置
 run_cfg = {
-    'run_flat': False,          #! 是否建模并求解平坦对照模型（v6 起 TAF 分母为解析值，flat 仅作 QA；量产可设 False 省一半算力）
+    'run_flat': False,          #! 是否建模并求解平坦对照模型（TAF 分母为解析值，flat 仅作 QA；量产可设 False 省一半算力）
     'surface_only': True,       # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
     'critical_angle_check': False,  # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
 }
@@ -136,8 +150,6 @@ run_cfg = {
 # ==========================================================
 #  模块常量与全局状态
 # ==========================================================
-
-mesh_size = 4  # 默认全局网格尺寸（m），若 mesh_cfg['auto'] 为 False 则强制采用
 
 _DEFAULT_SCRIPT_NAME = 'VAB_oblique_TAF_multilayer_v8.py'  # 本脚本已知文件名（__file__ 缺失时的兜底）
 DEFAULT_STEP_NAME = 'Step-earthquake'  # 定义默认分析步名称
@@ -171,9 +183,9 @@ BoundaryNode = namedtuple('BoundaryNode',
 FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
     'site', 'geom', 'strat', 'ymax_l', 'ymax_r', 'ymin',  # 场地、几何、分层带、各边界高度信息
     'alpha', 'beta_p', 'p_horiz',  # 基岩 SV 入射角、基岩 P 反射角、水平慢度（Snell 守恒）
-    'GG', 'lam', 'cs', 'cp',  # 基岩剪切模量/拉梅常数/波速（投影与应力公式沿用 v4 用基岩标量）
+    'GG', 'lam', 'cs', 'cp',  # 基岩剪切模量/拉梅常数/波速（投影与应力公式使用基岩标量）
     'VEL', 'DIS', 'dt', 'time_arr', 'max_reflect_order',  # 速度/位移时程、步长、时间轴、反射阶数
-    'acc', 'damp_terms', 'ffcfg'])  # v6 新增：原始加速度记录、各带瑞利系数表、自由场引擎配置
+    'acc', 'damp_terms', 'ffcfg'])  # 原始加速度记录、各带瑞利系数表、自由场引擎配置
 
 
 # ==========================================================
@@ -189,7 +201,7 @@ def _script_path():  # 安全获取当前脚本绝对路径（Abaqus 内核可�
 
 
 def _script_name():  # 安全获取当前脚本文件名（仅名字部分）
-    """返回脚本文件名（如 'VAB_oblique_TAF_multilayer_v4.py'），不依赖 __file__。"""
+    """返回脚本文件名（如 'VAB_oblique_TAF_multilayer_v8.py'），不依赖 __file__。"""
     return os.path.basename(_script_path())  # 取路径基名
 
 
@@ -332,23 +344,35 @@ def _damping_ratio_from_q(cs, is_bedrock, dcfg):  # 由 Q 值换算阻尼比 ξ
     return Q, xi  # 返回品质因子与阻尼比
 
 
-def _rayleigh_coeffs(xi, dcfg, fc):  # 由阻尼比计算瑞利阻尼系数 α, β
+def _rayleigh_coeffs(xi, dcfg, fc, f_layer=None):  # 由阻尼比计算瑞利阻尼系数 α, β（支持逐层重锚定）
     """按指定方法将阻尼比 ξ 换算为 Abaqus 瑞利阻尼系数 (alpha, beta)。
 
-    xi : 阻尼比；dcfg：含 method/f1_factor/f2_factor；fc：主频 (Hz)。
+    xi      : 阻尼比；dcfg：含 method/f1_factor/f2_factor/anchor/harmonics_cover；fc：输入波主频 (Hz)。
+    f_layer : 该层自身一维共振基频 (Hz)，仅 anchor=='perband' 时使用；None=退化为输入主频锚定（如基岩）。
     method=='stiffness'：α=0、β=ξ/(π·fc)（fc 处 ξ 精确）；
-    其余（rayleigh 双频拟合）：在 f1=f1_factor·fc 与 f2=f2_factor·fc 两端 ξ 相等≈恒定 Q。
+    其余（rayleigh 双频拟合）按 anchor 选取拟合频带 [f1,f2]，两端 ξ 相等≈恒定 Q：
+      'input'  ：f1=f1_factor·fc，            f2=f2_factor·fc；
+      'dual'   ：f1=min(f1_factor·fc, f_site)，f2=f2_factor·fc（覆盖场地基频）；
+      'perband'：f1=min(f1_factor·fc, f_layer)，f2=max(f2_factor·fc, harmonics_cover·f_layer)
+                 —— 把该层自身共振及其前几阶谐波纳入拟合带，避免软薄层混响落在 β 主导的
+                 高频段被过阻尼（默认）。f2 抬高后 fc 处略偏欠阻尼，对保留混响是有利且偏保守的。
     返回 (alpha, beta)。
     """
     if dcfg['method'] == 'stiffness':  # 仅刚度比例阻尼
         alpha = 0.0  # 质量比例系数为零
         beta = xi / (math.pi * fc)  # β = ξ/(π·fc)，使 fc 处 ξ 精确
     else:  # 默认 rayleigh 双频拟合
+        anchor = dcfg.get('anchor', 'input')  # 拟合锚定方式
         f1 = dcfg['f1_factor'] * fc  # 拟合下限频率（默认锚定输入主频）
-        if dcfg.get('anchor') == 'dual' and dcfg.get('f_site'):  # v8：双控锚定（场地基频+输入主频）
+        f2 = dcfg['f2_factor'] * fc  # 拟合上限频率（默认锚定输入主频）
+        if anchor == 'perband' and f_layer and f_layer > 0:  # 逐层按该层共振频带重锚定
+            hc = float(dcfg.get('harmonics_cover', 3.0))  # 上限覆盖到共振基频的谐波次数
+            f1 = min(f1, float(f_layer))  # 下限纳入该层共振基频（薄软层 f_layer 高时下限不变）
+            f2 = max(f2, hc * float(f_layer))  # 上限纳入该层共振谐波，防止混响段被高频 β 过阻尼
+        elif anchor == 'dual' and dcfg.get('f_site'):  # 双控锚定（场地基频+输入主频）
             f1 = min(f1, float(dcfg['f_site']))  # 下限取较小者，使拟合带覆盖场地基频
         w1 = 2.0 * math.pi * f1  # 拟合下限圆频率
-        w2 = 2.0 * math.pi * dcfg['f2_factor'] * fc  # 拟合上限圆频率
+        w2 = 2.0 * math.pi * f2  # 拟合上限圆频率
         alpha = 2.0 * xi * w1 * w2 / (w1 + w2)  # 瑞利 α（两端 ξ 相等≈恒定 Q）
         beta = 2.0 * xi / (w1 + w2)  # 瑞利 β
     return alpha, beta  # 返回瑞利阻尼系数
@@ -366,12 +390,12 @@ def _resolve_damping(dcfg, fc_est):  # 解析阻尼配置（补全 fc 字段）
     return resolved  # 返回解析后配置
 
 
-def _site_fundamental_freq(site, geom):  # v8：估算上平台柱场地基频 f_site = 1/Ts
+def _site_fundamental_freq(site, geom):  # 估算上平台柱场地基频 f_site = 1/Ts
     """Ts = 4·Σ(d_i/Vs_i)（上平台柱各有限层垂直走时），无有限层返回 None。
 
     固定厚度层取其 thickness；最底覆盖层厚度 = H_upper − 基岩厚 − Σ固定厚度。
     供 damping_cfg['anchor']=='dual' 的瑞利双控拟合使用（f1 锚定 min(f1_factor·fc, f_site)），
-    对应 research_plan_v1.md §3.1-A4 "场地基频与输入卓越频率双控"。
+    对应 research_plan.md 中"场地基频与输入卓越频率双控"的设计要点。
     """
     if not site.layers:  # 均质场地（无有限层）
         return None  # 无场地基频概念
@@ -386,12 +410,40 @@ def _site_fundamental_freq(site, geom):  # v8：估算上平台柱场地基频 f
     return 1.0 / (4.0 * travel)  # 场地基频 f_site = 1/(4Σd/Vs)
 
 
+def _band_resonance_freq(band):  # 由分层带几何估算该层一维共振基频 f=cs/(4·d)
+    """返回材料带 band 的四分之一波长共振基频 (Hz)，供 perband 逐层重锚定使用。
+
+    厚度 d 取标称上下界之差 (y1-y0)；d<=0 时返回 None（无有限厚度，如退化带/基岩半空间）。
+    薄软层 d 小 → f 高，正是需要把瑞利拟合上限抬高、以免混响被高频过阻尼的层。
+    与 _material_resonance_freq 数值同口径（厚度定义一致），保证建材/自由场/meta 三处 (α,β) 同源。
+    """
+    d = float(band['y1']) - float(band['y0'])  # 该带标称厚度（上平台口径）
+    if d <= 0:  # 厚度无效
+        return None  # 无共振频率概念
+    return float(band['mat'].cs) / (4.0 * d)  # 四分之一波长共振基频
+
+
+def _material_resonance_freq(mat, site, geom):  # 由材料层厚估算共振基频（meta 用，与分层带同口径）
+    """返回有限层 mat 的共振基频 cs/(4·d)；固定厚度层取 thickness，最底覆盖层厚度由几何推算。
+
+    仅对有限层调用（基岩半空间无共振概念，应由调用方传 None）。厚度无效返回 None。
+    """
+    if mat.thickness is not None:  # 固定厚度层（表层等）
+        d = float(mat.thickness)  # 直接取层厚
+    else:  # 最底覆盖层：厚度 = 上平台覆盖总厚 − 其上各固定层厚之和
+        fixed_sum = sum([L.thickness for L in site.layers if L.thickness is not None])  # 上方固定层厚之和
+        d = float(geom.H_upper - geom.bedrock_thickness - fixed_sum)  # 覆盖层填充厚度
+    if d <= 0:  # 厚度无效
+        return None  # 无共振频率
+    return float(mat.cs) / (4.0 * d)  # 四分之一波长共振基频
+
+
 def _compute_interface_sv_coeff(alpha1, mat1, mat2):  # 定义界面 SV 波系数计算函数
     """计算 SV 波在两层界面的等效反射/透射系数（阻抗近似，忽略 SV<->P 转换）。
 
     alpha1 : 在 mat1 中的 SV 入射角（弧度）
     mat1   : 入射侧材料参数字典；mat2：透射侧材料参数字典
-    返回 dict：Rss/Rsp/Tss/Tsp 与透射角 alpha2（Rsp=Tsp=0，射线法 v3 的关键近似）
+    返回 dict：Rss/Rsp/Tss/Tsp 与透射角 alpha2（Rsp=Tsp=0，阻抗近似的关键简化）
     """
     z1s = mat1['density'] * mat1['cs'] * max(1e-8, math.cos(alpha1))  # 计算入射侧等效阻抗
     sin_a2 = mat2['cs'] * math.sin(alpha1) / mat1['cs']  # 由 Snell 定律计算透射角正弦值
@@ -461,13 +513,13 @@ def _surface_y_at(x, H_upper, H_lower, left_flat, w_slope):  # 定义按横坐�
     return H_lower  # 其余位于坡脚平台，返回坡脚高度
 
 
-def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  # 定义场地分层带构造函数（v7：支持表层几何模式）
+def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  # 定义场地分层带构造函数（支持表层几何模式）
     """把场地分层展开为"从下到上"的标称材料带列表，供建模与自由场逐层取用。
 
     返回 list，每项 dict：{'name','mat'(Material),'y0','y1','fix',...}；
     y0/y1 为该带的【标称】下/上界 y（按上平台地表 H_upper 计），
-    fix 标记该带边界如何随柱地表高度换算（v7 新增，见 _band_bounds_at）：
-      'elevation' : 上下界为固定高程（基岩带；horizontal 模式下的全部带，=v6 行为）；
+    fix 标记该带边界如何随柱地表高度换算（见 _band_bounds_at）：
+      'elevation' : 上下界为固定高程（基岩带；horizontal 模式下的全部带）；
       'depth'     : 上下界为距局部地表的固定埋深 d0/d1（terrain 模式的固定厚度表层）；
       'fill'      : 下界固定高程 y0、上界=局部地表−dtop（terrain 模式的最底有限层/覆盖层）。
     顺序：基岩带在前（最底），向上依次为覆盖层(最底有限层)…表层(最顶有限层)。
@@ -478,7 +530,7 @@ def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  #
     layers_td = list(site.layers)  # 有限层（从上到下）
     if not layers_td:  # 处理单层情况（无有限层）
         return [{'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': H_upper, 'fix': 'elevation'}]  # 全场均质基岩带
-    terrain = (surface_geometry == 'terrain')  # 是否沿地形等厚铺设（v7）
+    terrain = (surface_geometry == 'terrain')  # 是否沿地形等厚铺设
     bands_td = []  # 初始化"从上到下"的有限层带列表
     y_top = H_upper  # 从坡顶开始向下推各层标称上界
     depth_top = 0.0  # 从局部地表向下累计的固定埋深（terrain 模式用）
@@ -489,7 +541,7 @@ def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  #
                 band['fix'] = 'depth'  # 标记为埋深带
                 band['d0'] = depth_top  # 该层顶埋深
                 band['d1'] = depth_top + L.thickness  # 该层底埋深
-            else:  # horizontal 模式：固定高程水平带（=v6）
+            else:  # horizontal 模式：固定高程水平带
                 band['fix'] = 'elevation'  # 标记为高程带
             bands_td.append(band)  # 记录该层带
             y_top -= L.thickness  # 标称上界下移一个固定厚度
@@ -499,7 +551,7 @@ def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  #
             if terrain:  # terrain 模式：上界跟随"局部地表 − 累计固定埋深"
                 band['fix'] = 'fill'  # 标记为填充带
                 band['dtop'] = depth_top  # 其上界距局部地表的埋深
-            else:  # horizontal 模式（=v6）
+            else:  # horizontal 模式
                 band['fix'] = 'elevation'  # 标记为高程带
             bands_td.append(band)  # 记录覆盖层带
     bedrock_band = {'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': bt, 'fix': 'elevation'}  # 基岩带（恒为固定高程）
@@ -507,11 +559,11 @@ def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):  #
     return [bedrock_band] + bands_bt  # 基岩带在前 + 有限层带（从下到上）
 
 
-def _band_bounds_at(band, ys):  # 定义按柱地表高度换算带上下界的纯函数（v7 新增）
+def _band_bounds_at(band, ys):  # 定义按柱地表高度换算带上下界的纯函数
     """返回带 band 在"地表高程为 ys 的柱"内的 (y0, y1)。
 
     'elevation' 带原样返回标称值；'depth' 带返回 (ys−d1, ys−d0)；
-    'fill' 带返回 (y0, ys−dtop)。horizontal 模式下全部带为 elevation，结果与 v6 一致。
+    'fill' 带返回 (y0, ys−dtop)。horizontal 模式下全部带为 elevation。
     建模截面分配、边界弹簧选材、自由场柱构造统一经由本函数取界，保证四处口径一致。
     """
     fix = band.get('fix', 'elevation')  # 带定位方式（缺省按固定高程，兼容旧带结构）
@@ -663,7 +715,7 @@ def _calc_node_delay(boundary, x0, y0, Ly, Lx,
 
     boundary : 'l'/'r'/'b'；x0,y0：节点坐标；Ly：界面相对底边高度；Lx：模型横向跨度
     返回 (t1, t2, t3) 三段延迟时间（秒）。基岩段用 cs/cp/alpha/beta_p，
-    覆盖层段用 cs2/cp2/alpha2/beta2，与 v3 射线法一致。
+    覆盖层段用 cs2/cp2/alpha2/beta2（射线法口径）。
     """
     if boundary in ('l', 'r'):  # 处理左/右边界节点
         if y0 <= Ly:  # 节点位于基岩段
@@ -702,19 +754,19 @@ def _column_seg(cs, vv, density, alpha_p, y0, y1, name):  # 定义构造单个�
             'y0': y0, 'y1': y1}  # 该层段下界与上界 y
 
 
-def _build_column(strat, ymax_col, alpha_p, ymin):  # 定义构造节点所在成层柱的函数（v7：经 _band_bounds_at 通用化）
+def _build_column(strat, ymax_col, alpha_p, ymin):  # 定义构造节点所在成层柱的函数（经 _band_bounds_at 通用化）
     """由场地分层带 strat 与该柱地表高度 ymax_col 构造"从下到上"的柱层段列表。
 
     各带上下界经 _band_bounds_at 按该柱地表高度换算（terrain 模式的埋深带随地表移动），
     再裁剪到 [ymin, ymax_col] 并用 y_floor 逐带钳位保证不重叠、不留缝。
-    horizontal 模式（全部 elevation 带）结果与 v6 完全一致。
+    horizontal 模式（全部 elevation 带）结果与双层模型完全一致。
     单层场地（strat 仅一条基岩带）返回单层段柱（全 bedrock 至地表）。
     """  # 说明函数用途
     tol = 1e-6  # 设置带相交容差
     column = []  # 初始化柱层段列表
     y_floor = ymin  # 当前柱内已占用高度的上沿（自底向上推进）
     for band in strat:  # 从下到上遍历各标称材料带
-        y0, y1 = _band_bounds_at(band, ymax_col)  # 按该柱地表高度换算带上下界（v7）
+        y0, y1 = _band_bounds_at(band, ymax_col)  # 按该柱地表高度换算带上下界
         y0 = max(y0, y_floor)  # 下界钳位到已占用上沿（防带间重叠）
         y1 = min(y1, ymax_col)  # 上界截断到地表
         if y1 <= y0 + tol:  # 换算/截断后无有效厚度
@@ -741,7 +793,7 @@ def _seg_at(column, y0):  # 定义在柱中按 y 坐标查找对应层段的辅�
 def _effective_refl_coeffs(column, oc):  # 定义层栈等效反射/转换系数计算函数
     """自顶向下递归求基岩中上行 SV 的等效自由面反射 Rss_eff 与 SV->P 转换 Rsp_eff。
 
-    沿用 v4 的界面 SV 阻抗近似与自由面完整 SV 反射/转换；M=1 时严格退化为 v4 的单腔几何级数。
+    沿用界面 SV 阻抗近似与自由面完整 SV 反射/转换；M=1 时严格退化为单腔几何级数。
     column：从下到上的柱层段（column[0]=基岩，column[-1]=最顶有限层或均质介质）。
     """  # 说明函数用途
     topL = column[-1]  # 取最顶层段
@@ -780,7 +832,7 @@ def _effective_refl_coeffs(column, oc):  # 定义层栈等效反射/转换系数
 def _column_cavities(column, oc):  # 定义柱内各混响腔（用于时域延迟叠加）的计算函数
     """返回 (cavities_sv, cavities_p)：各有限层 SV 混响腔 (cycle, cdelay) 列表 + 顶层 P 混响腔。
 
-    cycle = 该层腔顶反射×底反射（幅值）；cdelay = 该层往返垂直走时。M=1 时退化为 v4 单腔。
+    cycle = 该层腔顶反射×底反射（幅值）；cdelay = 该层往返垂直走时。M=1 时退化为单腔。
     """  # 说明函数用途
     nseg = len(column)  # 柱层段总数
     cavities_sv = []  # 初始化 SV 混响腔列表
@@ -825,7 +877,7 @@ def _superpose_paths(get_delayed, tA, tB, tC, cavities_sv, cavities_p, order_cou
 
     A：主到时 tA 的延迟信号；B：反射 SV 路径在各腔往返组合下的混响累加；
     C：反射/转换 P 路径在顶层腔混响下的累加。各腔几何级数按 order_count 截断，腔间取乘积枚举。
-    单腔（M=1）时严格退化为 v4 的 Σ_k cycle^k·delayed(t + k·cdelay)。
+    单腔（M=1）时严格退化为单腔 Σ_k cycle^k·delayed(t + k·cdelay) 形式。
     """  # 说明函数用途
     def _combos(cavities):  # 定义将一组腔展开为 (幅值, 附加延迟) 组合的内函数
         combo = [(1.0, 0.0)]  # 初始组合：无混响（幅值1、零延迟）
@@ -860,7 +912,7 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
     boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度（决定层组成、层厚与到时）；
     ctx      : FreeFieldCtx（含基岩角度、水平慢度、场地分层、基岩材料标量、VEL/DIS、dt 等）；
     get_vel/get_dis：速度/位移时程的延迟缓存访问器（跨节点复用）。
-    多层推广：按该柱层栈求等效系数与各腔混响；投影/应力沿用 v4（基岩角度 + 基岩材料标量）。
+    多层推广：按该柱层栈求等效系数与各腔混响；投影/应力沿用基岩角度 + 基岩材料标量。
     """
     geom = ctx.geom  # 取几何对象
     Lx = geom.total_L  # 模型横向跨度（xmin=0）
@@ -879,10 +931,10 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
     Rss_eff, Rsp_eff = cached  # 取等效系数
     cavities_sv, cavities_p = _column_cavities(column, oc)  # 计算该柱各混响腔
 
-    if boundary == 'b' or y0 <= bt + 1e-6:  # 基岩节点或均质节点：沿用 v4 到时公式
+    if boundary == 'b' or y0 <= bt + 1e-6:  # 基岩节点或均质节点：沿用单层到时公式
         Ly = bt if nseg >= 2 else ymax_col  # 反射点：有基岩界面取界面，否则（均质）取自由面
         col0 = column[0]  # 最底层段（基岩或均质介质）
-        tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时（v4 公式）
+        tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时（单层公式）
                                       ctx.alpha, ctx.beta_p, ctx.cs, ctx.cp,  # 基岩角度/波速
                                       col0['alpha'], col0['beta'], col0['cs'], col0['cp'], ymax_col)  # 占位（基岩分支不用）
     else:  # 有限层节点：穿层走时累加（反射点为自由面）
@@ -902,9 +954,9 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
     A2 = Rsp_eff  # 等效自由面 SV->P 转换系数（该柱）
 
     # ── 项①：层内材料/角度一致化 ────────────────────────────────────────────────
-    # 底边节点或基岩段侧边节点：沿用基岩标量（与 v4 完全等价，单层退化精确）
+    # 底边节点或基岩段侧边节点：沿用基岩标量（与单层模型完全等价，单层退化精确）
     # 有限层侧边节点（y0 > bedrock_interface）：改用本层 alpha/beta/GG/cs/lam/cp，
-    #   使面力计算与已按本层取值的弹簧/阻尼系数口径一致（v4 此处用基岩标量，存在矛盾）。
+    #   使面力计算与已按本层取值的弹簧/阻尼系数口径一致（单层模型此处用基岩标量，存在矛盾）。
     # 注意：等效反射幅值 Rss_eff/Rsp_eff 仍用阻抗近似层栈递归（射线近似，不因本修改改变）。
     use_local = (boundary in ('l', 'r')) and (y0 > bt + 1e-6)  # 是否为有限层侧边节点
     if use_local:  # 有限层侧边节点：取本层 alpha/beta 与本层材料标量
@@ -915,7 +967,7 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
         cs = local_seg['cs']     # 本层剪切波速
         lam = local_seg['lam']   # 本层拉梅常数
         cp = local_seg['cp']     # 本层纵波波速
-    else:  # 基岩节点或底边节点：沿用基岩标量（与 v4 等价）
+    else:  # 基岩节点或底边节点：沿用基岩标量（与单层模型等价）
         a = ctx.alpha    # 基岩 SV 入射角
         bp = ctx.beta_p  # 基岩 P 反射角
         GG = ctx.GG      # 基岩剪切模量
@@ -956,20 +1008,20 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
 
 
 # ============================================================
-#  v6 频域精确分层自由场引擎（fd 引擎，默认）
+#  频域精确分层自由场引擎（fd 引擎，默认）
 #
 #  原理：对每个边界节点所在的"水平成层柱"（基岩半空间 + 若干有限层 + 顶部自由面），
 #  在频率域逐频精确求解平面波边值问题（全局矩阵法）：
 #    - 未知量：基岩反射 P/SV + 每个有限层的上/下行 P 与 SV（共 4M+2 个，M=有限层数）；
 #    - 方程：顶部自由面 σyy=σxy=0（2 条）+ 每个界面 ux/uy/σyy/σxy 连续（4M 条）；
 #    - 入射：基岩中上行 SV，单位位移幅值（实际幅值谱在节点评估时乘 U0(ω)=−A(ω)/ω²）。
-#  与 v5 射线法相比：界面 SV<->P 转换、任意阶多次波、层间耦合、随频率变化的
+#  与射线法相比：界面 SV<->P 转换、任意阶多次波、层间耦合、随频率变化的
 #  瑞利阻尼衰减全部精确包含（无截断、无阻抗近似、无应力/位移系数口径问题）。
 #
 #  波相位约定：e^{i(ωt − ωp·x − ωk_y·y)}；上行波 k_y=+q（参考层底）、下行波 k_y=−q（参考层顶），
 #  使所有相位因子在层内均为衰减方向，数值稳定。极化约定与论文式(2)（半空间解）严格一致：
 #    Pu=(cp·p, cp·qp)  Pd=(cp·p, −cp·qp)  Su=(cs·qs, −cs·p)  Sd=(−cs·qs, −cs·p)
-#  半空间退化（M=0）时本引擎逐项还原 v5 的解析公式（见 test_fd_freefield_v6.py T1）。
+#  半空间退化（M=0）时本引擎逐项还原射线法的解析公式（见 test_fd_freefield.py T1）。
 # ============================================================
 
 
@@ -994,7 +1046,8 @@ def _band_damping_terms(strat, damping):  # 计算各材料带的瑞利阻尼系
     for idx, band in enumerate(strat):  # 从下到上遍历各材料带（idx==0 即基岩）
         if damping and damping.get('enable'):  # 启用材料阻尼时
             _Q, xi = _damping_ratio_from_q(band['mat'].cs, idx == 0, damping)  # 该带品质因子与阻尼比
-            a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'])  # 该带瑞利系数 (α,β)
+            f_layer = None if idx == 0 else _band_resonance_freq(band)  # 基岩无共振→None；有限层取该带共振基频
+            a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'], f_layer)  # 该带瑞利系数 (α,β)（perband 逐层重锚定）
         else:  # 未启用阻尼
             a_ray, b_ray = 0.0, 0.0  # 弹性（无衰减）
         terms[band['name']] = (a_ray, b_ray)  # 按带名记录
@@ -1028,7 +1081,7 @@ def _fd_input_spectrum(ctx):  # 计算（并缓存）输入波的位移谱与求
     idx = np.nonzero(mask)[0]  # 被求解频点索引
     omega = 2.0 * math.pi * freqs[idx]  # 对应圆频率数组
     U0 = -A[idx] / (omega ** 2)  # 位移谱（加速度谱两次积分）
-    tail = float(ffcfg.get('tail_seconds', 0.0) or 0.0)  # v8：静默尾段时长（捕捉混响衰减，H(f) 提取用）
+    tail = float(ffcfg.get('tail_seconds', 0.0) or 0.0)  # 静默尾段时长（捕捉混响衰减，H(f) 提取用）
     Nout = min(Nfft, N + int(round(tail / dt))) if tail > 0 else N  # 输出窗口长度（不超过 FFT 长度防卷绕）
     cached = {'Nfft': Nfft, 'Nout': Nout, 'dt': dt, 'nfreq': len(freqs),  # 打包缓存内容
               'idx': idx, 'omega': omega, 'U0': U0}  # 频点索引/圆频率/位移谱
@@ -1067,7 +1120,7 @@ def _fd_layer_params(seg, omega, p, damp_terms, include_damping):  # 计算单�
 def _fd_wave_params(seg, la, kind):  # 构造某层段某类波的极化与相位参数
     """kind ∈ {'Pu','Pd','Su','Sd'}；返回 {'dx','dy','ky','yref'}（dx/dy/ky 为逐频复数组）。
 
-    极化约定与论文式(2)一致（半空间退化逐项还原 v5 公式）：
+    极化约定与论文式(2)一致（半空间退化逐项还原射线法公式）：
       Pu=(cp·p, cp·qp)  Pd=(cp·p, −cp·qp)  Su=(cs·qs, −cs·p)  Sd=(−cs·qs, −cs·p)
     相位 e^{−iω·ky·(y−yref)}：上行波 ky=+q 参考层底 y0、下行波 ky=−q 参考层顶 y1。
     """
@@ -1219,12 +1272,12 @@ def _fd_freefield_at_node(boundary, x0, y0, ymax_col, ctx):  # fd 引擎单节�
         sigmax = out['sxx']; sigmay = out['sxy']  # 嵌入外法向符号
     else:  # 底边界外法向 n=(0,−1)：面力 = −σxy, −σyy
         sigmax = -out['sxy']; sigmay = -out['syy']  # 嵌入外法向符号
-    t_out = np.arange(inp['Nout']) * inp['dt']  # v8：输出时间轴（含静默尾段；tail=0 时与原记录时轴等价）
+    t_out = np.arange(inp['Nout']) * inp['dt']  # 输出时间轴（含静默尾段；tail=0 时与原记录时轴等价）
     return {'time': t_out, 'ux': out['ux'], 'uy': out['uy'],  # 打包返回
             'dotux': out['vx'], 'dotuy': out['vy'], 'sigmax': sigmax, 'sigmay': sigmay}  # 速度与应力
 
 
-def _fd_engine_selfcheck(logger=None):  # v8：fd 引擎建模前内置自检（§3.1-A5 验证协议自动化）
+def _fd_engine_selfcheck(logger=None):  # fd 引擎建模前内置自检（验证协议自动化）
     """两项解析对拍：①弹性均质半空间垂直入射地表水平位移=2E；②单层场地 1Hz 传递函数 vs SH 解析解。
 
     返回 {'halfspace_err','single_layer_err'}（相对误差）；任一误差 > 1e-3 抛 RuntimeError 中止建模，
@@ -1278,13 +1331,13 @@ def _max_element_size(site, fc, mcfg):  # 定义 Kuhlemeyer-Lysmer 自适应最�
     return max(delta_l, min_sz)  # 受下限约束后返回
 
 
-def _interface_partitions(strat):  # 定义从分层带提取切分界面的函数（v7：区分水平界面与沿地形界面）
+def _interface_partitions(strat):  # 定义从分层带提取切分界面的函数（区分水平界面与沿地形界面）
     """返回 (horiz_y, depth_d)：水平切分界面 y 列表 + 沿地形切分埋深 d 列表（均从下到上）。
 
     每条带（除最底基岩带）的【下界】即一条材料界面：
       elevation/fill 带的下界为固定高程水平线（y0）→ 归入 horiz_y；
       depth 带的下界为"地表整体下移 d1"的沿地形折线 → 归入 depth_d。
-    horizontal 模式 depth_d 恒为空，horiz_y 与 v6 的 _interface_y_list 等价。
+    horizontal 模式 depth_d 恒为空。
     单层（仅一条带）返回 ([], [])（无需切分）。
     """  # 说明函数用途
     horiz, depth = [], []  # 初始化两类界面列表
@@ -1296,11 +1349,11 @@ def _interface_partitions(strat):  # 定义从分层带提取切分界面的函�
     return horiz, depth  # 返回 (水平界面, 沿地形界面)
 
 
-def _create_band_materials_sections(model, strat, damping=None):  # 定义逐带创建材料与截面的函数（v3：支持材料阻尼）
+def _create_band_materials_sections(model, strat, damping=None):  # 定义逐带创建材料与截面的函数（支持材料阻尼）
     """为分层带（从下到上）逐带创建材料与均质截面，返回 [(band, sec_name), ...]。
 
     damping: 解析后的阻尼配置 dict（含 enable/method/fc/qs_factor/q_bedrock 等）；
-             None 或 enable=False 时退化为 v2 无阻尼行为。strat[0] 恒为基岩（_build_stratigraphy 保证）。
+             None 或 enable=False 时退化为无阻尼行为。strat[0] 恒为基岩（_build_stratigraphy 保证）。
     """  # 说明函数用途与参数
     band_sections = []  # 初始化带-截面映射列表
     for idx, band in enumerate(strat):  # 从下到上遍历每条材料带（idx==0 即基岩）
@@ -1313,7 +1366,8 @@ def _create_band_materials_sections(model, strat, damping=None):  # 定义逐带
         if damping and damping.get('enable'):  # 启用材料阻尼时按 Q 衰减施加瑞利阻尼
             is_bedrock = (idx == 0)  # 基岩带（最底带）→ 用 q_bedrock≈999
             Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping)  # 由波速换算品质因子 Q 与阻尼比 ξ
-            a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'])  # 由 ξ 换算瑞利系数 (α, β)
+            f_layer = None if is_bedrock else _band_resonance_freq(band)  # 基岩无共振→None；有限层取该带共振基频
+            a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'], f_layer)  # 由 ξ 换算瑞利系数 (α, β)（perband 逐层重锚定）
             m.Damping(alpha=a_ray, beta=b_ray)  # 施加 Abaqus 瑞利阻尼（α 质量比例 + β 刚度比例）
         sec_name = _next_available_name('Section-%s' % band['name'], model.sections)  # 生成截面名（含层名）
         model.HomogeneousSolidSection(name=sec_name, material=mat_name, thickness=1.0)  # 创建均质实体截面
@@ -1332,7 +1386,7 @@ def _partition_horizontal(model, part, geom, y_list, name_prefix):  # 定义按�
         del model.sketches[sk_name]  # 删除临时草图
 
 
-def _partition_terrain(model, part, geom, depth_list, name_prefix):  # 定义按沿地形折线切分面的函数（v7 新增）
+def _partition_terrain(model, part, geom, depth_list, name_prefix):  # 定义按沿地形折线切分面的函数
     """对 depth_list 中每个埋深 d，用"地表整体下移 d"的三段折线切分（上平台-坡面-下平台）。
 
     折线节点：(0, H_upper−d) → (left_flat, H_upper−d) → (left_flat+w_slope, H_lower−d)
@@ -1350,11 +1404,11 @@ def _partition_terrain(model, part, geom, depth_list, name_prefix):  # 定义按
         del model.sketches[sk_name]  # 删除临时草图
 
 
-def _assign_sections_by_band(part, band_sections, surface_y_fn=None):  # 定义按质心落带分配截面的函数（v7：支持按局部埋深落带）
+def _assign_sections_by_band(part, band_sections, surface_y_fn=None):  # 定义按质心落带分配截面的函数（支持按局部埋深落带）
     """按面质心落入哪条材料带分配对应截面，返回 [(层名, 面数), ...]。
 
     surface_y_fn: 函数 x → 该 x 处地表高程；terrain 模式据此把质心换算到局部柱内
-    （经 _band_bounds_at 取带界）。None 或 horizontal 模式时等价于 v6 的按标称 y 落带。
+    （经 _band_bounds_at 取带界）。None 或 horizontal 模式时等价于按标称 y 落带。
     """  # 说明函数用途与参数
     def _to_face_sequence(face_list):  # 定义面序列转换内函数
         face_seq = part.faces[0:0]  # 创建空面序列
@@ -1372,7 +1426,7 @@ def _assign_sections_by_band(part, band_sections, surface_y_fn=None):  # 定义�
         ys = surface_y_fn(xc) if surface_y_fn else None  # 该质心所在柱的地表高程（terrain 落带用）
         placed = False  # 标记是否已归带
         for bi, (band, _sec) in enumerate(band_sections):  # 从下到上遍历各带
-            y0, y1 = _band_bounds_at(band, ys) if ys is not None else (band['y0'], band['y1'])  # 带上下界（v7 统一换算）
+            y0, y1 = _band_bounds_at(band, ys) if ys is not None else (band['y0'], band['y1'])  # 带上下界
             if y0 - tol <= yc < y1 + tol:  # 判断质心是否落入该带 [y0, y1)
                 buckets[bi].append(face)  # 归入该带
                 placed = True  # 置归带标记
@@ -1389,15 +1443,111 @@ def _assign_sections_by_band(part, band_sections, surface_y_fn=None):  # 定义�
     return counts  # 返回各带面数统计
 
 
+def _band_graded_sizes(strat, mesh_used, mcfg, fc=None):  # 各带目标单元尺寸（波速比缩放 + 软层谐波/穿层加密）
+    """返回与 strat 等长的各带目标尺寸列表（从下到上）。纯函数，便于单测。
+
+    每带尺寸 = min(
+        mesh_used × (cs/cs_min),                        # ① 波速比缩放：深部粗、最软层=mesh_used（基准）
+        cs / (epw · f_resolve),                         # ② 共振谐波波长判据：仅薄软层会更细
+        thickness / min_elems_through_thickness )       # ③ 穿层单元数判据：保证薄层足够层数
+    其中 f_resolve = max(fmax_factor·fc, resolve_harmonics·f_layer)，f_layer = cs/(4·thickness)；
+    使网格解析频带与 perband 阻尼保留频带(harmonics_cover·f_layer)对齐——薄软层混响高次谐波不再欠采样。
+    上限受 max_band_ratio(最粗≤该倍×mesh_used)、max_size 约束；
+    下限取 min(min_size, ③)，即【穿层判据优先于 min_size】，薄软层不会被 min_size 钳到层数不足。
+    resolve_harmonics=0/None 时退化为纯波速比缩放版（仅①）。
+    """
+    cs_min = min([b['mat'].cs for b in strat])  # 最软层波速
+    epw = float(mcfg.get('elems_per_wavelength', 10))  # 每波长单元数
+    fmax_factor = float(mcfg.get('fmax_factor', 2.5))  # 输入频带 fmax 倍数
+    max_size = mcfg.get('max_size')  # 绝对上限(m)，None=不限
+    max_ratio = float(mcfg.get('max_band_ratio', 4.0))  # 过渡比上限
+    min_size = float(mcfg.get('min_size', 0.5))  # 单元下限(m)
+    rh = mcfg.get('resolve_harmonics', 3.0)  # 解析谐波次数
+    rh = float(rh) if rh else 0.0  # 规范化（0/None=关闭谐波加密）
+    n_thk = mcfg.get('min_elems_through_thickness', 6)  # 穿层最少单元数
+    n_thk = float(n_thk) if n_thk else 0.0  # 规范化（0/None=关闭穿层判据）
+    sizes = []  # 各带目标尺寸
+    for b in strat:  # 从下到上遍历各带
+        cs = float(b['mat'].cs)  # 该带波速
+        thk = float(b['y1']) - float(b['y0'])  # 该带标称厚度
+        s = mesh_used * (cs / float(cs_min))  # ① 波速比缩放（尺寸∝波速，最软层=mesh_used）
+        dl_thick = (thk / n_thk) if (n_thk > 0 and thk > 0) else None  # ③ 穿层判据尺寸
+        if rh > 0 and thk > 0:  # ② 共振谐波加密（仅薄软层会触发更细）
+            f_layer = cs / (4.0 * thk)  # 该层一维共振基频
+            f_resolve = rh * f_layer  # 至少解析到该层若干阶谐波
+            if fc:  # 已知输入主频时并入输入频带上限
+                f_resolve = max(f_resolve, fmax_factor * float(fc))  # 取较高频率
+            dl_wave = cs / (epw * f_resolve)  # 波长判据尺寸
+            s = min(s, dl_wave)  # 取更细
+        if dl_thick:  # ③ 穿层判据
+            s = min(s, dl_thick)  # 取更细
+        s = min(s, mesh_used * max_ratio)  # 过渡比上限（限制最粗端）
+        if max_size:  # 绝对上限
+            s = min(s, float(max_size))  # 施加绝对上限
+        floor = min(min_size, dl_thick) if dl_thick else min_size  # 下限：穿层判据优先于 min_size
+        s = max(s, floor)  # 施加下限
+        sizes.append(s)  # 记录该带尺寸
+    return sizes  # 返回各带目标尺寸
+
+
+def _seed_graded_mesh(part, strat, surface_y_fn, mesh_used, mcfg, elem_name, logger, model_name='Model-1', fc=None):  # 分层非均匀网格
+    """对 part 施加分层非均匀网格：软层细、深部粗，自由四边形为主(QUAD_DOMINATED)平滑过渡。
+
+    做法：先按最粗尺寸全局打底，再【由粗到细】逐带对其边按各带尺寸加密(constraint=FINER)，
+    使共享界面边被更细的种子覆盖、过渡发生在较粗一侧。各带尺寸见 _band_graded_sizes。
+    surface_y_fn: x→地表高程(用于按局部柱定位质心落带，与 _assign_sections_by_band 同口径)。
+    fc: 输入波主频(Hz)，转发给 _band_graded_sizes 做软层谐波加密（None 时仅按谐波/穿层判据）。
+    返回 [(层名, 尺寸, 面数), ...] 供日志记录。
+    """
+    sizes = _band_graded_sizes(strat, mesh_used, mcfg, fc)  # 各带目标尺寸（从下到上，含软层谐波加密）
+    part.setMeshControls(regions=part.faces, elemShape=QUAD_DOMINATED, technique=FREE)  # 全自由四边形网格(容许过渡三角)
+    part.seedPart(size=max(sizes), deviationFactor=0.1, minSizeFactor=0.1)  # 先用最粗尺寸全局打底
+    tol = 1e-6  # 落带容差
+    info = []  # 记录各带尺寸与面数
+    for bi, b in enumerate(strat):  # 由粗到细(strat[0]基岩最粗→strat[-1]表层最细)逐带加密
+        face_list = []  # 该带的面
+        for face in part.faces:  # 遍历所有面，按质心落带
+            c = face.getCentroid()  # 面质心
+            if len(c) >= 2 and not hasattr(c[0], '__len__'):  # 平铺 (x,y,..)
+                xc, yc = c[0], c[1]  # 读取质心坐标
+            else:  # 嵌套 ((x,y,z),)
+                xc, yc = c[0][0], c[0][1]  # 读取质心坐标
+            ys = surface_y_fn(xc) if surface_y_fn else None  # 该柱地表高程
+            y0, y1 = _band_bounds_at(b, ys) if ys is not None else (b['y0'], b['y1'])  # 该带上下界(同口径)
+            if y0 - tol <= yc < y1 + tol:  # 质心落入该带
+                face_list.append(face)  # 归入该带
+        if not face_list:  # 该带无面
+            info.append((b['name'], sizes[bi], 0))  # 记录零面
+            continue  # 跳过种子
+        edge_idx = set()  # 该带所有面的边索引(去重)
+        for face in face_list:  # 收集边
+            for ei in face.getEdges():  # 该面各边索引
+                edge_idx.add(ei)  # 加入集合
+        edge_seq = part.edges[0:0]  # 空边序列
+        for ei in sorted(edge_idx):  # 按索引拼接为边序列
+            edge_seq = edge_seq + part.edges[ei:ei + 1]  # 逐条拼接
+        part.seedEdgeBySize(edges=edge_seq, size=sizes[bi], deviationFactor=0.1,  # 对该带边按目标尺寸加密
+                            minSizeFactor=0.1, constraint=FINER)  # FINER：细种子覆盖共享边上的粗种子
+        info.append((b['name'], sizes[bi], len(face_list)))  # 记录该带
+    elem_code = CPE4R if str(elem_name).upper() == 'CPE4R' else CPE4  # 选择单元类型
+    et1 = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)  # 四节点平面应变
+    et2 = mesh.ElemType(elemCode=CPE3, elemLibrary=STANDARD)  # 三节点(自由网格过渡)
+    part.setElementType(regions=(part.faces,), elemTypes=(et1, et2))  # 分配单元类型
+    part.generateMesh()  # 生成网格
+    return info  # 返回各带尺寸与面数
+
+
 def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None,
-                 surface_geometry='horizontal', elem_name='CPE4'):
+                 surface_geometry='horizontal', elem_name='CPE4', mesh_cfg=None, fc=None):
     """创建二维平面应变斜坡模型：几何、材料、截面、装配、网格（不含分析步）。
 
     site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
     geom: Geometry 对象（斜坡几何，含派生量与固定层间界面）
     damping: 解析后的阻尼配置 dict（转发给材料创建，与平坦模型同参以保证 TAF 分母一致）
-    surface_geometry: v7 表层几何模式 'horizontal'(=v6) / 'terrain'(表层沿地形等厚铺设)
-    elem_name: v7 单元类型 'CPE4'(默认) / 'CPE4R'
+    surface_geometry: 表层几何模式 'horizontal' / 'terrain'(表层沿地形等厚铺设)
+    elem_name: 单元类型 'CPE4'(默认) / 'CPE4R'
+    mesh_cfg: 网格配置 dict；含 'graded' 时启用分层非均匀网格(软层细/深部粗)，缺省/None 为均匀网格
+    fc: 输入波主频(Hz)，graded 网格下用于软层共振谐波加密（None 时仅按谐波/穿层判据）
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-1'  # 设置基础模型名称
@@ -1436,7 +1586,7 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
     # ============ 逐层创建材料与截面（支持 1/2/3... 层）============
-    strat = _build_stratigraphy(site, geom, surface_geometry=surface_geometry)  # 构造从下到上的分层带（v7：含表层几何模式）
+    strat = _build_stratigraphy(site, geom, surface_geometry=surface_geometry)  # 构造从下到上的分层带
     band_sections = _create_band_materials_sections(model, strat, damping)  # 逐带创建材料与截面（含瑞利阻尼）
     log_step(logger, '%s 已创建 %d 个材料带的材料与截面 (表层几何=%s)', model_name, len(strat), surface_geometry)  # 记录材料/截面创建日志
 
@@ -1456,30 +1606,38 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
     del model.sketches['__vert_partition__']  # 删除临时切分草图
     log_step(logger, '%s 几何垂直切分完成', model_name)  # 记录切分完成日志
 
-    # 2. 切分各材料界面（v7：水平界面 + terrain 模式的沿地形折线界面）
+    # 2. 切分各材料界面（水平界面 + terrain 模式的沿地形折线界面）
     interfaces, depth_ifaces = _interface_partitions(strat)  # 提取水平界面 y 与沿地形界面埋深 d
     _partition_horizontal(model, part, geom, interfaces, 'hpartition')  # 逐条水平切分
     if depth_ifaces:  # terrain 模式：存在沿地形界面
-        _partition_terrain(model, part, geom, depth_ifaces, 'tpartition')  # 逐条沿地形折线切分（v7）
+        _partition_terrain(model, part, geom, depth_ifaces, 'tpartition')  # 逐条沿地形折线切分
     log_step(logger, '%s 材料界面切分完成: 水平=%d, 沿地形=%d', model_name, len(interfaces), len(depth_ifaces))  # 记录切分完成日志
 
-    # 设置网格控制：默认结构化四边形；若有界面切过坡面（楔形）或存在沿地形界面则退为自由四边形为主
-    cuts_slope = bool(depth_ifaces) or any(H_lower + 1e-6 < y < H_upper - 1e-6 for y in interfaces)  # 是否存在界面切过坡面
+    mesh_cfg = mesh_cfg or {}  # 规范化网格配置（缺省空字典→均匀网格）
+    graded = bool(mesh_cfg.get('graded', False)) and len(strat) > 1  # 启用分层非均匀且存在有限层（单层无需分层）
     pickedRegions = part.faces  # 选取全部面作为网格区域
-    if cuts_slope:  # 坡面被切出表层楔形（无法结构化）
-        part.setMeshControls(regions=pickedRegions, elemShape=QUAD_DOMINATED, technique=FREE)  # 自由四边形为主网格（容许少量三角）
-        log_step(logger, '%s 检测到界面切过坡面（表层楔形），网格采用 FREE QUAD_DOMINATED', model_name)  # 记录网格策略
-    else:  # 无楔形（M<=1 或界面在坡脚以下）
-        part.setMeshControls(regions=pickedRegions, elemShape=QUAD, technique=STRUCTURED)  # 结构化四边形（同 v4）
-    part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设置全局网格尺寸
-    elem_code = CPE4R if str(elem_name).upper() == 'CPE4R' else CPE4  # v7：按 mesh_cfg['elem'] 选择单元类型
-    elemType1 = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)  # 定义平面应变四节点单元
-    elemType2 = mesh.ElemType(elemCode=CPE3, elemLibrary=STANDARD)  # 定义平面应变三节点单元（自由网格过渡用）
-    part.setElementType(regions=(pickedRegions,), elemTypes=(elemType1, elemType2))  # 分配单元类型（四+三节点）
-    part.generateMesh()  # 生成网格
-    log_step(logger, '%s 已生成网格: %s 单元，尺寸=%.2f', model_name, str(elem_name).upper(), mesh_size)  # 记录网格生成日志
+    if graded:  # 分层非均匀网格——软层细、深部粗，自由四边形平滑过渡
+        surf_fn_mesh = lambda xc: _surface_y_at(xc, H_upper, H_lower, left_flat, w_slope)  # 落带用地表高程函数
+        ginfo = _seed_graded_mesh(part, strat, surf_fn_mesh, mesh_size, mesh_cfg, elem_name, logger, model_name, fc)  # 施加分层网格(含软层谐波加密)
+        log_step(logger, '%s 分层非均匀网格(FREE QUAD_DOMINATED): %s', model_name,
+                 ', '.join('%s=%.2fm(%d面)' % (n, s, c) for n, s, c in ginfo))  # 记录各带尺寸与面数
+    else:  # 均匀网格
+        # 设置网格控制：默认结构化四边形；若有界面切过坡面（楔形）或存在沿地形界面则退为自由四边形为主
+        cuts_slope = bool(depth_ifaces) or any(H_lower + 1e-6 < y < H_upper - 1e-6 for y in interfaces)  # 是否存在界面切过坡面
+        if cuts_slope:  # 坡面被切出表层楔形（无法结构化）
+            part.setMeshControls(regions=pickedRegions, elemShape=QUAD_DOMINATED, technique=FREE)  # 自由四边形为主网格（容许少量三角）
+            log_step(logger, '%s 检测到界面切过坡面（表层楔形），网格采用 FREE QUAD_DOMINATED', model_name)  # 记录网格策略
+        else:  # 无楔形（M<=1 或界面在坡脚以下）
+            part.setMeshControls(regions=pickedRegions, elemShape=QUAD, technique=STRUCTURED)  # 结构化四边形
+        part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设置全局网格尺寸
+        elem_code = CPE4R if str(elem_name).upper() == 'CPE4R' else CPE4  # 按 mesh_cfg['elem'] 选择单元类型
+        elemType1 = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)  # 定义平面应变四节点单元
+        elemType2 = mesh.ElemType(elemCode=CPE3, elemLibrary=STANDARD)  # 定义平面应变三节点单元（自由网格过渡用）
+        part.setElementType(regions=(pickedRegions,), elemTypes=(elemType1, elemType2))  # 分配单元类型（四+三节点）
+        part.generateMesh()  # 生成网格
+        log_step(logger, '%s 已生成均匀网格: %s 单元，尺寸=%.2f', model_name, str(elem_name).upper(), mesh_size)  # 记录网格生成日志
 
-    # ============ 按质心落带分配截面（v7：terrain 模式按局部埋深落带）============
+    # ============ 按质心落带分配截面（terrain 模式按局部埋深落带）============
     surf_fn = lambda xc: _surface_y_at(xc, H_upper, H_lower, left_flat, w_slope)  # 局部地表高度函数
     counts = _assign_sections_by_band(part, band_sections, surf_fn)  # 逐带按质心分配截面
     log_step(logger, '%s 截面属性分配完成: %s', model_name,  # 记录截面分配日志
@@ -1544,14 +1702,14 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
 
 
 def create_flat_model(site, geom, mesh_size, logger=None, damping=None,
-                      surface_geometry='horizontal', elem_name='CPE4'):
+                      surface_geometry='horizontal', elem_name='CPE4', mesh_cfg=None, fc=None):
     """创建二维平面应变平坦自由场模型：矩形几何、材料、截面、装配与网格。
 
     site: Site 对象（基岩 + 有限层列表 + 基岩厚度，支持 1/2/3... 层）
     geom: Geometry 对象（取其总长、平坦总高 H_flat、基岩厚度；全场各层带齐全）
     damping: 解析后的阻尼配置 dict（与斜坡模型同参，保证 TAF=坡地/自由场 的分母口径一致）
-    surface_geometry: v7 表层几何模式（平坦地表两种模式等价，但带结构须与斜坡模型同口径）
-    elem_name: v7 单元类型 'CPE4'(默认) / 'CPE4R'
+    surface_geometry: 表层几何模式（平坦地表两种模式等价，但带结构须与斜坡模型同口径）
+    elem_name: 单元类型 'CPE4'(默认) / 'CPE4R'
     """  # 说明函数用途与参数
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     model_name = 'Model-2'  # 设置平坦自由场模型名称
@@ -1575,7 +1733,7 @@ def create_flat_model(site, geom, mesh_size, logger=None, damping=None,
     log_step(logger, '%s 已创建零件并生成壳基体: %s', model_name, part_name)  # 记录零件创建日志
 
     # ============ 逐层创建材料与截面（平坦自由场，全场各带齐全）============
-    strat = _build_stratigraphy(site, geom, surface_geometry=surface_geometry)  # 构造从下到上的分层带（v7：与斜坡同口径）
+    strat = _build_stratigraphy(site, geom, surface_geometry=surface_geometry)  # 构造从下到上的分层带（与斜坡同口径）
     band_sections = _create_band_materials_sections(model, strat, damping)  # 逐带创建材料与截面（含瑞利阻尼，与斜坡同参）
     log_step(logger, '%s 已创建 %d 个材料带的材料与截面（平坦自由场）', model_name, len(strat))  # 记录材料/截面创建日志
 
@@ -1585,23 +1743,30 @@ def create_flat_model(site, geom, mesh_size, logger=None, damping=None,
     inst_name = _next_available_name(part_name, assembly.instances)  # 生成实例名称
     assembly.Instance(name=inst_name, part=part, dependent=ON)  # 创建零件实例
 
-    # ============ 水平切分各材料界面（v7：沿地形界面在平坦模型中退化为水平线）============
+    # ============ 水平切分各材料界面（沿地形界面在平坦模型中退化为水平线）============
     interfaces, depth_ifaces = _interface_partitions(strat)  # 提取水平界面与沿地形界面埋深
     interfaces = sorted(interfaces + [H_flat - d for d in depth_ifaces])  # 平坦地表：埋深界面 = H_flat − d 的水平线
     _partition_horizontal(model, part, geom, interfaces, 'flat_hpartition')  # 逐条水平切分
     log_step(logger, '%s 平坦自由场水平界面切分完成: 界面数=%d', model_name, len(interfaces))  # 记录切分日志
 
+    mesh_cfg = mesh_cfg or {}  # 规范化网格配置（缺省空字典→均匀网格）
+    graded = bool(mesh_cfg.get('graded', False)) and len(strat) > 1  # 与斜坡模型同口径，启用分层非均匀
     picked_regions = part.faces  # 选取全部面作为网格区域
-    part.setMeshControls(regions=picked_regions, elemShape=QUAD, technique=STRUCTURED)  # 设置结构化四边形网格
-    part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设置网格种子尺寸
-    elem_code = CPE4R if str(elem_name).upper() == 'CPE4R' else CPE4  # v7：按 mesh_cfg['elem'] 选择单元类型
-    elem_type = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)  # 定义单元类型
-    part.setElementType(regions=(picked_regions,), elemTypes=(elem_type,))  # 分配单元类型
-    part.generateMesh()  # 生成网格
-    log_step(logger, '%s 平坦模型网格已生成: %s, 尺寸=%.2f', model_name, str(elem_name).upper(), mesh_size)  # 记录网格日志
+    if graded:  # 分层非均匀网格（平坦地表恒为 H_flat，按层波速比缩放）
+        ginfo = _seed_graded_mesh(part, strat, (lambda _xc: H_flat), mesh_size, mesh_cfg, elem_name, logger, model_name, fc)  # 施加分层网格(含软层谐波加密)
+        log_step(logger, '%s 平坦模型分层非均匀网格: %s', model_name,
+                 ', '.join('%s=%.2fm(%d面)' % (n, s, c) for n, s, c in ginfo))  # 记录各带尺寸
+    else:  # 均匀网格
+        part.setMeshControls(regions=picked_regions, elemShape=QUAD, technique=STRUCTURED)  # 设置结构化四边形网格
+        part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)  # 设置网格种子尺寸
+        elem_code = CPE4R if str(elem_name).upper() == 'CPE4R' else CPE4  # 按 mesh_cfg['elem'] 选择单元类型
+        elem_type = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)  # 定义单元类型
+        part.setElementType(regions=(picked_regions,), elemTypes=(elem_type,))  # 分配单元类型
+        part.generateMesh()  # 生成网格
+        log_step(logger, '%s 平坦模型网格已生成: %s, 尺寸=%.2f', model_name, str(elem_name).upper(), mesh_size)  # 记录网格日志
 
     # ============ 按质心落带分配截面（平坦地表：地表高程恒为 H_flat）============
-    counts = _assign_sections_by_band(part, band_sections, lambda _xc: H_flat)  # 逐带按质心分配截面（v7）
+    counts = _assign_sections_by_band(part, band_sections, lambda _xc: H_flat)  # 逐带按质心分配截面
     log_step(logger, '%s 截面属性分配完成（平坦自由场）: %s', model_name,  # 记录截面分配日志
              ', '.join('%s=%d' % (n, c) for n, c in counts))  # 输出各带面数
 
@@ -1644,7 +1809,7 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax):  # �
 
     nodes       : Abaqus 实例节点序列
     sort_axis   : 'x' 或 'y'，沿该轴排序并据相邻间距求影响长度
-    ascending   : 是否升序（底边升序、侧边降序，沿用 v6 行为）
+    ascending   : 是否升序（底边升序、侧边降序，沿用现有行为）
     pick_material: 函数 (x, y) -> 材料参数 dict，用于按节点所在层取系数
     ymax        : 弹簧刚度公式中的参考长度 R
     """  # 说明函数用途与参数
@@ -1716,7 +1881,7 @@ def _build_equivalent_forces(nodes_by_boundary, ctx):  # 定义计算等效节�
     """  # 说明函数用途与外法向/角点约定
     field_data = {}  # 初始化等效力缓存字典
     geom = ctx.geom  # 取出几何对象
-    engine = (ctx.ffcfg or {}).get('engine', 'ray')  # v6：自由场引擎选择（'fd' 或 'ray'）
+    engine = (ctx.ffcfg or {}).get('engine', 'ray')  # 自由场引擎选择（'fd' 或 'ray'）
     get_vel = None  # 射线法速度延迟缓存（fd 引擎不需要）
     get_dis = None  # 射线法位移延迟缓存（fd 引擎不需要）
     if engine != 'fd':  # 仅射线法路径需要延迟缓存
@@ -1914,24 +2079,22 @@ def VAB_oblique(site, geom, angle,
     if dt <= 0:  # 检查步长是否有效
         raise ValueError('加速度 dt 必须 > 0')  # 抛出步长异常
 
-    # ── 项③：时间步充分性校验（安全护栏） ────────────────────────────────────────
-    # 当前 dt=1e-3 对 fmax≈20Hz 约有 50 步/周期，远超 20 步门槛，不触发重采样。
-    # 此护栏为换用粗采样输入波时提供自动保障，不影响常规 Ricker 4/6/8Hz 运行。
-    if tcfg and tcfg.get('check'):  # 启用时间步校验
+    # ── 项③：时间步充分性【诊断】（v9：仅警告，不再重采样） ──────────────────────────
+    # 模拟步长始终 = 输入地震动 txt 的 dt（与分析步 initialInc 同源），保证自由场与分析步 dt 严格一致。
+    # 若输入 dt 偏粗（每 fmax 周期步数不足），仅输出警告，由用户自行决定是否更换更细 dt 的输入波。
+    if tcfg and tcfg.get('check'):  # 启用时间步诊断（默认关闭；不论开关 dt 都不会被改变）
         fc_for_check = fc_used if fc_used else _estimate_dominant_freq(acc, dt)  # 取已知主频或自动估计
-        fmax_check = float(time_cfg.get('fmax_factor', 2.5) if hasattr(time_cfg, 'get') else 2.5) * fc_for_check  # fmax 估计
-        min_steps = float(tcfg.get('min_steps_per_fmax_period', 20))  # 最低步/周期要求
+        fmax_check = 2.5 * fc_for_check  # fmax 估计（≈Ricker 高频边界，与网格 K-L 判据同口径）
+        min_steps = float(tcfg.get('min_steps_per_fmax_period', 20))  # 建议的最低步/周期
         steps_per_period = (1.0 / fmax_check) / dt if (fmax_check > 0 and dt > 0) else 9999.0  # 实际步/周期
-        log_step(logger, '%s 时间步校验: dt=%.4fs, fmax=%.2fHz, 步/周期=%.1f(要求>=%.0f)',
-                 model_name, dt, fmax_check, steps_per_period, min_steps)  # 记录校验信息
-        if steps_per_period < min_steps and tcfg.get('resample_if_violate', True):  # 不满足且需重采样
-            dt_new = (1.0 / fmax_check) / min_steps  # 目标步长（保证最低步/周期）
-            log_step(logger, '%s 时间步不足，自动重采样: dt %.4fs -> %.4fs', model_name, dt, dt_new)  # 记录重采样
-            t_new = np.arange(time_arr[0], time_arr[-1] + dt_new * 0.5, dt_new)  # 新时间轴
-            acc = np.interp(t_new, time_arr, acc)  # 重采样加速度
-            time_arr = t_new  # 更新时间轴
-            dt = dt_new  # 更新步长
-    # ── 时间步校验结束 ───────────────────────────────────────────────────────────
+        if steps_per_period < min_steps:  # 步数不足：仅警告，不改 dt
+            log_step(logger, '%s 警告: 输入 dt=%.4fs 偏粗 (fmax=%.2fHz 仅 %.1f 步/周期 < 建议 %.0f)，'
+                             '如需更高精度请改用更细 dt 的输入波（脚本不自动重采样）',
+                     model_name, dt, fmax_check, steps_per_period, min_steps)  # 记录诊断警告
+        else:  # 步数充足
+            log_step(logger, '%s 时间步诊断: dt=%.4fs, fmax=%.2fHz, %.1f 步/周期(>=%.0f) 达标',
+                     model_name, dt, fmax_check, steps_per_period, min_steps)  # 记录达标信息
+    # ── 时间步诊断结束 ───────────────────────────────────────────────────────────────
 
     # 积分得到速度时程（梯形积分 + 基线校正，抑制低频漂移），再积分得到位移时程
     vel, _vel_slope = _integrate_acc_to_velocity(acc, dt, time_arr)  # 加速度→速度（含基线校正）
@@ -2100,7 +2263,7 @@ def _deep_merge(base, override):  # 递归合并两份配置字典
     return out  # 返回合并结果
 
 
-def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger,
+def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
                       mesh_cfg_in=None, time_cfg_in=None, max_reflect_order_in=None):  # 加载工况配置注入
     """若当前工况文件夹存在 case_config.json，则用其覆盖默认配置（支持部分覆盖或整体改 layers/几何/网格/阻尼）。
 
@@ -2111,12 +2274,13 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger
     （地表全时程输出瘦身），damping_cfg 可含 "anchor": "dual"（场地基频双控锚定）。
     case_config.json 结构（各键可选，缺省即用默认）：
       {
-        "material_cfg": {"surface_geometry": "terrain", ...}, "geometry_cfg": {...}, "mesh_size": 4,
-        "damping_cfg": {...}, "mesh_cfg": {"elem": "CPE4"}, "time_cfg": {...},
+        "material_cfg": {"surface_geometry": "terrain", ...}, "geometry_cfg": {...},
+        "damping_cfg": {...}, "mesh_cfg": {"size": 4, "elem": "CPE4"}, "time_cfg": {...},
         "max_reflect_order": 3,
         "freefield_cfg": {"engine": "fd"}, "run_cfg": {"run_flat": true}
       }
-    返回覆盖后的 (material_cfg, geometry_cfg, mesh_size, damping_cfg, mesh_cfg, time_cfg,
+    v9.1：基准网格尺寸并入 mesh_cfg['size']；仍兼容旧写法顶层 "mesh_size"（自动映射到 mesh_cfg['size']）。
+    返回覆盖后的 (material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg,
                   max_reflect_order, freefield_cfg, run_cfg)。
     无文件或解析失败则原样返回默认。
     """
@@ -2129,7 +2293,7 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger
     if not os.path.isfile(path):  # 无注入文件 → 用默认配置单独运行
         if logger:  # 记录提示
             log_step(logger, '未发现 case_config.json，使用脚本内默认配置')  # 输出默认配置提示
-        return (material_cfg, geometry_cfg, mesh_size, damping_cfg, mesh_cfg_out,  # 原样返回默认
+        return (material_cfg, geometry_cfg, damping_cfg, mesh_cfg_out,  # 原样返回默认
                 time_cfg_out, max_reflect_order_out, ff_cfg_out, run_cfg_out)  # 含 v6 新增两项
     try:  # 尝试读取并覆盖
         import json  # 导入 JSON 模块
@@ -2139,12 +2303,12 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger
             material_cfg = _deep_merge(material_cfg, cfg['material_cfg'])  # 合并材料配置
         if isinstance(cfg.get('geometry_cfg'), dict):  # 提供了几何覆盖
             geometry_cfg = _deep_merge(geometry_cfg, cfg['geometry_cfg'])  # 合并几何配置
-        if cfg.get('mesh_size') is not None:  # 提供了网格覆盖
-            mesh_size = cfg['mesh_size']  # 覆盖网格尺寸
         if isinstance(cfg.get('damping_cfg'), dict):  # 提供了阻尼覆盖（批量调参/关阻尼）
             damping_cfg = _deep_merge(damping_cfg, cfg['damping_cfg'])  # 合并阻尼配置
-        if isinstance(cfg.get('mesh_cfg'), dict):  # 项②：提供了网格自适应覆盖
-            mesh_cfg_out = _deep_merge(mesh_cfg_out, cfg['mesh_cfg'])  # 合并网格自适应配置
+        if isinstance(cfg.get('mesh_cfg'), dict):  # 项②：提供了网格配置覆盖（含 size）
+            mesh_cfg_out = _deep_merge(mesh_cfg_out, cfg['mesh_cfg'])  # 合并网格配置
+        if cfg.get('mesh_size') is not None:  # v9.1：兼容旧写法——顶层 mesh_size 映射到 mesh_cfg['size']
+            mesh_cfg_out['size'] = cfg['mesh_size']  # 覆盖基准网格尺寸（向后兼容）
         if isinstance(cfg.get('time_cfg'), dict):  # 项③：提供了时间步校验覆盖
             time_cfg_out = _deep_merge(time_cfg_out, cfg['time_cfg'])  # 合并时间步校验配置
         if cfg.get('max_reflect_order') is not None:  # 项④：提供了反射阶数覆盖
@@ -2162,7 +2326,7 @@ def _load_case_config(material_cfg, geometry_cfg, mesh_size, damping_cfg, logger
     except Exception as _e:  # 解析失败
         if logger:  # 记录告警
             log_step(logger, '加载 case_config.json 失败(改用默认配置): %s', str(_e))  # 输出失败告警
-    return (material_cfg, geometry_cfg, mesh_size, damping_cfg, mesh_cfg_out,  # 返回（可能被覆盖的）配置
+    return (material_cfg, geometry_cfg, damping_cfg, mesh_cfg_out,  # 返回（可能被覆盖的）配置
             time_cfg_out, max_reflect_order_out, ff_cfg_out, run_cfg_out)  # 含 v6 新增两项
 
 
@@ -2182,10 +2346,11 @@ def _meta_material(name, cs, vv, density, thickness=None):  # 打包单层材料
             'density': _meta_f(density), 'thickness': _meta_f(thickness)}  # 密度与厚度
 
 
-def _damping_meta(site, damping):  # 把阻尼配置与逐层换算结果打包为元数据块
-    """返回阻尼元数据 dict（含逐层 cs/Q/xi/alpha/beta），供 case_meta.json 记录与下游核对。
+def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算结果打包为元数据块（v9：含逐层共振频率）
+    """返回阻尼元数据 dict（含逐层 cs/Q/xi/f_layer/alpha/beta），供 case_meta.json 记录与下游核对。
 
-    site    : Site 对象（基岩 + 从上到下有限层）；damping：解析后的阻尼配置（含 fc）。
+    site    : Site 对象（基岩 + 从上到下有限层）；damping：解析后的阻尼配置（含 fc）；
+    geom    : Geometry 对象（v9：perband 模式据此推算各有限层共振基频 f_layer，None 则不记录 f_layer）。
     damping=None 或 enable=False 时返回 {'enable': False}。逐层顺序：基岩在前，再各有限层（从上到下）。
     """
     if not (damping and damping.get('enable')):  # 未启用阻尼
@@ -2195,12 +2360,15 @@ def _damping_meta(site, damping):  # 把阻尼配置与逐层换算结果打包�
     mats = [(site.bedrock, True)] + [(L, False) for L in site.layers]  # 基岩在前 + 各有限层（从上到下）
     for mat, is_bedrock in mats:  # 遍历各层（含基岩）
         Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping)  # 该层品质因子与阻尼比
-        a_ray, b_ray = _rayleigh_coeffs(xi, damping, fc)  # 该层瑞利系数
+        f_layer = None if (is_bedrock or geom is None) else _material_resonance_freq(mat, site, geom)  # v9：有限层共振基频（与建材同口径）
+        a_ray, b_ray = _rayleigh_coeffs(xi, damping, fc, f_layer)  # 该层瑞利系数（perband 时随 f_layer 重锚定）
         per_layer.append({'name': str(mat.name), 'cs': _meta_f(mat.cs),  # 层名与波速
                           'Q': _meta_f(Q), 'xi': _meta_f(xi),  # 品质因子与阻尼比
+                          'f_layer': _meta_f(f_layer),  # v9：该层一维共振基频（perband QA 锚点）
                           'alpha': _meta_f(a_ray), 'beta': _meta_f(b_ray)})  # 瑞利系数
     return {'enable': True, 'method': damping.get('method'), 'fc': _meta_f(fc),  # 总体配置
             'anchor': damping.get('anchor', 'input'), 'f_site': _meta_f(damping.get('f_site')),  # v8：锚定方式与场地基频
+            'harmonics_cover': _meta_f(damping.get('harmonics_cover')),  # v9：perband 拟合上限覆盖的共振谐波次数
             'qs_factor': _meta_f(damping.get('qs_factor')), 'q_bedrock': _meta_f(damping.get('q_bedrock')),  # Q 换算因子
             'f1_factor': _meta_f(damping.get('f1_factor')), 'f2_factor': _meta_f(damping.get('f2_factor')),  # 双频拟合边界
             'layers': per_layer}  # 逐层阻尼明细（基岩在前）
@@ -2269,7 +2437,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'bedrock': bedrock,  # 基岩材料字典
             'layers': layers,  # 从上到下的有限层材料字典列表
             'derived': derived,  # 派生量
-            'damping': _damping_meta(site, damping),  # 材料阻尼块（逐层 Q/xi/alpha/beta，可复现）
+            'damping': _damping_meta(site, damping, geom),  # 材料阻尼块（逐层 Q/xi/f_layer/alpha/beta，可复现；v9 传 geom 算共振频率）
             'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
             'extra': {},  # 附加自定义键值
             'folder': os.path.basename(out_dir.rstrip('/\\')),  # 工况文件夹名（来源标识）
@@ -2355,7 +2523,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""  # 说明主入口用途
-    global material_cfg, geometry_cfg, mesh_size, damping_cfg, MAX_REFLECT_ORDER  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
+    global material_cfg, geometry_cfg, damping_cfg, MAX_REFLECT_ORDER  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
     logger = log_step('VAB_oblique_TAF_multilayer.log')  # 初始化日志并写入当前版本日志文件
     total_start = time.time()  # 记录主流程起始时间
 
@@ -2363,9 +2531,10 @@ def main():
         log_step(logger, '脚本开始执行 (VAB_oblique_TAF_multilayer_v8)')  # 写入脚本启动日志
 
         # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（v6 新增自由场引擎/运行控制注入）
-        (material_cfg, geometry_cfg, mesh_size, damping_cfg,
+        (material_cfg, geometry_cfg, damping_cfg,
          _mesh_cfg, _time_cfg, _max_reflect_order, _ff_cfg, _run_cfg) = _load_case_config(  # 加载并覆盖
-            material_cfg, geometry_cfg, mesh_size, damping_cfg, logger)  # 传入默认配置与日志器
+            material_cfg, geometry_cfg, damping_cfg, logger)  # 传入默认配置与日志器
+        mesh_size = float(_mesh_cfg.get('size', 4.0))  # v9.1：基准网格尺寸改由 mesh_cfg['size'] 提供（兼容旧顶层 mesh_size）
         MAX_REFLECT_ORDER = _max_reflect_order  # 全局更新反射截断阶数（仅 ray 引擎使用）
 
         # 构建场地材料（基岩 + 有限层列表）并校验层厚
@@ -2405,6 +2574,17 @@ def main():
             if _f_site:  # 估算成功
                 damping['f_site'] = _f_site  # 写入解析后配置（建材/fd 自由场/meta 共用同一份，口径一致）
                 log_step(logger, '阻尼双控锚定: f_site=%.3f Hz（瑞利拟合下限取 min(f1_factor*fc, f_site)）', _f_site)  # 记录锚定
+        if damping.get('enable') and damping.get('anchor') == 'perband' and fc_resolved:  # v9：逐层重锚定（QA 打印各层共振频带）
+            _strat_log = _build_stratigraphy(site, geom, ymin=0.0, surface_geometry=sgeom)  # 与建材同口径分层
+            _hc = float(damping.get('harmonics_cover', 3.0))  # 谐波覆盖次数
+            for _idx, _band in enumerate(_strat_log):  # 逐带打印共振频率与拟合上限
+                if _idx == 0:  # 基岩带跳过（无共振、Q≈999）
+                    continue  # 继续下一带
+                _fl = _band_resonance_freq(_band)  # 该层共振基频
+                if _fl:  # 有效时记录
+                    _f2_eff = max(damping['f2_factor'] * fc_resolved, _hc * _fl)  # 该层实际拟合上限
+                    log_step(logger, '逐层重锚定: 层 %s f_layer=%.3f Hz -> 拟合上限 f2=%.3f Hz（旧 input 锚定仅 %.3f Hz）',
+                             _band['name'], _fl, _f2_eff, damping['f2_factor'] * fc_resolved)  # 记录该层重锚定
         log_step(logger, '材料阻尼: enable=%s, method=%s, anchor=%s, fc=%s',  # 记录最终阻尼设定
                  damping.get('enable'), damping.get('method'), damping.get('anchor', 'input'), fc_resolved)  # 输出配置
 
@@ -2441,12 +2621,12 @@ def main():
 
         base_model, part_name, inst_name = create_model(  # 创建斜坡基础几何与网格模型
             site=site, geom=geom, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,  # 场地/几何/自适应网格/文件名/阻尼
-            surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v7：表层几何模式 + 单元类型
+            surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)  # v7 单元类型 + v9 分层网格 + v9.1 软层谐波加密(fc)
 
         if run_flat:  # 需要平坦对照模型时才创建
             flat_base_model, flat_part_name, flat_inst_name = create_flat_model(  # 创建平坦自由场基础模型
                 site=site, geom=geom, mesh_size=mesh_used, logger=logger, damping=damping,  # 场地/几何/自适应网格/阻尼（与斜坡同参）
-                surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v7：表层几何模式 + 单元类型
+                surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)  # v7 单元类型 + v9 分层网格 + v9.1 软层谐波加密(fc)
 
         slope_model_names = build_models(  # 批量复制斜坡模型并施加等效边界
             acc_info=acc_info, base_model=base_model, part_name=part_name, inst_name=inst_name,  # 地震动信息与基础模型/零件/实例
@@ -2486,3 +2666,4 @@ def main():
 if __name__ == '__main__':  # 判断是否直接运行脚本
     main()  # 调用主入口函数
 # v8 end  # 文件结束标记
+# v9: 阻尼锚定新增 'perband' 逐层重锚定并设为默认（解决软层高频过阻尼）  # 版本变更标记
