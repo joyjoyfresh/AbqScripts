@@ -55,7 +55,7 @@ from collections import namedtuple  # 导入命名元组用于参数打包
 
 
 # ==========================================================
-#  配置参数（实验参数集中在此处修改）
+#  配置参数（默认值定义在这里，工况目录下的 case_config.json 可覆盖这些默认值）
 # ==========================================================
 
 # 默认材料参数配置
@@ -95,9 +95,9 @@ job_cfg = {
     'memory_percent': 90,       # 设置作业内存百分比
 }
 
-# 材料阻尼配置（对齐论文 Q 衰减）
+# 材料阻尼配置
 damping_cfg = {
-    'enable': True,             # 是否施加材料阻尼（False 则退化为无阻尼行为）
+    'enable': False,             #! 是否施加材料阻尼（False 则退化为无阻尼行为）
     'method': 'rayleigh',       # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定 Q) / 'stiffness'=仅刚度比例(β)
     'constant_xi': 0.02,        #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
     'qs_factor': 0.05,          # Qs = qs_factor*cs（论文 coarse-grain 法，cs 单位 m/s）
@@ -109,13 +109,13 @@ damping_cfg = {
     'harmonics_cover': 3.0,     # perband 模式下拟合上限覆盖到各层共振基频的几次谐波（f2≥harmonics_cover·f_layer，默认3≈保留前两三阶混响谐波）
 }
 
-# 网格自适应配置（对齐论文式1 Kuhlemeyer-Lysmer 判据）
+# 网格自适应配置
 mesh_cfg = {
-    'size': 4.0,                # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
-    'auto': True,               # True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
+    'size': 1.0,                # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
+    'auto': False,              #! True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
     'elems_per_wavelength': 10, # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
     'fmax_factor': 2.5,         # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
-    'min_size': 0.5,            # 网格下限（m）：防止过软层或超高频时计算量爆炸
+    'min_size': 0.2,            # 网格下限（m）：防止过软层或超高频时计算量爆炸
     'elem': 'CPE4R',             # 单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
     'graded': True,             # 分层非均匀网格——按层波速比缩放单元尺寸(软层细/深部粗,自由四边形平滑过渡)；False=全局均匀
     'max_band_ratio': 4.0,      # 最粗层单元 ≤ 该倍数×最细层(=mesh_used)，限制过渡比以保证网格质量
@@ -128,7 +128,7 @@ mesh_cfg = {
 time_cfg = {
     'check': False,              # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
     'min_steps_per_fmax_period': 20,  # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
-    'tail_seconds': 2.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
+    'tail_seconds': 0.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
 }
 
 # 自由场引擎配置
@@ -2415,10 +2415,11 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
         slope_height = Hmh if Hmh is not None else geometry.get('h')  # 斜坡特征高度（a0 归一化用，单层退化用 h）
         vs_bedrock = bedrock['cs'] if has_bedrock else None  # 基岩剪切波速 Vr
         vs_surface = layers[0]['cs'] if layers else vs_bedrock  # 最顶有限层 Vs1（无有限层退化为基岩）
-        vs_cover = layers[-1]['cs'] if layers else vs_surface  # 最底覆盖层 Vs2（a0 用）
+        vs_cover = layers[-1]['cs'] if layers else vs_surface  # 最底覆盖层 Vs2（a0 归一化 + Vr/Vs2 抗阻比，对齐论文 VR/Vs 口径）
+        vs_min = min([L['cs'] for L in layers]) if layers else vs_bedrock  # 最软有限层波速（仅作诊断记录：含软表层时即 Vs1）
         vr_over_vs2 = (vs_bedrock / vs_cover) if (vs_bedrock and vs_cover) else None  # Vr/Vs2 抗阻比
         vs1_over_vs2 = (vs_surface / vs_cover) if (vs_surface and vs_cover) else None  # Vs1/Vs2 软硬比
-        a0_base = (2.0 * slope_height / vs_cover) if (slope_height and vs_cover) else None  # a0 = f_c(Hz) * a0_base
+        a0_base = (2.0 * slope_height / vs_cover) if (slope_height and vs_cover) else None  # a0 = fc(Hz) × a0_base，按上覆层 Vs2 归一化（与论文 a0=2fc(H−h)/Vs2 一致；上一版误改为 Vs1 已撤回）
         fc_meta = (damping or {}).get('fc')  # 解析后主频（阻尼关闭/未估计时可能为 None）
         a0_val = (fc_meta * a0_base) if (fc_meta and a0_base) else None  # v7：无量纲频率 a0 = fc × a0_base
         derived = {  # 派生量集中区（公式单一真相源）
@@ -2427,10 +2428,11 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'vs_bedrock': _meta_f(vs_bedrock),  # 基岩 Vr
             'vs_surface': _meta_f(vs_surface),  # 表层 Vs1
             'vs_cover': _meta_f(vs_cover),  # 覆盖层 Vs2
+            'vs_min': _meta_f(vs_min),  # v9.1：最软有限层波速（a0 归一化用）
             'vr_over_vs2': _meta_f(vr_over_vs2),  # Vr/Vs2
             'vs1_over_vs2': _meta_f(vs1_over_vs2),  # Vs1/Vs2
             'slope_height': _meta_f(slope_height),  # a0 归一化用斜坡特征高度
-            'a0_base': _meta_f(a0_base),  # a0 换算基数
+            'a0_base': _meta_f(a0_base),  # a0 换算基数（v9.1：按最软层 vs_min）
             'a0': _meta_f(a0_val),  # v7：无量纲频率 a0（与论文工况对位用）
         }
         out_dir = os.path.abspath(os.getcwd())  # 当前工况文件夹（建模运行目录）
