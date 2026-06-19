@@ -69,10 +69,6 @@ PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 confi
     {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬 Vs1/Vs2=2.0, 0.25, 0°
     {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软, 0.25, 15°
     {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬, 0.25, 15°
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 0°
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 0°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 15°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 15°
 ]  # 结束变参数工况列表定义
 
 

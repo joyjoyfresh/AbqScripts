@@ -24,111 +24,111 @@ from collections import namedtuple
 
 # 默认材料参数配置
 material_cfg = {
-    'angle': 15,                          # SV 波入射角度（度）
-    'surface_geometry': 'horizontal',     #! 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
+    'angle': 15,                        # SV 波入射角度（度）
+    'surface_geometry': 'horizontal',   #! 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
     # 基岩材料参数
     'bedrock': {
-        'elastic_modulus': 26e9,          # 基岩杨氏模量（Pa），对应 Vs = 2000 m/s
-        'poisson_ratio': 0.3,             # 基岩泊松比
-        'density': 2500,                  # 基岩密度（kg/m^3）
+        'elastic_modulus': 26e9,        # 基岩杨氏模量（Pa），对应 Vs = 2000 m/s
+        'poisson_ratio': 0.3,           # 基岩泊松比
+        'density': 2500,                # 基岩密度（kg/m^3）
     },
     # 基岩之上的有限层（自顶向下配置；最底层为覆盖层，厚度由几何决定）
     'layers': [
-        {'name': 'surface',               # 表层名称
-        'velocity_ratio': 5.0,            # 该层波速比 Vr/Vs（基岩 Vs / 该层 Vs，越大层越软）
-        'poisson_ratio': 0.3,             # 该层泊松比
-        'density': 2500,                  # 该层密度（kg/m^3）
-        'thickness': 50},                 # 该层固定厚度（m）；最底层覆盖层不写，由几何决定
-        {'name': 'overlying',             # 覆盖层 Vr/Vs=1.25(Vs=1600)，对齐 double_v4
-        'velocity_ratio': 1.25,           # 覆盖层波速比 Vr/Vs
-        'poisson_ratio': 0.3,             # 覆盖层泊松比
-        'density': 2500},                 # 覆盖层密度（kg/m^3，厚度由几何决定）
+        {'name': 'surface',             # 表层名称
+        'velocity_ratio': 5.0,          # 该层波速比 Vr/Vs1
+        'poisson_ratio': 0.3,           # 该层泊松比
+        'density': 2500,                # 该层密度（kg/m^3）
+        'thickness': 50},               # 该层固定厚度（m）
+        {'name': 'overlying',           # 覆盖层
+        'velocity_ratio': 2.5,          # 覆盖层波速比 Vr/Vs2
+        'poisson_ratio': 0.3,           # 覆盖层泊松比
+        'density': 2500},               # 覆盖层密度（kg/m^3，厚度由几何决定）
     ],
 }
 
 # 几何参数配置
 geometry_cfg = {
-    'H_minus_h': 200.0,                   # 斜坡高度差 H - h (m)
-    'i': 45.0,                            # 斜坡倾角 (度)
-    'h_over_H': 0.5,                      # 深度比 h / H
-    'total_L': 1800.0,                    # 总模型长度 (m)
-    'left_flat': 1000.0,                  # 上平台长度 (m)
-    'bedrock_thickness': 200.0,           # 基岩层厚度 (m)
+    'H_minus_h': 200.0,                 # 斜坡高度差 H - h (m)
+    'i': 45.0,                          # 斜坡倾角 (度)
+    'h_over_H': 0.5,                    # 深度比 h / H
+    'total_L': 1800.0,                  # 总模型长度 (m)
+    'left_flat': 1000.0,                # 上平台长度 (m)
+    'bedrock_thickness': 200.0,         # 基岩层厚度 (m)
 }
 
 # 作业参数配置
 job_cfg = {
-    'variables': ('U', 'V', 'A'),         # 场输出变量（位移/速度/加速度）
-    'frequency': 1,                       # 场输出频率（每隔该增量步输出一帧）
-    'num_cpus': 8,                        # 并行 CPU 数量
-    'memory_percent': 90,                 # 作业内存百分比
+    'variables': ('U', 'V', 'A'),       # 场输出变量（位移/速度/加速度）
+    'frequency': 1,                     # 场输出频率（每隔该增量步输出一帧）
+    'num_cpus': 8,                      # 并行 CPU 数量
+    'memory_percent': 90,               # 作业内存百分比
 }
 
 # 材料阻尼配置
 damping_cfg = {
-    'enable': False,             #! 是否施加材料阻尼（False 则退化为无阻尼行为）
-    'method': 'rayleigh',       # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定 Q) / 'stiffness'=仅刚度比例(β)
-    'constant_xi': 0.02,        #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
-    'qs_factor': 0.05,          # Qs = qs_factor*cs（论文 coarse-grain 法，cs 单位 m/s）
-    'q_bedrock': 999.0,         # 基岩品质因子(≈无衰减)
-    'fc': None,                 # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
-    'f1_factor': 0.5,           # 双频拟合下限 = f1_factor*fc
-    'f2_factor': 2.5,           # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
-    'anchor': 'perband',        # 拟合锚定 'perband'=逐层按各层共振频带重锚定(默认,解决软层高频过阻尼) / 'input'=仅输入主频 / 'dual'=场地基频+输入主频双控
-    'harmonics_cover': 3.0,     # perband 模式下拟合上限覆盖到各层共振基频的几次谐波（f2≥harmonics_cover·f_layer，默认3≈保留前两三阶混响谐波）
+    'enable': True,                     #! 是否施加材料阻尼（False 则退化为无阻尼行为）
+    'method': 'rayleigh',               # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定 Q) / 'stiffness'=仅刚度比例(β)
+    'constant_xi': 0.01,                #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
+    'qs_factor': 0.05,                  # Qs = qs_factor*cs（coarse-grain 法，cs 单位 m/s）
+    'q_bedrock': 999.0,                 # 基岩品质因子(≈无衰减)
+    'fc': None,                         # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
+    'f1_factor': 0.5,                   # 双频拟合下限 = f1_factor*fc
+    'f2_factor': 2.5,                   # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
+    'anchor': 'perband',                # 拟合锚定 'perband'=逐层按各层共振频带重锚定 / 'input'=仅输入主频 / 'dual'=场地基频+输入主频双控
+    'harmonics_cover': 3.0,             # perband 模式下拟合上限覆盖到各层共振基频的几次谐波（f2≥harmonics_cover·f_layer）
 }
 
 # 网格自适应配置
 mesh_cfg = {
-    'size': 4.0,                # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
-    'auto': True,              #! True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
-    'elems_per_wavelength': 10, # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
-    'fmax_factor': 2.5,         # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
-    'min_size': 0.2,            # 网格下限（m）：防止过软层或超高频时计算量爆炸
-    'elem': 'CPE4R',             # 单元类型 'CPE4'(默认，全积分) / 'CPE4R'(减缩积分提速选项)
-    'graded': True,             # 分层非均匀网格——按层波速比缩放单元尺寸(软层细/深部粗,自由四边形平滑过渡)；False=全局均匀
-    'max_band_ratio': 4.0,      # 最粗层单元 ≤ 该倍数×最细层(=mesh_used)，限制过渡比以保证网格质量
-    'max_size': None,           # 单元绝对上限(m)，None=不额外限制(仅受 max_band_ratio 约束)
-    'resolve_harmonics': 3.0,   # 薄软层加密——网格至少解析到各层共振基频 f_layer=cs/(4h) 的该倍数谐波(与 perband 阻尼 harmonics_cover 对齐)；0/None=关闭
-    'min_elems_through_thickness': 6,  # 每个有限层厚度方向至少单元数(保证薄层驻波/混响形态)；该判据优先于 min_size
+    'size': 4.0,                        # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
+    'auto': True,                       #! True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
+    'elems_per_wavelength': 10,         # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
+    'fmax_factor': 2.5,                 # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
+    'min_size': 0.2,                    # 网格下限（m）：防止过软层或超高频时计算量爆炸
+    'elem': 'CPE4R',                    # 单元类型 'CPE4'(全积分) / 'CPE4R'(减缩积分提速选项)
+    'graded': True,                     # 分层非均匀网格——按层波速比缩放单元尺寸(软层细/深部粗,自由四边形平滑过渡)；False=全局均匀
+    'max_band_ratio': 4.0,              # 最粗层单元 ≤ 该倍数×最细层(=mesh_used)，限制过渡比以保证网格质量
+    'max_size': None,                   # 单元绝对上限(m)，None=不额外限制(仅受 max_band_ratio 约束)
+    'resolve_harmonics': 3.0,           # 薄软层加密——网格至少解析到各层共振基频 f_layer=cs/(4h) 的该倍数谐波(与 perband 阻尼 harmonics_cover 对齐)；0/None=关闭
+    'min_elems_through_thickness': 6,   # 每个有限层厚度方向至少单元数(保证薄层驻波/混响形态)；该判据优先于 min_size
 }
 
-# 时间步配置：模拟步长【始终等于输入地震动 txt 的 dt】，脚本不再重采样（避免步数被改变）
+# 时间步配置
 time_cfg = {
-    'check': True,              # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
-    'min_steps_per_fmax_period': 20,  # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
-    'tail_seconds': 0.0,        #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
+    'check': True,                      # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
+    'min_steps_per_fmax_period': 20,    # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
+    'tail_seconds': 0.0,                #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
 }
 
 # 自由场引擎配置
 freefield_cfg = {
-    'engine': 'fd',             #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=射线法（回归对比用）
-    'include_damping': True,    # fd 引擎是否在自由场中计入与模型介质一致的瑞利阻尼
-    'spectrum_tol': 1e-7,       # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
-    'fcut': None,               # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
-    'pad_factor': 4,            # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
+    'engine': 'fd',                     #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=射线法（回归对比用）
+    'include_damping': True,            # fd 引擎是否在自由场中计入与模型介质一致的瑞利阻尼
+    'spectrum_tol': 1e-7,               # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
+    'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
+    'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
 }
 
 # 运行控制配置
 run_cfg = {
-    'surface_only': True,       # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
-    'critical_angle_check': False,  # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
-}
+    'surface_only': True,               # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
+    'critical_angle_check': False,      # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
+} 
 
-# 土体非线性：等效线性(EQL) 配置（v1：1D 应变相容→喂 2D；扫描=按不同强度的输入多跑几次）
+# 土体非线性：等效线性(EQL) 配置
 eql_cfg = {
-    'enable': True,                 # True=建模前对软层做 EQL 应变相容(降Vs/增ξ)；False=保持线性(=原行为)
-    'curve': 'darendeli',            # 经验曲线(可切换对比): 'darendeli'(通用) / 'seed_idriss_sand'(砂) / 'vucetic_dobry'(黏土)
-    'nonlinear_layers': ['surface'], # 参与非线性的层名(其余层保持线性；岩层一般不进入非线性)
-    'PI': 15.0,                      # 塑性指数(Darendeli/Vucetic-Dobry 用)
-    'sigma0_kpa': 100.0,             # 平均有效围压 kPa(Darendeli 用)
-    'strain_ratio': 0.65,            # 有效剪应变 = 该比例 × 峰值剪应变
-    'tol': 0.02,                     # 收敛容差(Vs 相对变化)
-    'max_iter': 15,                  # 最大迭代次数(1D 内迭代)
-    'mode': '1d',                    # '1d'=1D应变相容→喂2D(默认,快/稳/可验证) / '2d_element'=逐单元2D EQL(重型,需Abaqus实测)
-    'max_outer_iter': 4,             # 2d_element: 2D FE 重跑次数(外迭代)
-    'n_strain_bins': 12,             # 2d_element: 按应变给软层单元分箱的箱数(控制材料数量)
-    'converge_g': 0.05,              # 2d_element: 外迭代收敛容差(各箱 G 相对变化)
+    'enable': False,                    #! True=建模前对软层做 EQL 应变相容(降Vs/增ξ)；False=保持线性(=原行为)
+    'curve': 'darendeli',               #! 经验曲线(可切换对比): 'darendeli'(通用) / 'seed_idriss_sand'(砂) / 'vucetic_dobry'(黏土)
+    'nonlinear_layers': ['surface'],    # 参与非线性的层名(其余层保持线性；岩层一般不进入非线性)
+    'PI': 15.0,                         # 塑性指数(Darendeli/Vucetic-Dobry 用)
+    'sigma0_kpa': 100.0,                # 平均有效围压 kPa(Darendeli 用)
+    'strain_ratio': 0.65,               # 有效剪应变 = 该比例 × 峰值剪应变
+    'tol': 0.02,                        # 收敛容差(Vs 相对变化)
+    'max_iter': 15,                     # 最大迭代次数(1D 内迭代)
+    'mode': '1d',                       #! '1d'=1D应变相容→喂2D(默认,快/稳/可验证) / '2d_element'=逐单元2D EQL(重型,需Abaqus实测)
+    'max_outer_iter': 4,                # 2d_element: 2D FE 重跑次数(外迭代)
+    'n_strain_bins': 12,                # 2d_element: 按应变给软层单元分箱的箱数(控制材料数量)
+    'converge_g': 0.05,                 # 2d_element: 外迭代收敛容差(各箱 G 相对变化)
 }
 
 
@@ -1777,7 +1777,7 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
         get_vel = _make_delay_cache(ctx.VEL, ctx.dt)  # 速度时程延迟缓存（跨节点复用）
         get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
     if logger:
-        _total_nodes = sum(len(v) for v in nodes_by_boundary.values())  # 三边界节点总数
+        _total_nodes = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
         log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
                  model_name, engine, _total_nodes,  # 引擎与总数
                  len(nodes_by_boundary['l']), len(nodes_by_boundary['r']), len(nodes_by_boundary['b']))  # 各边界节点数
@@ -1797,7 +1797,7 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
             else:  # 回归对比：v5 射线法
                 ff = _compute_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx, get_vel, get_dis)  # 射线法自由场时程
 
-            time = ff['time']  # 延长后的时间轴
+            t_arr = ff['time']  # 延长后的时间轴
             ux = ff['ux']; uy = ff['uy']  # 位移分量
             dotux = ff['dotux']; dotuy = ff['dotuy']  # 速度分量
             sigmax = ff['sigmax']; sigmay = ff['sigmay']  # 应力分量（已含外法向符号）
@@ -1809,8 +1809,8 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
                 fx = bn.kt * ux + bn.ct * dotux + bn.influence * sigmax  # x 向等效力（切向弹簧）
                 fy = bn.kn * uy + bn.cn * dotuy + bn.influence * sigmay  # y 向等效力（法向弹簧）
 
-            field_data['{}-{}-fx'.format(bn.label, boundary)] = np.column_stack((time, fx))  # 缓存 x 向力时程
-            field_data['{}-{}-fy'.format(bn.label, boundary)] = np.column_stack((time, fy))  # 缓存 y 向力时程
+            field_data['{}-{}-fx'.format(bn.label, boundary)] = np.column_stack((t_arr, fx))  # 缓存 x 向力时程
+            field_data['{}-{}-fy'.format(bn.label, boundary)] = np.column_stack((t_arr, fy))  # 缓存 y 向力时程
         if logger:
             log_step(logger, '%s 边界[%s]等效力计算完成: %d 节点, 耗时=%.2fs',
                      model_name, boundary, len(nodes_by_boundary[boundary]), time.time() - _t_b)
@@ -1922,7 +1922,7 @@ def VAB_oblique(site, geom, angle,
         'r': _make_boundary_nodes(r_nodes, 'y', False, pick_material, ymax, logger, model_name, 'r'),  # 右边界（沿 y 降序）
         'b': _make_boundary_nodes(b_nodes, 'x', True, pick_material, ymax, logger, model_name, 'b'),  # 底边界（沿 x 升序）
     }
-    _n_bn = sum(len(v) for v in nodes_by_boundary.values())  # 三边界节点总数
+    _n_bn = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
     log_step(logger, '%s 边界节点影响长度与弹簧-阻尼系数已计算: 左=%d, 右=%d, 底=%d (合计=%d, 参考长度R=%.2f)',
              model_name, len(nodes_by_boundary['l']), len(nodes_by_boundary['r']),  # 左右底节点数
              len(nodes_by_boundary['b']), _n_bn, ymax)  # 合计数与参考长度

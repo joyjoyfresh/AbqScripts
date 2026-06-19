@@ -30,12 +30,12 @@ CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名�
 
 # 固定源文件（随每个工况文件夹拷入）：仅输入波 .txt（建模脚本已自包含写出 case_meta.json，无需再拷模块）
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",  # 4 Hz Ricker 输入波（a0=2.0 @ Vs2=800）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_2Hz.txt",  # Ricker 输入波
 ]  # 结束固定源文件完整路径定义
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v2.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v2.py",  # 建模脚本（读取 case_config.json）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
@@ -64,11 +64,6 @@ def _layers3(surf_vr, surf_thick):  # 生成三层 layers（表层软硬/厚度�
 
 
 PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 config 生成）
-    # ---- A) 三层（论文图15）：i=45 固定，软/硬×厚度×角度 = 8 工况 ----
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软 Vs1/Vs2=0.5, h1/(H-h)=0.25, 0°
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬 Vs1/Vs2=2.0, 0.25, 0°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软, 0.25, 15°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬, 0.25, 15°
     {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 0°
     {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 0°
     {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 15°

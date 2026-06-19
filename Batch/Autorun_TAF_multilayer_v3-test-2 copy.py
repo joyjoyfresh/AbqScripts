@@ -30,12 +30,12 @@ CONFIG_FILENAME = "case_config.json"  # 注入给建模脚本的配置文件名�
 
 # 固定源文件（随每个工况文件夹拷入）：仅输入波 .txt（建模脚本已自包含写出 case_meta.json，无需再拷模块）
 STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_2Hz.txt",  # Ricker 输入波
+    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_8Hz.txt",  # 4 Hz Ricker 输入波（a0=2.0 @ Vs2=800）
 ]  # 结束固定源文件完整路径定义
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v2.py",  # 建模脚本（读取 case_config.json）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v2.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
@@ -43,7 +43,7 @@ SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
 # 全部工况求解完成后自动执行的后处理脚本（直接指定绝对路径）
 POST_SCRIPT_SEQUENCE = [  # 汇总与跨工况出图脚本
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Collect_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Fig15_compare_v3.py",  # 三层图15 出图
+    # r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Multi\Plot_Fig15_compare_v3.py",  # 三层图15 出图(纯地形工况无图15结构，已暂时注释；复现图15时连同 A 组一起取消注释)
 ]
 
 # ============================================================
@@ -63,11 +63,35 @@ def _layers3(surf_vr, surf_thick):  # 生成三层 layers（表层软硬/厚度�
     ]  # 结束三层 layers
 
 
+# 纯地形(均质)层模板：所有有限层与基岩同波速(velocity_ratio=1.0 → Vs=Vs_bedrock=2000)，
+# 即全场【无任何阻抗对比】，坡顶放大只来自斜坡几何本身，用于单独标定"纯地形放大系数"作为基线，
+# 与含软层工况对比即可看出 2D 面波俘获到底叠加了多少。
+def _layers_homog(surf_thick=50.0):  # 生成均质 layers（无软/硬层，全场 Vs=2000）
+    """surf_thick: 名义表层厚度(只为定义层界位置，材料与下伏完全相同，物理上无界面)。"""
+    return [  # 沿用两层结构，但波速比都=1.0 → 与基岩同一种材料
+        {'name': 'surface',   'velocity_ratio': 1.0, 'poisson_ratio': 0.3, 'density': 2500, 'thickness': surf_thick},  # 名义表层(=基岩)
+        {'name': 'overlying', 'velocity_ratio': 1.0, 'poisson_ratio': 0.3, 'density': 2500},  # 名义覆盖层(=基岩)
+    ]  # 结束均质 layers
+
+
 PARAMETER_CASES = [  # 定义变参数工况列表（文件夹名自动由 config 生成）
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 0°
-    {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 0°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 15°
-    {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 15°
+    # ---- C) 纯地形(均质)：全场 Vs=2000、无阻抗对比 → 坡顶 TAF 即【纯地形放大系数】 ----
+    #   用途：单独量出本模型自身的地形放大基线；远场 TAF_h 应≈1.0(均质半空间无场地放大)，
+    #         坡顶 TAF_h = 纯地形因子。再与含软层工况(TAF≈2.x)相减/相除，即可判断 2D 俘获缺多少。
+    {"config": {"material_cfg": {"angle": 0,  "layers": _layers_homog(50.0)}, "geometry_cfg": {"i": 45.0}}, "name": "homo-topo-i45-a0"},   # i=45 竖直入射(经典地形因子)
+    {"config": {"material_cfg": {"angle": 15, "layers": _layers_homog(50.0)}, "geometry_cfg": {"i": 45.0}}, "name": "homo-topo-i45-a15"},  # i=45 斜入射15°(对齐主工况)
+    {"config": {"material_cfg": {"angle": 15, "layers": _layers_homog(50.0)}, "geometry_cfg": {"i": 30.0}}, "name": "homo-topo-i30-a15"},  # 缓坡 i=30 斜入射15°(看角度敏感性)
+    {"config": {"material_cfg": {"angle": 15, "layers": _layers_homog(50.0)}, "geometry_cfg": {"i": 60.0}}, "name": "homo-topo-i60-a15"},  # 陡坡 i=60 斜入射15°(看角度敏感性)
+
+    # ---- A) 三层（论文图15）：i=45 固定，软/硬×厚度×角度 = 8 工况 【已暂时注释；需复现图15时取消下面整段注释】----
+    # {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软 Vs1/Vs2=0.5, h1/(H-h)=0.25, 0°
+    # {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬 Vs1/Vs2=2.0, 0.25, 0°
+    # {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 50.0)},  "geometry_cfg": {"i": 45.0}}},   # 软, 0.25, 15°
+    # {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 50.0)}, "geometry_cfg": {"i": 45.0}}},   # 硬, 0.25, 15°
+    # {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 0°
+    # {"config": {"material_cfg": {"angle": 0,  "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 0°
+    # {"config": {"material_cfg": {"angle": 15, "layers": _layers3(5.0, 150.0)}, "geometry_cfg": {"i": 45.0}}},   # 软, 0.75, 15°
+    # {"config": {"material_cfg": {"angle": 15, "layers": _layers3(1.25, 150.0)},"geometry_cfg": {"i": 45.0}}},   # 硬, 0.75, 15°
 ]  # 结束变参数工况列表定义
 
 
