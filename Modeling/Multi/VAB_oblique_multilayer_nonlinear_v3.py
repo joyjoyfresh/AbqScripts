@@ -2486,15 +2486,20 @@ def _eql_mod_damp(gamma, curve, PI, sigma0_kpa):  # 可切换经验曲线：γ�
     """给定工程剪应变 gamma(小数)，返回 (G/Gmax, xi)。三种曲线可切换对比。"""
     g = max(abs(float(gamma)), 1e-9)
     if curve == 'seed_idriss_sand':  # 砂/砾(Seed-Idriss)
-        gref, a, xi_min, xi_max, k = 6.0e-4, 0.92, 0.010, 0.28, 0.33
+        gref, a, xi_min, xi_max = 6.0e-4, 0.92, 0.010, 0.28
     elif curve == 'vucetic_dobry':  # 黏土(随 PI)
         gref, a = 3.0e-4 * (1.0 + PI / 30.0), 0.85
-        xi_min, xi_max, k = max(0.008, 0.025 - 0.0001 * PI), 0.25, 0.30
+        xi_min, xi_max = max(0.008, 0.025 - 0.0001 * PI), 0.25
     else:  # darendeli(通用,含围压/PI)
         gref = (0.0352 + 0.0010 * PI) * (sigma0_kpa / 100.0) ** 0.35 / 100.0
-        a, xi_min, xi_max, k = 0.919, 0.008 + 0.00005 * PI, 0.24, 0.31
-    GG = 1.0 / (1.0 + (g / gref) ** a)  # 双曲骨架模量折减
-    xi = min(max(xi_min + k * (1.0 - GG), xi_min), xi_max)  # 阻尼随软化增大
+        a, xi_min, xi_max = 0.919, 0.008 + 0.00005 * PI, 0.24
+    GG = 1.0 / (1.0 + (g / gref) ** a)  # 双曲骨架模量折减(Darendeli 口径)
+    # 阻尼 = 最小阻尼 + Darendeli 修正 × Masing 滞回阻尼。
+    # 替代旧线性近似 ξ=ξmin+k(1-GG)：后者在中低应变把阻尼算高约2倍(0.02%给10%、γr给16%)。
+    # Masing 滞回阻尼(a=1 双曲闭式，分数)：γ→0 时自然趋于0，避免低应变虚高阻尼。
+    DM = max(0.0, (4.0 * (g - gref * math.log((g + gref) / gref)) / (g * g / (g + gref)) - 2.0) / math.pi)
+    b = 0.60  # Darendeli 修正系数(真实土阻尼/纯Masing≈0.6, N=1)；真实土比纯 Masing 阻尼低
+    xi = min(max(xi_min + b * (GG ** 0.1) * DM, xi_min), xi_max)  # 修正后阻尼，封顶 xi_max
     return GG, xi
 
 
