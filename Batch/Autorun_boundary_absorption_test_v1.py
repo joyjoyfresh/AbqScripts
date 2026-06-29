@@ -174,6 +174,10 @@ def main():  # 主流程：建/跑各工况 → 汇总"峰值 vs 吸收强度"
         folder, case = item
         folder_path = os.path.join(root_dir, folder)
         print("\n==============================")
+        # 断点续跑：已有 TAF 结果则跳过（重跑只补未完成/失败的工况，省去重复长作业）
+        if glob.glob(os.path.join(folder_path, 'TAF-*.csv')):
+            print("跳过(已有 TAF 结果)：{}".format(folder))
+            return folder_path, True
         print("开始处理：{} (kind={}, dashpot_scale={})".format(folder, case["kind"], case["dscale"]))
         create_and_fill_folder(folder_path, source_files, case["config"])
         ok = run_scripts_in_folder(folder_path, run_order)

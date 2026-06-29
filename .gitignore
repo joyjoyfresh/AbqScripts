@@ -29,7 +29,7 @@ build/
 *.jpeg
 
 # 自定义
-test/
+test*/
 outputs*/
 images/
 docs/

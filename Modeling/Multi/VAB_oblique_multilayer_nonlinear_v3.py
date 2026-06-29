@@ -1787,16 +1787,22 @@ def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logg
                 logger.warning('创建弹簧-阻尼器时，实例中不存在节点 %d', bn.label)
                 continue
             region = Region(nodes=node_array)
+            # dashpot_scale=0(全反射)时 cn/ct=0，Abaqus 要求 dashpotBehavior=ON 的系数>0，
+            # 故系数<=0 时改 dashpotBehavior=OFF(纯弹簧)，并传正占位系数(OFF 下被忽略)。
+            dash_on_n = bn.cn > 0.0  # 法向是否启用阻尼器
+            dash_on_t = bn.ct > 0.0  # 切向是否启用阻尼器
             assembly.engineeringFeatures.SpringDashpotToGround(
                 name='SpringDashpot_{}_{}_normal'.format(boundary, bn.label),
                 region=region, orientation=None, dof=dof_n,
                 springBehavior=ON, springStiffness=bn.kn,
-                dashpotBehavior=ON, dashpotCoefficient=bn.cn)
+                dashpotBehavior=(ON if dash_on_n else OFF),
+                dashpotCoefficient=(bn.cn if dash_on_n else 1.0))
             assembly.engineeringFeatures.SpringDashpotToGround(
                 name='SpringDashpot_{}_{}_tangent'.format(boundary, bn.label),
                 region=region, orientation=None, dof=dof_t,
                 springBehavior=ON, springStiffness=bn.kt,
-                dashpotBehavior=ON, dashpotCoefficient=bn.ct)
+                dashpotBehavior=(ON if dash_on_t else OFF),
+                dashpotCoefficient=(bn.ct if dash_on_t else 1.0))
             total_created += 2  # 每节点创建法向+切向两个元件
         log_step(logger, '%s 边界[%s]弹簧-阻尼器已创建: %d 节点 -> %d 元件', model_name, boundary, n_b, n_b * 2)
     log_step(logger, '%s 弹簧-阻尼器创建完成: 合计 %d 个元件', model_name, total_created)
