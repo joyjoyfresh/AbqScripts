@@ -113,7 +113,14 @@ freefield_cfg = {
 run_cfg = {
     'surface_only': True,               # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
     'critical_angle_check': False,      # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
-} 
+}
+
+# 人工边界配置（粘弹性边界吸收强度旋钮——"边界吸收 vs 论文 7.6"对照实验用）
+boundary_cfg = {
+    'dashpot_scale': 1.0,               #! 边界阻尼器(吸收项)系数 cn,ct 的统一缩放：1.0=标准全吸收(Liu 粘弹性边界)；
+                                        #  0<k<1=弱吸收(部分反射，模拟 SPECFEM Stacey 对 S 波吸收不全)；0=纯弹簧(全反射、封闭域)。
+                                        #  弹簧 kn/kt 不缩放(维持自由场静位移)，只缩放阻尼器；k<1 时陷波会在域内混响堆积。
+}
 
 # 土体非线性：等效线性(EQL) 配置
 eql_cfg = {
@@ -1742,6 +1749,7 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax, logge
         if n > 2:
             influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0
 
+    dscale = float(boundary_cfg.get('dashpot_scale', 1.0))  # 边界阻尼器(吸收)缩放系数（1=全吸收/0=全反射）
     result = []
     for idx in range(n):
         x0 = arr[idx, 1]
@@ -1749,11 +1757,14 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax, logge
         inf = influence[idx]
         mat = pick_material(x0, y0)
         kn = mat['GG'] / 2.0 / ymax * inf
-        cn = mat['density'] * mat['cp'] * inf
+        cn = mat['density'] * mat['cp'] * inf * dscale  # 法向阻尼器(吸收) × 缩放
         kt = mat['GG'] / 4.0 / ymax * inf
-        ct = mat['density'] * mat['cs'] * inf
+        ct = mat['density'] * mat['cs'] * inf * dscale  # 切向阻尼器(吸收) × 缩放
         result.append(BoundaryNode(label=int(arr[idx, 0]), x=x0, y=y0, influence=inf,
                                    kn=kn, cn=cn, kt=kt, ct=ct))
+    if logger and abs(dscale - 1.0) > 1e-9:  # 非标准吸收时显式告警（对照实验留痕）
+        log_step(logger, '%s 边界[%s] 阻尼器吸收缩放 dashpot_scale=%.3f（1=全吸收/0=纯弹簧全反射）',
+                 model_name, boundary_tag, dscale)
     if logger and n > 0:
         kns = [b.kn for b in result]; cns = [b.cn for b in result]
         log_step(logger, '%s 边界[%s]节点=%d, 影响长度=%.3f~%.3f, 法向刚度kn=%.3e~%.3e, 法向阻尼cn=%.3e~%.3e',
@@ -2215,7 +2226,8 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         "material_cfg": {"surface_geometry": "terrain", ...}, "geometry_cfg": {...},
         "damping_cfg": {...}, "mesh_cfg": {"size": 4, "elem": "CPE4"}, "time_cfg": {...},
         "max_reflect_order": 3,
-        "freefield_cfg": {"engine": "fd"}, "run_cfg": {"surface_only": true}, "eql_cfg": {"enable": false}
+        "freefield_cfg": {"engine": "fd"}, "run_cfg": {"surface_only": true}, "eql_cfg": {"enable": false},
+        "boundary_cfg": {"dashpot_scale": 1.0}
       }
     v9.1：基准网格尺寸并入 mesh_cfg['size']；仍兼容旧写法顶层 "mesh_size"（自动映射到 mesh_cfg['size']）。
     返回覆盖后的 (material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg,
@@ -2270,6 +2282,9 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         if isinstance(cfg.get('eql_cfg'), dict):  # 土体非线性 EQL 覆盖
             eql_cfg.update(cfg['eql_cfg'])  # 就地更新全局 eql_cfg(扁平字典)
             _merged_keys.append('eql_cfg')
+        if isinstance(cfg.get('boundary_cfg'), dict):  # 人工边界吸收缩放覆盖（边界吸收对照实验）
+            boundary_cfg.update(cfg['boundary_cfg'])  # 就地更新全局 boundary_cfg(扁平字典，与 eql_cfg 同模式)
+            _merged_keys.append('boundary_cfg')
         if logger:
             log_step(logger, '已合并配置段: %s', ', '.join(_merged_keys) if _merged_keys else '(无)')
             log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, i=%s, 阻尼=%s/%s, mesh_auto=%s, order=%s, 引擎=%s',  # 输出关键覆盖项
