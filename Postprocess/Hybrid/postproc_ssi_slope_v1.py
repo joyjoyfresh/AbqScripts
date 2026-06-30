@@ -2,10 +2,11 @@
 """
 Step-2b 坡顶 SSI 后处理 + 验证
 ==============================
-读 job-freefield.odb 与 job-ssi.odb，验坡面 SSI 集成：
+读 job-freefield.odb、job-ssi.odb、job-fixed.odb，验坡面 SSI 集成：
   1. 坡顶自由场：坡肩地表放大(地形+地层放大 TAF)、主频
   2. SSI 周期延长：T_ssi(顶层相对坡顶基础 FFT) > T_fixed(step1=0.5s)
   3. SSI 结构响应：基底剪力/层间位移角/顶层加速度
+  4. (step2b-2)坡顶刚性 vs SSI 去耦对比：刚性基础输入坡顶自由场运动，SSI/刚性比量化 SSI 效应
 
 运行：abaqus python postproc_ssi_slope_v1.py
 """
@@ -114,6 +115,49 @@ def main():
         odb.close()
     else:
         print(u'\n[2&3] 缺 job-ssi.odb')
+
+    # ---------- 4. 坡顶刚性基础(输入坡顶自由场) vs SSI 去耦对比 (step2b-2) ----------
+    if os.path.isfile('job-fixed.odb'):
+        odb = openOdb('job-fixed.odb', readOnly=True)
+        inst_f = _resolve_inst(odb, meta['inst_frame'])
+        eq = odb.steps[list(odb.steps.keys())[0]]
+        ns = int(meta['n_story']); sh = float(meta['story_height']); fm = float(meta['floor_mass'])
+        lab_b = odb.rootAssembly.instances[inst_f].nodeSets['BASE'].nodes[0].label  # 柱脚(被坡顶自由场加速度驱动)
+        base_u = _node_hist(eq, inst_f, lab_b, 'U1')
+        timef = base_u[:, 0]; u_base = base_u[:, 1]; dtf = float(timef[1] - timef[0])
+        fu = [u_base]; fa = []
+        for k in range(1, ns + 1):
+            lab = odb.rootAssembly.instances[inst_f].nodeSets['FLOOR_%d' % k].nodes[0].label
+            fu.append(_node_hist(eq, inst_f, lab, 'U1')[:, 1])
+            fa.append(_node_hist(eq, inst_f, lab, 'A1')[:, 1])
+        inert = np.zeros_like(fa[0])
+        for k in range(ns):
+            inert = inert + fm * fa[k]
+        bs_f = float(np.max(np.abs(inert)))
+        dr_f = [float(np.max(np.abs(fu[k] - fu[k - 1])) / sh) for k in range(1, ns + 1)]
+        roof_f = float(np.max(np.abs(fa[ns - 1])))
+        T_fixed_nat = T_fixed   # 刚性自振用 step1 值(0.5s)；fixed 的 FFT 主频是受迫响应、近共振不可靠
+        results['fixed'] = {'T_natural': T_fixed_nat, 'base_shear': bs_f,
+                            'max_drift': max(dr_f), 'roof_peak_acc': roof_f}
+        print(u'\n[4] 坡顶刚性基础(输入坡顶自由场) vs SSI 去耦对比：')
+        print(u'    刚性: T自振=%.3fs(step1) 基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f(放大%.1f×)'
+              % (T_fixed_nat, bs_f, max(dr_f), roof_f, roof_f / pga))
+        if 'ssi' in results:
+            s = results['ssi']; Ts = results.get('T_ssi') or 0.0
+            print(u'    SSI : T自振=%.3fs           基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f(放大%.1f×)'
+                  % (Ts, s['base_shear'], s['max_drift'], s['roof_peak_acc'], s['roof_peak_acc'] / pga))
+            print(u'    SSI/刚性比: 周期=%.2f 基底剪力=%.2f 漂移=%.2f 顶层加速=%.2f'
+                  % (Ts / T_fixed_nat, s['base_shear'] / bs_f,
+                     s['max_drift'] / max(dr_f), s['roof_peak_acc'] / roof_f))
+            cf = results.get('freefield', {}).get('crest_f')  # 坡顶自由场主频(调谐解读)
+            if cf:
+                print(u'    解读: 刚性 f=%.2fHz vs 坡顶自由场 f=%.2fHz → SSI 周期延长改变结构与坡顶运动的调谐关系'
+                      % (1.0 / T_fixed_nat, cf))
+            results['ssi_over_fixed'] = {'T': Ts / T_fixed_nat, 'base_shear': s['base_shear'] / bs_f,
+                                         'drift': s['max_drift'] / max(dr_f), 'roof_acc': s['roof_peak_acc'] / roof_f}
+        odb.close()
+    else:
+        print(u'\n[4] 缺 job-fixed.odb，跳过去耦对比(step2b-2)')
 
     with open('ssi_slope_results.json', 'w') as fh:
         json.dump(results, fh, indent=2, ensure_ascii=False)

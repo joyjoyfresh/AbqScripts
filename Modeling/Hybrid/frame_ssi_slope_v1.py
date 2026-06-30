@@ -88,7 +88,7 @@ frame_material_cfg = {
 }
 
 job_cfg = {'num_cpus': 4, 'memory_percent': 90, 'history_freq': 1, 'submit': True}
-run_cfg = {'scenes': ['freefield', 'ssi']}
+run_cfg = {'scenes': ['freefield', 'ssi', 'fixed']}  # freefield=仅坡土 / ssi=框架坐坡顶 / fixed=坡顶刚性(输入坡顶自由场,去耦对照)
 
 
 # ==========================================================
@@ -303,6 +303,64 @@ def build_scene(scene, acc_file, t, a, dt, logger):
     return scene, geom
 
 
+def extract_crest_freefield_acc(logger):
+    """从已解算 job-freefield.odb 提取坡顶参考节点(CREST_REF)绝对加速度 A1，返回 (t,a)。
+
+    去耦法关键：坡顶刚性(fixed)基础须输入【无结构】坡顶自由场运动，使 fixed 与 ssi 唯一差异 = SSI。
+    """
+    from odbAccess import openOdb
+    odb = openOdb('job-freefield.odb', readOnly=True)
+    nset = odb.rootAssembly.nodeSets['CREST_REF']  # 装配级集
+    nd = nset.nodes[0] if not hasattr(nset.nodes[0], '__len__') else nset.nodes[0][0]  # 取首节点(兼容分组)
+    eq = odb.steps[list(odb.steps.keys())[0]]  # 首个分析步(对步名鲁棒)
+    hr = eq.historyRegions['Node %s.%d' % (nd.instanceName, nd.label)]
+    data = np.array(hr.historyOutputs['A1'].data, dtype=float)
+    odb.close()
+    t = data[:, 0]; a = data[:, 1]
+    log_step(logger, u'坡顶自由场加速度已提取: 点数=%d, |a|max=%.3f m/s² (去耦法刚性基础输入)',
+             len(t), float(np.max(np.abs(a))))
+    return t, a
+
+
+def build_fixed_scene(t, a, dt, logger):
+    """建坡顶刚性基础框架(fixed)：框架单体、柱脚嵌固、基底输入【坡顶自由场加速度】。
+
+    去耦法对照：与 ssi 同框架、同坡顶自由场输入，差异仅在有无土柔度(SSI)。
+    """
+    model_name = 'fixed'
+    if model_name in mdb.models:
+        del mdb.models[model_name]
+    model = mdb.Model(name=model_name)
+    asm = model.rootAssembly
+    asm.DatumCsysByDefault(CARTESIAN)
+    frame, floor_full, ns = build_frame_part(model, logger)
+    frame_inst = 'Frame-1'
+    asm.Instance(name=frame_inst, part=frame, dependent=ON)
+    m_total = float(frame_cfg['floor_mass'])
+    for k in range(1, ns + 1):  # 楼层集中质量(与 ssi 同)
+        nm, cnt = floor_full[k]
+        asm.engineeringFeatures.PointMassInertia(
+            name='Mass_%d' % k, region=asm.instances[frame_inst].sets[nm], mass=m_total / float(cnt))
+    tp = float(t[-1])
+    model.ImplicitDynamicsStep(name='Step-EQ', previous='Initial',
+                               timePeriod=tp, timeIncrementationMethod=FIXED, initialInc=dt,
+                               maxNumInc=1000000, nlgeom=OFF, application=TRANSIENT_FIDELITY)
+    base = asm.instances[frame_inst].sets['BASE']
+    model.DisplacementBC(name='BaseVR', createStepName='Initial', region=base, u2=0.0, ur3=0.0)  # 柱脚竖向/转动约束
+    amp_data = tuple((float(t[i]), float(a[i])) for i in range(len(t)))
+    model.TabularAmplitude(name='AccAmp', data=amp_data, timeSpan=STEP)
+    model.AccelerationBC(name='BaseAcc', createStepName='Step-EQ', region=base, a1=1.0, amplitude='AccAmp')  # 基底=坡顶自由场水平加速度
+    freq = int(job_cfg['history_freq'])
+    model.HistoryOutputRequest(name='H-BaseRF', createStepName='Step-EQ',
+                               variables=('RF1', 'U1', 'A1'), region=base, frequency=freq)
+    for k in range(1, ns + 1):
+        model.HistoryOutputRequest(name='H-Floor%d' % k, createStepName='Step-EQ',
+                                   variables=('U1', 'V1', 'A1'),
+                                   region=asm.instances[frame_inst].sets['FLOOR_%d' % k], frequency=freq)
+    log_step(logger, u'[fixed] 坡顶刚性基础框架已建, 输入=坡顶自由场运动, 时长=%.2fs', tp)
+    return model_name
+
+
 def write_meta(acc_name, t, a, dt, geom, logger):
     meta = {'script': 'frame_ssi_slope_v1.py', 'acc_record': acc_name, 'dt': dt,
             'duration': float(t[-1]), 'pga': float(np.max(np.abs(a))),
@@ -322,11 +380,21 @@ def main():
         acc_file, t, a, dt = find_acc_txt(logger)
         do_submit = job_cfg.get('submit', False)
         geom_last = None
-        for scene in run_cfg['scenes']:
-            _, geom_last = build_scene(scene, acc_file, t, a, dt, logger)
-            mdb.save()
-            if do_submit:
-                submit(scene, logger)
+        order = [s for s in ['freefield', 'ssi', 'fixed'] if s in run_cfg['scenes']]  # fixed 须在 freefield 后(去耦法取其坡顶运动)
+        for scene in order:
+            if scene == 'fixed':
+                if not do_submit or not os.path.isfile('job-freefield.odb'):
+                    log_step(logger, u'[fixed] 需 freefield 先解算(submit=True 且 job-freefield.odb 存在)，跳过')
+                    continue
+                ft, fa = extract_crest_freefield_acc(logger)
+                build_fixed_scene(ft, fa, float(ft[1] - ft[0]), logger)
+                mdb.save()
+                submit('fixed', logger)
+            else:
+                _, geom_last = build_scene(scene, acc_file, t, a, dt, logger)
+                mdb.save()
+                if do_submit:
+                    submit(scene, logger)
         write_meta(acc_file, t, a, dt, geom_last, logger)
         mdb.save()
         log_step(logger, u'====== 完成(submit=%s), 总耗时=%.2fs ======', do_submit, time.time() - t0)
