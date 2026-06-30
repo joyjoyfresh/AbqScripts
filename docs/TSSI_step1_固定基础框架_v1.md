@@ -15,8 +15,8 @@ TSSI 路线第一步。**脱离土体/SSI**，在隔离环境里验证"框架建
 工作目录放一条加速度记录 `.txt`（两列：时间 s, 加速度 m/s²），然后：
 
 ```bash
-abaqus cae noGUI=frame_fixedbase_v1.py     # 建模 + 提交作业
-abaqus cae noGUI=postproc_frame_v1.py      # 后处理 + 验证（或 abaqus python ...）
+abaqus cae noGUI=Modeling/Hybrid/frame_fixedbase_v1.py       # 建模 + 提交作业
+abaqus cae noGUI=Postprocess/Hybrid/postproc_frame_v1.py     # 后处理 + 验证（或 abaqus python ...）
 ```
 
 参数改 `frame_fixedbase_v1.py` 顶部配置 dict，或在工作目录放 `case_config.json` 覆盖：

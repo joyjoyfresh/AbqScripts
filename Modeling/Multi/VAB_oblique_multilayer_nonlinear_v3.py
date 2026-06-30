@@ -119,6 +119,10 @@ run_cfg = {
 boundary_cfg = {
     'dashpot_scale': 1.0,               #! 阻尼器(吸收)cn,ct 缩放：1.0=全吸收(Liu)/0<k<1=弱吸收/0=纯弹簧全反射
     'spring_scale': 1.0,                #! 弹簧(恢复)kn,kt 缩放：1.0=现行(α0.5/0.25)/2.0=标准Liu/0=纯黏性(弹簧关)
+    'sponge_enable': False,             #! 边界内侧阻尼海绵层开关(opt-in)：L/R/B 内侧加渐变阻尼带吸收残余反射
+    'sponge_width': 0.0,                #! 海绵带宽 m：0=自动(10×基准网格)；建议≥若干主波长
+    'sponge_grades': 5,                 #! 海绵分级数：阻尼从内缘 0 渐增到贴边界，级越多越平滑
+    'sponge_xi_max': 0.3,               #! 贴边界处附加阻尼比(占主频 fc)：海绵最外层 ξ 附加量，0.3≈强吸收
 }
 
 # 土体非线性：等效线性(EQL) 配置
@@ -1420,6 +1424,76 @@ def _assign_sections_by_band(part, band_sections, surface_y_fn=None):
     return counts
 
 
+def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name):
+    """边界内侧阻尼海绵层(opt-in)：对距 L/R/B 人工边界 sponge_width 内的单元，按到边界归一距离分级，
+    在该带原材料上叠加渐增的刚度比例瑞利阻尼 β，吸收漏过 VAB 的残余外行波。
+
+    默认关闭(boundary_cfg['sponge_enable']=False)→直接返回，不改变既有行为。分级 0(海绵内缘,无附加)
+    → ngrade-1(贴边界, ξ 附加=sponge_xi_max)，渐变避免阻尼突变自身反射。每个(材料带,级)组合复制带材料
+    并叠加 β，按单元集 SectionAssignment 覆盖原面截面(后赋材覆盖先赋材)。顶为自由面，不设海绵。
+    注：与 eql_cfg['mode']='2d_element' 同时启用时，软层重叠单元以后运行者为准(EQL 在分析后外迭代赋材)。
+    """
+    if not boundary_cfg.get('sponge_enable', False):  # 未启用→零风险返回
+        return
+    if not fc or float(fc) <= 0.0:  # 海绵 β 需主频换算，缺 fc 则跳过并告警
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：缺主频 fc，未生效(需输入波主频)', model_name)
+        return
+    ngrade = max(1, int(boundary_cfg.get('sponge_grades', 5)))  # 分级数
+    xi_max = float(boundary_cfg.get('sponge_xi_max', 0.3))      # 贴边界处附加阻尼比(占主频)
+    sw = float(boundary_cfg.get('sponge_width', 0.0))           # 海绵带宽 m
+    if sw <= 0.0:  # 0=自动：10 倍基准网格(约 10 单元宽)
+        sw = 10.0 * float(mesh_size)
+    xs = [n.coordinates[0] for n in part.nodes]; ys_all = [n.coordinates[1] for n in part.nodes]  # 域包围盒
+    xmin, xmax, ymin = min(xs), max(xs), min(ys_all)
+    groups = {}  # (带idx, 级) -> [单元标签]
+    for el in part.elements:
+        c = el.pointOn[0] if hasattr(el, 'pointOn') else None  # 单元上一点(近似质心)
+        if c is None:
+            continue
+        xc, yc = float(c[0]), float(c[1])
+        d = min(xc - xmin, xmax - xc, yc - ymin)  # 到 L/R/B 最近距离(顶部自由面不计)
+        if d >= sw:  # 海绵带外→保持原材料
+            continue
+        g = min(ngrade - 1, int((1.0 - d / sw) * ngrade))  # 归一深度 0(内缘)→1(边界) 映射到级
+        ys = surf_fn(xc)  # 该柱地表高程(落带用)
+        bi = 0  # 兜底归基岩
+        for i, b in enumerate(strat):  # 质心落入哪条材料带
+            y0, y1 = _band_bounds_at(b, ys)
+            if y0 - 1e-4 <= yc < y1 + 1e-4:
+                bi = i; break
+        groups.setdefault((bi, g), []).append(el.label)
+    if not groups:  # 海绵带内无单元(sw 过小或网格过粗)
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：带宽 %.2fm 内无单元，未生效(增大 sponge_width)', model_name, sw)
+        return
+    n_assigned = 0
+    for (bi, g), labs in groups.items():  # 逐(带,级)复制材料+叠加 β+按单元集赋材
+        band = strat[bi]; mat = band['mat']
+        EE = _compute_elastic_modulus_from_wave_speed(mat.cs, mat.vv, mat.density)  # 该带弹模
+        if damping and damping.get('enable'):  # 复刻该带原瑞利阻尼(_create_band_materials_sections 同口径)
+            is_bedrock = (bi == 0)
+            _Q, xi0 = _damping_ratio_from_q(mat.cs, is_bedrock, damping, band['name'])
+            f_layer = None if is_bedrock else _band_resonance_freq(band)
+            a0, b0 = _rayleigh_coeffs(xi0, damping, damping['fc'], f_layer)
+        else:  # 原本无阻尼→海绵附加为唯一阻尼
+            a0, b0 = 0.0, 0.0
+        b_extra = (xi_max * (g + 0.5) / ngrade) / (math.pi * float(fc))  # 刚度比例 β：ξ_add=βπf → β=ξ_add/(πf)
+        mname = _next_available_name('Mat-Sponge_b%d_g%d' % (bi, g), model.materials)
+        m = model.Material(name=mname); m.Elastic(table=((EE, mat.vv),)); m.Density(table=((mat.density,),))
+        m.Damping(alpha=a0, beta=b0 + b_extra)  # 原阻尼 + 海绵附加 β
+        sname = _next_available_name('Sec-Sponge_b%d_g%d' % (bi, g), model.sections)
+        model.HomogeneousSolidSection(name=sname, material=mname, thickness=1.0)
+        setname = _next_available_name('Sponge_b%d_g%d' % (bi, g), part.sets)
+        part.SetFromElementLabels(name=setname, elementLabels=tuple(sorted(labs)))  # 该(带,级)单元集
+        part.SectionAssignment(region=part.sets[setname], sectionName=sname,  # 覆盖原面截面
+                               offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
+        n_assigned += len(labs)
+    if logger:
+        log_step(logger, '%s 阻尼海绵层已施加：带宽=%.1fm, %d级, 贴边界附加ξ=%.0f%%, 覆盖 %d 单元/%d 组',
+                 model_name, sw, ngrade, 100 * xi_max, n_assigned, len(groups))
+
+
 def _band_graded_sizes(strat, mesh_used, mcfg, fc=None):  # 各带目标单元尺寸（波速比缩放 + 软层谐波/穿层加密）
     """返回与 strat 等长的各带目标尺寸列表（从下到上）。纯函数，便于单测。
 
@@ -1636,6 +1710,9 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
     counts = _assign_sections_by_band(part, band_sections, surf_fn)  # 逐带按质心分配截面
     log_step(logger, '%s 截面属性分配完成: %s', model_name,
              ', '.join('%s=%d' % (n, c) for n, c in counts))
+
+    # 边界内侧阻尼海绵层（opt-in，默认关闭→不改变既有行为；在带截面之后覆盖边界区单元截面）
+    _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name)
 
     # 重新生成装配体以同步网格
     assembly.regenerate()

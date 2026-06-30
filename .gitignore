@@ -33,9 +33,3 @@ test*/
 outputs*/
 images/
 docs/
-
-# AI 辅助工具配置（不纳入版本管理）
-.agent/
-.claude/
-.github/
-.codegraph/

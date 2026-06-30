@@ -8,15 +8,15 @@ TSSI 路线第二步(a)。在 step1(固定基础框架已验)上，验证【新�
 
 | 文件 | 作用 |
 |------|------|
-| `frame_ssi_v1.py`    | 建 `freefield`(仅土) + `ssi`(框架坐土顶 Tie) 两模型并提交 |
-| `postproc_ssi_v1.py` | 读两 ODB：场地放大/基频、SSI 周期延长、结构响应对比 |
+| `frame_ssi_v1.py`    | 建 `freefield`(仅土) + `ssi`(框架坐土顶 Tie) + `fixed`(刚性基础,去耦对照) 三模型并提交 |
+| `postproc_ssi_v1.py` | 读三 ODB：场地放大/基频、SSI 周期延长、结构响应、刚性 vs SSI 去耦对比 |
 
 ## 运行
 
 ```bash
 # 工作目录放一条加速度 .txt
-abaqus cae noGUI=frame_ssi_v1.py        # 建+提交 freefield + ssi（各约 4 分钟）
-abaqus cae noGUI=postproc_ssi_v1.py     # 后处理对比
+abaqus cae noGUI=Modeling/Hybrid/frame_ssi_v1.py            # 建+提交 freefield + ssi（各约 4 分钟）
+abaqus cae noGUI=Postprocess/Hybrid/postproc_ssi_v1.py      # 后处理对比
 ```
 
 ## 边界方案（平层 SSI 标准做法）
@@ -39,6 +39,23 @@ abaqus cae noGUI=postproc_ssi_v1.py     # 后处理对比
 | SSI 结构响应 | 基底剪力 2.02e5N、漂移 0.0020、顶层放大 1.68× | 合理 | ✅ |
 
 物理自洽(对比 step1 固定基础)：周期延长、漂移增大(软系统)、基底剪力略降、顶层放大略降——全是 SSI 正确方向。
+
+### 刚性 vs SSI 去耦对比（fixed 场景，2026-06-30 补）
+
+**去耦法关键**：刚性(fixed)模型的基底输入 = **freefield 跑出的自由场地表运动**(无结构)，
+使 fixed 与 ssi 唯一差异 = SSI 效应。脚本自动：freefield 解算→提取地表 A1→喂给 fixed 基底。
+
+| 指标 | 刚性基础 | SSI | SSI/刚性 |
+|------|---------|-----|---------|
+| 自振周期 T | 0.500s | 0.667s | 1.33 |
+| 基底剪力 | 1.27e6 N | 2.02e5 N | 0.16 |
+| 最大层间位移角 | 0.0037 | 0.0020 | 0.54 |
+| 顶层加速度 | 9.47 (9.5×) | 1.68 (1.7×) | 0.18 |
+
+**本例物理**：刚性结构自振 2.0Hz 恰**近场地基频 2.5Hz** → 近共振，响应巨大(顶层放大 9.5×)；
+SSI 周期延长(2.0→1.5Hz)使结构**失谐离开场地共振** → 响应骤降。即 **SSI 失谐减震**(本例有利情形)。
+> 注意：FFT 测周期在"自振≈输入主频"时会读到受迫响应频率(本例刚性 FFT 得 0.4s=输入 2.5Hz，非 0.5s 自振)，
+> 故刚性周期取 step1 自振值。SSI 自振 1.5Hz 远离输入 2.5Hz，FFT 可靠。
 
 **踩坑**：`model.Tie` 在 Abaqus 2021 用旧关键字 `master=`/`slave=`(非 `main`/`secondary`)。
 

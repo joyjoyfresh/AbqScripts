@@ -22,7 +22,7 @@ TSSI 路线第二步(a)。在 step1(固定基础框架已验)基础上，验证�
 
 运行：
     abaqus cae noGUI=frame_ssi_v1.py        # 建 freefield + ssi 并提交
-    abaqus cae noGUI=postproc_ssi_v1.py     # 后处理对比
+    abaqus cae noGUI=Postprocess/Hybrid/postproc_ssi_v1.py     # 后处理对比
 
 Py2.7 兼容；不用 f-string；open 不传 encoding。
 """
@@ -501,7 +501,7 @@ def main():
             mdb.save()
             if do_submit:
                 submit(nm, logger)
-        log_step(logger, u'完成。后处理: abaqus cae noGUI=postproc_ssi_v1.py')
+        log_step(logger, u'完成。后处理: abaqus cae noGUI=Postprocess/Hybrid/postproc_ssi_v1.py')
         log_step(logger, u'====== 全部完成, 总耗时=%.2fs ======', time.time() - t0)
     except Exception as exc:
         log_step(logger, u'脚本失败: %s', str(exc))

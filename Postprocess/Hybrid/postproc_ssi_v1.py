@@ -156,17 +156,23 @@ def main():
         bs_f = float(np.max(np.abs(inert)))
         dr_f = [float(np.max(np.abs(fu[k] - fu[k - 1])) / sh) for k in range(1, ns + 1)]
         roof_f = float(np.max(np.abs(fa[ns - 1])))
-        results['fixed_ff'] = {'T': Tf, 'base_shear': bs_f, 'max_drift': max(dr_f), 'roof_peak_acc': roof_f}
+        T_fixed_nat = meta['T_fixed_from_step1_s']   # 刚性自振周期用 step1 值(0.5s)；fixed_ff 的 FFT 主频是受迫响应,近共振时不可靠
+        results['fixed_ff'] = {'T_forced': Tf, 'T_natural': T_fixed_nat,
+                               'base_shear': bs_f, 'max_drift': max(dr_f), 'roof_peak_acc': roof_f}
         print(u'\n[4] 刚性基础(输入自由场地表运动) vs SSI 去耦对比：')
-        print(u'    刚性: T=%.3fs 基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f' % (Tf or 0, bs_f, max(dr_f), roof_f))
+        print(u'    刚性: T自振=%.3fs(step1) 基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f(放大%.1f×)'
+              % (T_fixed_nat, bs_f, max(dr_f), roof_f, roof_f / pga))
         if 'ssi' in results:
             s = results['ssi']; Ts = results.get('T_ssi') or 0.0
-            print(u'    SSI : T=%.3fs 基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f'
-                  % (Ts, s['base_shear'], s['max_drift'], s['roof_peak_acc']))
+            print(u'    SSI : T自振=%.3fs           基底剪力=%.3eN 最大漂移=%.4f 顶层加速=%.3f(放大%.1f×)'
+                  % (Ts, s['base_shear'], s['max_drift'], s['roof_peak_acc'], s['roof_peak_acc'] / pga))
             print(u'    SSI/刚性比: 周期=%.2f 基底剪力=%.2f 漂移=%.2f 顶层加速=%.2f'
-                  % (Ts / (Tf or 1), s['base_shear'] / bs_f, s['max_drift'] / max(dr_f), s['roof_peak_acc'] / roof_f))
+                  % (Ts / T_fixed_nat, s['base_shear'] / bs_f, s['max_drift'] / max(dr_f), s['roof_peak_acc'] / roof_f))
+            # 解读：刚性自振(1/T)是否近场地基频
+            print(u'    解读: 刚性 f=%.2fHz vs 场地 f0=%.2fHz' % (1.0 / T_fixed_nat, meta['site_f0_Hz']))
+            print(u'          → SSI 周期延长使结构失谐离开场地共振，故响应骤降（SSI 失谐减震；本例属有利情形）')
             results['ssi_over_fixed'] = {
-                'T': Ts / (Tf or 1), 'base_shear': s['base_shear'] / bs_f,
+                'T': Ts / T_fixed_nat, 'base_shear': s['base_shear'] / bs_f,
                 'drift': s['max_drift'] / max(dr_f), 'roof_acc': s['roof_peak_acc'] / roof_f}
         odb.close()
     else:

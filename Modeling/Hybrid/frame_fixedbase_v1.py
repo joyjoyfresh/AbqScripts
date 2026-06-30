@@ -410,7 +410,7 @@ def main():
         if job_cfg.get('submit', True):
             log_step(logger, u'====== 提交作业 ======')
             submit('Model-1', logger)
-            log_step(logger, u'完成。后处理请运行: abaqus cae noGUI=postproc_frame_v1.py')
+            log_step(logger, u'完成。后处理请运行: abaqus cae noGUI=Postprocess/Hybrid/postproc_frame_v1.py')
         else:
             log_step(logger, u'submit=False，仅建模存 cae，未提交')
 
