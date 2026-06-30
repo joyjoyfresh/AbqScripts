@@ -47,7 +47,7 @@ _f = globals().get('__file__')
 if _f:
     _CANDIDATES.append(os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_f)), '..', 'Multi')))
 _CANDIDATES.append(os.path.normpath(os.path.join(os.getcwd(), '..', 'Multi')))          # cwd=Hybrid 时
-_CANDIDATES.append(os.path.normpath(os.path.join(os.getcwd(), '..', '..', 'Multi')))     # cwd=Hybrid/test_* 时
+_CANDIDATES.append(os.path.normpath(os.path.join(os.getcwd(), '..', '..', '..', 'Modeling', 'Multi')))  # cwd=test/Hybrid/test_* 时
 _CANDIDATES.append(r'C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi')           # 绝对兜底
 _MULTI_DIR = next((d for d in _CANDIDATES if os.path.isdir(d)), _CANDIDATES[-1])
 if _MULTI_DIR not in sys.path:
