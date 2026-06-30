@@ -115,11 +115,10 @@ run_cfg = {
     'critical_angle_check': False,      # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
 }
 
-# 人工边界配置（粘弹性边界吸收强度旋钮——"边界吸收 vs 论文 7.6"对照实验用）
+# 人工边界配置
 boundary_cfg = {
-    'dashpot_scale': 1.0,               #! 边界阻尼器(吸收项)系数 cn,ct 的统一缩放：1.0=标准全吸收(Liu 粘弹性边界)；
-                                        #  0<k<1=弱吸收(部分反射，模拟 SPECFEM Stacey 对 S 波吸收不全)；0=纯弹簧(全反射、封闭域)。
-                                        #  弹簧 kn/kt 不缩放(维持自由场静位移)，只缩放阻尼器；k<1 时陷波会在域内混响堆积。
+    'dashpot_scale': 1.0,               #! 阻尼器(吸收)cn,ct 缩放：1.0=全吸收(Liu)/0<k<1=弱吸收/0=纯弹簧全反射
+    'spring_scale': 1.0,                #! 弹簧(恢复)kn,kt 缩放：1.0=现行(α0.5/0.25)/2.0=标准Liu/0=纯黏性(弹簧关)
 }
 
 # 土体非线性：等效线性(EQL) 配置
@@ -1750,21 +1749,25 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax, logge
             influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0
 
     dscale = float(boundary_cfg.get('dashpot_scale', 1.0))  # 边界阻尼器(吸收)缩放系数（1=全吸收/0=全反射）
+    sscale = float(boundary_cfg.get('spring_scale', 1.0))   # 边界弹簧(恢复)缩放系数（1=现行/2=标准Liu/0=纯黏性）
     result = []
     for idx in range(n):
         x0 = arr[idx, 1]
         y0 = arr[idx, 2]
         inf = influence[idx]
         mat = pick_material(x0, y0)
-        kn = mat['GG'] / 2.0 / ymax * inf
+        kn = mat['GG'] / 2.0 / ymax * inf * sscale  # 法向弹簧(恢复) × 缩放
         cn = mat['density'] * mat['cp'] * inf * dscale  # 法向阻尼器(吸收) × 缩放
-        kt = mat['GG'] / 4.0 / ymax * inf
+        kt = mat['GG'] / 4.0 / ymax * inf * sscale  # 切向弹簧(恢复) × 缩放
         ct = mat['density'] * mat['cs'] * inf * dscale  # 切向阻尼器(吸收) × 缩放
         result.append(BoundaryNode(label=int(arr[idx, 0]), x=x0, y=y0, influence=inf,
                                    kn=kn, cn=cn, kt=kt, ct=ct))
     if logger and abs(dscale - 1.0) > 1e-9:  # 非标准吸收时显式告警（对照实验留痕）
         log_step(logger, '%s 边界[%s] 阻尼器吸收缩放 dashpot_scale=%.3f（1=全吸收/0=纯弹簧全反射）',
                  model_name, boundary_tag, dscale)
+    if logger and abs(sscale - 1.0) > 1e-9:  # 非现行弹簧系数时显式告警（对照实验留痕）
+        log_step(logger, '%s 边界[%s] 弹簧恢复缩放 spring_scale=%.3f（1=现行α_n0.5/α_t0.25, 2=标准Liu, 0=纯黏性）',
+                 model_name, boundary_tag, sscale)
     if logger and n > 0:
         kns = [b.kn for b in result]; cns = [b.cn for b in result]
         log_step(logger, '%s 边界[%s]节点=%d, 影响长度=%.3f~%.3f, 法向刚度kn=%.3e~%.3e, 法向阻尼cn=%.3e~%.3e',
@@ -1787,20 +1790,24 @@ def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logg
                 logger.warning('创建弹簧-阻尼器时，实例中不存在节点 %d', bn.label)
                 continue
             region = Region(nodes=node_array)
-            # dashpot_scale=0(全反射)时 cn/ct=0，Abaqus 要求 dashpotBehavior=ON 的系数>0，
-            # 故系数<=0 时改 dashpotBehavior=OFF(纯弹簧)，并传正占位系数(OFF 下被忽略)。
+            # dashpot_scale=0(全反射)时 cn/ct=0；spring_scale=0(纯黏性)时 kn/kt=0。
+            # Abaqus 要求 *Behavior=ON 的系数>0，故系数<=0 时改对应 Behavior=OFF，并传正占位系数(OFF 下被忽略)。
             dash_on_n = bn.cn > 0.0  # 法向是否启用阻尼器
             dash_on_t = bn.ct > 0.0  # 切向是否启用阻尼器
+            spr_on_n = bn.kn > 0.0   # 法向是否启用弹簧(spring_scale=0 纯黏性时关闭)
+            spr_on_t = bn.kt > 0.0   # 切向是否启用弹簧(spring_scale=0 纯黏性时关闭)
             assembly.engineeringFeatures.SpringDashpotToGround(
                 name='SpringDashpot_{}_{}_normal'.format(boundary, bn.label),
                 region=region, orientation=None, dof=dof_n,
-                springBehavior=ON, springStiffness=bn.kn,
+                springBehavior=(ON if spr_on_n else OFF),
+                springStiffness=(bn.kn if spr_on_n else 1.0),
                 dashpotBehavior=(ON if dash_on_n else OFF),
                 dashpotCoefficient=(bn.cn if dash_on_n else 1.0))
             assembly.engineeringFeatures.SpringDashpotToGround(
                 name='SpringDashpot_{}_{}_tangent'.format(boundary, bn.label),
                 region=region, orientation=None, dof=dof_t,
-                springBehavior=ON, springStiffness=bn.kt,
+                springBehavior=(ON if spr_on_t else OFF),
+                springStiffness=(bn.kt if spr_on_t else 1.0),
                 dashpotBehavior=(ON if dash_on_t else OFF),
                 dashpotCoefficient=(bn.ct if dash_on_t else 1.0))
             total_created += 2  # 每节点创建法向+切向两个元件
@@ -2233,7 +2240,7 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         "damping_cfg": {...}, "mesh_cfg": {"size": 4, "elem": "CPE4"}, "time_cfg": {...},
         "max_reflect_order": 3,
         "freefield_cfg": {"engine": "fd"}, "run_cfg": {"surface_only": true}, "eql_cfg": {"enable": false},
-        "boundary_cfg": {"dashpot_scale": 1.0}
+        "boundary_cfg": {"dashpot_scale": 1.0, "spring_scale": 1.0}
       }
     v9.1：基准网格尺寸并入 mesh_cfg['size']；仍兼容旧写法顶层 "mesh_size"（自动映射到 mesh_cfg['size']）。
     返回覆盖后的 (material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg,
