@@ -1,0 +1,246 @@
+2026-06-01 03:13:07,650 - INFO - Using device: cuda
+2026-06-01 03:13:07,650 - INFO - Loading raw dataset...
+2026-06-01 03:13:10,328 - INFO - Successfully loaded 523 samples.
+2026-06-01 03:13:10,329 - INFO - Number of unique geometric cases (groups): 175
+2026-06-01 03:13:10,329 - INFO - ========== Starting 5-Fold GroupKFold CV for CNN ==========
+2026-06-01 03:13:10,332 - INFO - --- Model: cnn, Fold 1/5 ---
+2026-06-01 03:13:12,788 - INFO - Epoch 001 | Train Loss: 0.919101 | Val Loss: 0.892572 | Best Val: 0.892572
+2026-06-01 03:13:27,018 - INFO - Epoch 050 | Train Loss: 0.328324 | Val Loss: 0.262694 | Best Val: 0.199482
+2026-06-01 03:13:41,976 - INFO - Epoch 100 | Train Loss: 0.261528 | Val Loss: 0.179446 | Best Val: 0.163530
+2026-06-01 03:13:56,347 - INFO - Epoch 150 | Train Loss: 0.262004 | Val Loss: 0.244912 | Best Val: 0.158892
+2026-06-01 03:14:11,143 - INFO - Epoch 200 | Train Loss: 0.250375 | Val Loss: 0.168758 | Best Val: 0.156504
+2026-06-01 03:14:13,820 - INFO - Early stopping triggered at epoch 209. Best Val Loss: 0.156504
+2026-06-01 03:14:13,875 - INFO - Fold 1 | PGA_h -> R2: 0.8276 | MAE: 0.0302 | RMSE: 0.0405
+2026-06-01 03:14:13,876 - INFO - Fold 1 | PGA_v -> R2: 0.9282 | MAE: 0.0191 | RMSE: 0.0264
+2026-06-01 03:14:13,877 - INFO - Fold 1 | TAF_h -> R2: 0.8364 | MAE: 0.0545 | RMSE: 0.0762
+2026-06-01 03:14:13,878 - INFO - Fold 1 | TAF_v -> R2: 0.8676 | MAE: 0.5033 | RMSE: 0.9039
+2026-06-01 03:14:13,878 - INFO - --- Model: cnn, Fold 2/5 ---
+2026-06-01 03:14:14,205 - INFO - Epoch 001 | Train Loss: 0.890775 | Val Loss: 0.761461 | Best Val: 0.761461
+2026-06-01 03:14:28,386 - INFO - Epoch 050 | Train Loss: 0.327380 | Val Loss: 0.194230 | Best Val: 0.182252
+2026-06-01 03:14:43,296 - INFO - Epoch 100 | Train Loss: 0.255570 | Val Loss: 0.170323 | Best Val: 0.155351
+2026-06-01 03:14:57,677 - INFO - Epoch 150 | Train Loss: 0.246668 | Val Loss: 0.168951 | Best Val: 0.152128
+2026-06-01 03:15:00,996 - INFO - Early stopping triggered at epoch 162. Best Val Loss: 0.152128
+2026-06-01 03:15:01,054 - INFO - Fold 2 | PGA_h -> R2: 0.7877 | MAE: 0.0299 | RMSE: 0.0399
+2026-06-01 03:15:01,055 - INFO - Fold 2 | PGA_v -> R2: 0.9107 | MAE: 0.0214 | RMSE: 0.0283
+2026-06-01 03:15:01,056 - INFO - Fold 2 | TAF_h -> R2: 0.7978 | MAE: 0.0524 | RMSE: 0.0719
+2026-06-01 03:15:01,056 - INFO - Fold 2 | TAF_v -> R2: 0.8461 | MAE: 0.5639 | RMSE: 0.9870
+2026-06-01 03:15:01,056 - INFO - --- Model: cnn, Fold 3/5 ---
+2026-06-01 03:15:01,410 - INFO - Epoch 001 | Train Loss: 0.908299 | Val Loss: 0.750487 | Best Val: 0.750487
+2026-06-01 03:15:16,251 - INFO - Epoch 050 | Train Loss: 0.297162 | Val Loss: 0.184555 | Best Val: 0.157323
+2026-06-01 03:15:30,625 - INFO - Epoch 100 | Train Loss: 0.272580 | Val Loss: 0.145443 | Best Val: 0.140937
+2026-06-01 03:15:45,341 - INFO - Epoch 150 | Train Loss: 0.261971 | Val Loss: 0.156346 | Best Val: 0.134911
+2026-06-01 03:15:48,625 - INFO - Early stopping triggered at epoch 161. Best Val Loss: 0.134911
+2026-06-01 03:15:48,678 - INFO - Fold 3 | PGA_h -> R2: 0.8227 | MAE: 0.0302 | RMSE: 0.0395
+2026-06-01 03:15:48,679 - INFO - Fold 3 | PGA_v -> R2: 0.9292 | MAE: 0.0184 | RMSE: 0.0248
+2026-06-01 03:15:48,680 - INFO - Fold 3 | TAF_h -> R2: 0.8254 | MAE: 0.0548 | RMSE: 0.0736
+2026-06-01 03:15:48,680 - INFO - Fold 3 | TAF_v -> R2: 0.8846 | MAE: 0.4233 | RMSE: 0.7744
+2026-06-01 03:15:48,680 - INFO - --- Model: cnn, Fold 4/5 ---
+2026-06-01 03:15:49,046 - INFO - Epoch 001 | Train Loss: 0.893015 | Val Loss: 0.809206 | Best Val: 0.809206
+2026-06-01 03:16:03,396 - INFO - Epoch 050 | Train Loss: 0.255995 | Val Loss: 0.174727 | Best Val: 0.174727
+2026-06-01 03:16:18,093 - INFO - Epoch 100 | Train Loss: 0.279473 | Val Loss: 0.149702 | Best Val: 0.149702
+2026-06-01 03:16:32,744 - INFO - Epoch 150 | Train Loss: 0.280443 | Val Loss: 0.140569 | Best Val: 0.138906
+2026-06-01 03:16:47,432 - INFO - Epoch 200 | Train Loss: 0.246295 | Val Loss: 0.155471 | Best Val: 0.135232
+2026-06-01 03:16:58,921 - INFO - Early stopping triggered at epoch 239. Best Val Loss: 0.135232
+2026-06-01 03:16:58,974 - INFO - Fold 4 | PGA_h -> R2: 0.8296 | MAE: 0.0292 | RMSE: 0.0384
+2026-06-01 03:16:58,974 - INFO - Fold 4 | PGA_v -> R2: 0.9319 | MAE: 0.0201 | RMSE: 0.0262
+2026-06-01 03:16:58,975 - INFO - Fold 4 | TAF_h -> R2: 0.8372 | MAE: 0.0527 | RMSE: 0.0701
+2026-06-01 03:16:58,976 - INFO - Fold 4 | TAF_v -> R2: 0.8734 | MAE: 0.4487 | RMSE: 0.8458
+2026-06-01 03:16:58,976 - INFO - --- Model: cnn, Fold 5/5 ---
+2026-06-01 03:16:59,304 - INFO - Epoch 001 | Train Loss: 0.884586 | Val Loss: 0.706810 | Best Val: 0.706810
+2026-06-01 03:17:13,690 - INFO - Epoch 050 | Train Loss: 0.298864 | Val Loss: 0.205029 | Best Val: 0.177908
+2026-06-01 03:17:28,678 - INFO - Epoch 100 | Train Loss: 0.230237 | Val Loss: 0.161327 | Best Val: 0.152250
+2026-06-01 03:17:43,279 - INFO - Epoch 150 | Train Loss: 0.257556 | Val Loss: 0.189924 | Best Val: 0.138427
+2026-06-01 03:17:57,859 - INFO - Epoch 200 | Train Loss: 0.259163 | Val Loss: 0.156610 | Best Val: 0.136356
+2026-06-01 03:17:58,492 - INFO - Early stopping triggered at epoch 202. Best Val Loss: 0.136356
+2026-06-01 03:17:58,541 - INFO - Fold 5 | PGA_h -> R2: 0.8278 | MAE: 0.0281 | RMSE: 0.0358
+2026-06-01 03:17:58,542 - INFO - Fold 5 | PGA_v -> R2: 0.9329 | MAE: 0.0185 | RMSE: 0.0245
+2026-06-01 03:17:58,542 - INFO - Fold 5 | TAF_h -> R2: 0.8359 | MAE: 0.0489 | RMSE: 0.0639
+2026-06-01 03:17:58,543 - INFO - Fold 5 | TAF_v -> R2: 0.8065 | MAE: 0.5789 | RMSE: 1.0798
+2026-06-01 03:17:58,543 - INFO - --- Overall OOF Performance for CNN ---
+2026-06-01 03:17:58,544 - INFO - OOF Overall | PGA_h -> R2: 0.8199 | MAE: 0.0295 | RMSE: 0.0389
+2026-06-01 03:17:58,545 - INFO - OOF Overall | PGA_v -> R2: 0.9270 | MAE: 0.0195 | RMSE: 0.0261
+2026-06-01 03:17:58,546 - INFO - OOF Overall | TAF_h -> R2: 0.8275 | MAE: 0.0527 | RMSE: 0.0713
+2026-06-01 03:17:58,548 - INFO - OOF Overall | TAF_v -> R2: 0.8550 | MAE: 0.5033 | RMSE: 0.9237
+2026-06-01 03:17:58,559 - INFO - ========== Starting 5-Fold GroupKFold CV for LSTM ==========
+2026-06-01 03:17:58,561 - INFO - --- Model: lstm, Fold 1/5 ---
+2026-06-01 03:18:28,126 - INFO - Epoch 001 | Train Loss: 0.792186 | Val Loss: 0.843375 | Best Val: 0.843375
+2026-06-01 03:44:20,725 - INFO - Epoch 050 | Train Loss: 0.295075 | Val Loss: 0.229224 | Best Val: 0.206328
+2026-06-01 04:12:31,302 - INFO - Epoch 100 | Train Loss: 0.251245 | Val Loss: 0.235352 | Best Val: 0.171042
+2026-06-01 04:39:07,438 - INFO - Epoch 150 | Train Loss: 0.234034 | Val Loss: 0.201276 | Best Val: 0.165021
+2026-06-01 04:45:19,698 - INFO - Early stopping triggered at epoch 161. Best Val Loss: 0.165021
+2026-06-01 04:45:23,072 - INFO - Fold 1 | PGA_h -> R2: 0.8178 | MAE: 0.0307 | RMSE: 0.0416
+2026-06-01 04:45:23,073 - INFO - Fold 1 | PGA_v -> R2: 0.9255 | MAE: 0.0196 | RMSE: 0.0269
+2026-06-01 04:45:23,074 - INFO - Fold 1 | TAF_h -> R2: 0.8287 | MAE: 0.0551 | RMSE: 0.0780
+2026-06-01 04:45:23,074 - INFO - Fold 1 | TAF_v -> R2: 0.8582 | MAE: 0.5061 | RMSE: 0.9354
+2026-06-01 04:45:23,075 - INFO - --- Model: lstm, Fold 2/5 ---
+2026-06-01 04:45:56,590 - INFO - Epoch 001 | Train Loss: 0.804021 | Val Loss: 0.739360 | Best Val: 0.739360
+2026-06-01 05:13:31,168 - INFO - Epoch 050 | Train Loss: 0.285860 | Val Loss: 0.187458 | Best Val: 0.187458
+2026-06-01 05:41:48,024 - INFO - Epoch 100 | Train Loss: 0.258175 | Val Loss: 0.236014 | Best Val: 0.152856
+2026-06-01 06:09:15,203 - INFO - Early stopping triggered at epoch 149. Best Val Loss: 0.152856
+2026-06-01 06:09:18,437 - INFO - Fold 2 | PGA_h -> R2: 0.7637 | MAE: 0.0315 | RMSE: 0.0421
+2026-06-01 06:09:18,438 - INFO - Fold 2 | PGA_v -> R2: 0.9076 | MAE: 0.0215 | RMSE: 0.0288
+2026-06-01 06:09:18,439 - INFO - Fold 2 | TAF_h -> R2: 0.7710 | MAE: 0.0559 | RMSE: 0.0765
+2026-06-01 06:09:18,439 - INFO - Fold 2 | TAF_v -> R2: 0.8857 | MAE: 0.5013 | RMSE: 0.8503
+2026-06-01 06:09:18,439 - INFO - --- Model: lstm, Fold 3/5 ---
+2026-06-01 06:09:52,718 - INFO - Epoch 001 | Train Loss: 0.786383 | Val Loss: 0.726835 | Best Val: 0.726835
+2026-06-01 06:37:14,053 - INFO - Epoch 050 | Train Loss: 0.304997 | Val Loss: 0.185091 | Best Val: 0.166758
+2026-06-01 07:03:52,372 - INFO - Epoch 100 | Train Loss: 0.279429 | Val Loss: 0.146641 | Best Val: 0.140170
+2026-06-01 07:31:46,160 - INFO - Epoch 150 | Train Loss: 0.273112 | Val Loss: 0.160822 | Best Val: 0.139723
+2026-06-01 08:00:00,372 - INFO - Epoch 200 | Train Loss: 0.267343 | Val Loss: 0.177781 | Best Val: 0.139328
+2026-06-01 08:28:00,000 - INFO - Epoch 250 | Train Loss: 0.237995 | Val Loss: 0.155428 | Best Val: 0.136095
+2026-06-01 08:37:35,501 - INFO - Early stopping triggered at epoch 267. Best Val Loss: 0.136095
+2026-06-01 08:37:38,771 - INFO - Fold 3 | PGA_h -> R2: 0.8229 | MAE: 0.0297 | RMSE: 0.0395
+2026-06-01 08:37:38,772 - INFO - Fold 3 | PGA_v -> R2: 0.9177 | MAE: 0.0203 | RMSE: 0.0268
+2026-06-01 08:37:38,773 - INFO - Fold 3 | TAF_h -> R2: 0.8259 | MAE: 0.0540 | RMSE: 0.0735
+2026-06-01 08:37:38,774 - INFO - Fold 3 | TAF_v -> R2: 0.8905 | MAE: 0.4076 | RMSE: 0.7544
+2026-06-01 08:37:38,774 - INFO - --- Model: lstm, Fold 4/5 ---
+2026-06-01 08:38:12,765 - INFO - Epoch 001 | Train Loss: 0.791724 | Val Loss: 0.767591 | Best Val: 0.767591
+2026-06-01 09:04:25,087 - INFO - Epoch 050 | Train Loss: 0.305203 | Val Loss: 0.206505 | Best Val: 0.176424
+2026-06-01 09:32:10,182 - INFO - Epoch 100 | Train Loss: 0.272120 | Val Loss: 0.156148 | Best Val: 0.147949
+2026-06-01 10:00:28,889 - INFO - Epoch 150 | Train Loss: 0.243593 | Val Loss: 0.175620 | Best Val: 0.145419
+2026-06-01 10:11:34,208 - INFO - Early stopping triggered at epoch 171. Best Val Loss: 0.145419
+2026-06-01 10:11:36,840 - INFO - Fold 4 | PGA_h -> R2: 0.8148 | MAE: 0.0313 | RMSE: 0.0400
+2026-06-01 10:11:36,841 - INFO - Fold 4 | PGA_v -> R2: 0.9384 | MAE: 0.0186 | RMSE: 0.0249
+2026-06-01 10:11:36,842 - INFO - Fold 4 | TAF_h -> R2: 0.8237 | MAE: 0.0568 | RMSE: 0.0730
+2026-06-01 10:11:36,842 - INFO - Fold 4 | TAF_v -> R2: 0.8540 | MAE: 0.5176 | RMSE: 0.9082
+2026-06-01 10:11:36,843 - INFO - --- Model: lstm, Fold 5/5 ---
+2026-06-01 10:12:06,528 - INFO - Epoch 001 | Train Loss: 0.766866 | Val Loss: 0.706455 | Best Val: 0.706455
+2026-06-01 10:37:10,317 - INFO - Epoch 050 | Train Loss: 0.276214 | Val Loss: 0.187840 | Best Val: 0.178695
+2026-06-01 11:02:24,775 - INFO - Epoch 100 | Train Loss: 0.280746 | Val Loss: 0.167773 | Best Val: 0.162978
+2026-06-01 11:30:51,061 - INFO - Epoch 150 | Train Loss: 0.250751 | Val Loss: 0.165954 | Best Val: 0.160410
+2026-06-01 11:50:49,650 - INFO - Epoch 200 | Train Loss: 0.251254 | Val Loss: 0.172317 | Best Val: 0.157214
+2026-06-01 12:15:41,697 - INFO - Epoch 250 | Train Loss: 0.251466 | Val Loss: 0.175034 | Best Val: 0.156308
+2026-06-01 12:23:29,130 - INFO - Early stopping triggered at epoch 265. Best Val Loss: 0.156308
+2026-06-01 12:23:32,160 - INFO - Fold 5 | PGA_h -> R2: 0.8036 | MAE: 0.0291 | RMSE: 0.0382
+2026-06-01 12:23:32,161 - INFO - Fold 5 | PGA_v -> R2: 0.9284 | MAE: 0.0187 | RMSE: 0.0253
+2026-06-01 12:23:32,162 - INFO - Fold 5 | TAF_h -> R2: 0.8145 | MAE: 0.0502 | RMSE: 0.0679
+2026-06-01 12:23:32,163 - INFO - Fold 5 | TAF_v -> R2: 0.7703 | MAE: 0.6322 | RMSE: 1.1764
+2026-06-01 12:23:32,163 - INFO - --- Overall OOF Performance for LSTM ---
+2026-06-01 12:23:32,166 - INFO - OOF Overall | PGA_h -> R2: 0.8062 | MAE: 0.0305 | RMSE: 0.0403
+2026-06-01 12:23:32,167 - INFO - OOF Overall | PGA_v -> R2: 0.9242 | MAE: 0.0197 | RMSE: 0.0266
+2026-06-01 12:23:32,168 - INFO - OOF Overall | TAF_h -> R2: 0.8147 | MAE: 0.0544 | RMSE: 0.0739
+2026-06-01 12:23:32,169 - INFO - OOF Overall | TAF_v -> R2: 0.8516 | MAE: 0.5125 | RMSE: 0.9345
+2026-06-01 12:23:32,180 - INFO - ========== Starting 5-Fold GroupKFold CV for TRANSFORMER ==========
+2026-06-01 12:23:32,183 - INFO - --- Model: transformer, Fold 1/5 ---
+2026-06-01 12:23:44,311 - INFO - Epoch 001 | Train Loss: 0.938338 | Val Loss: 0.976124 | Best Val: 0.976124
+2026-06-01 12:33:27,766 - INFO - Epoch 050 | Train Loss: 0.261921 | Val Loss: 0.211005 | Best Val: 0.196668
+2026-06-01 12:43:22,983 - INFO - Epoch 100 | Train Loss: 0.256340 | Val Loss: 0.184881 | Best Val: 0.169433
+2026-06-01 12:53:17,837 - INFO - Epoch 150 | Train Loss: 0.245555 | Val Loss: 0.177635 | Best Val: 0.151012
+2026-06-01 12:59:26,765 - INFO - Early stopping triggered at epoch 181. Best Val Loss: 0.151012
+2026-06-01 12:59:27,367 - INFO - Fold 1 | PGA_h -> R2: 0.8340 | MAE: 0.0295 | RMSE: 0.0397
+2026-06-01 12:59:27,369 - INFO - Fold 1 | PGA_v -> R2: 0.9299 | MAE: 0.0189 | RMSE: 0.0261
+2026-06-01 12:59:27,370 - INFO - Fold 1 | TAF_h -> R2: 0.8402 | MAE: 0.0534 | RMSE: 0.0754
+2026-06-01 12:59:27,371 - INFO - Fold 1 | TAF_v -> R2: 0.8751 | MAE: 0.4669 | RMSE: 0.8780
+2026-06-01 12:59:27,371 - INFO - --- Model: transformer, Fold 2/5 ---
+2026-06-01 12:59:39,356 - INFO - Epoch 001 | Train Loss: 0.930515 | Val Loss: 0.791814 | Best Val: 0.791814
+2026-06-01 13:09:23,453 - INFO - Epoch 050 | Train Loss: 0.278466 | Val Loss: 0.200768 | Best Val: 0.185227
+2026-06-01 13:19:19,796 - INFO - Epoch 100 | Train Loss: 0.269732 | Val Loss: 0.184858 | Best Val: 0.169121
+2026-06-01 13:28:28,300 - INFO - Early stopping triggered at epoch 146. Best Val Loss: 0.169121
+2026-06-01 13:28:28,909 - INFO - Fold 2 | PGA_h -> R2: 0.7561 | MAE: 0.0319 | RMSE: 0.0428
+2026-06-01 13:28:28,910 - INFO - Fold 2 | PGA_v -> R2: 0.9142 | MAE: 0.0207 | RMSE: 0.0277
+2026-06-01 13:28:28,910 - INFO - Fold 2 | TAF_h -> R2: 0.7597 | MAE: 0.0569 | RMSE: 0.0784
+2026-06-01 13:28:28,912 - INFO - Fold 2 | TAF_v -> R2: 0.8354 | MAE: 0.6019 | RMSE: 1.0206
+2026-06-01 13:28:28,912 - INFO - --- Model: transformer, Fold 3/5 ---
+2026-06-01 13:28:40,874 - INFO - Epoch 001 | Train Loss: 0.920649 | Val Loss: 0.784126 | Best Val: 0.784126
+2026-06-01 13:38:24,246 - INFO - Epoch 050 | Train Loss: 0.273636 | Val Loss: 0.182205 | Best Val: 0.170148
+2026-06-01 13:48:19,175 - INFO - Epoch 100 | Train Loss: 0.244367 | Val Loss: 0.161944 | Best Val: 0.149550
+2026-06-01 13:58:14,098 - INFO - Epoch 150 | Train Loss: 0.262161 | Val Loss: 0.156951 | Best Val: 0.142504
+2026-06-01 14:08:08,987 - INFO - Epoch 200 | Train Loss: 0.248913 | Val Loss: 0.168000 | Best Val: 0.135158
+2026-06-01 14:10:07,921 - INFO - Early stopping triggered at epoch 210. Best Val Loss: 0.135158
+2026-06-01 14:10:08,521 - INFO - Fold 3 | PGA_h -> R2: 0.8231 | MAE: 0.0298 | RMSE: 0.0395
+2026-06-01 14:10:08,522 - INFO - Fold 3 | PGA_v -> R2: 0.9309 | MAE: 0.0180 | RMSE: 0.0246
+2026-06-01 14:10:08,522 - INFO - Fold 3 | TAF_h -> R2: 0.8278 | MAE: 0.0537 | RMSE: 0.0731
+2026-06-01 14:10:08,523 - INFO - Fold 3 | TAF_v -> R2: 0.8781 | MAE: 0.4269 | RMSE: 0.7959
+2026-06-01 14:10:08,523 - INFO - --- Model: transformer, Fold 4/5 ---
+2026-06-01 14:10:20,468 - INFO - Epoch 001 | Train Loss: 0.883781 | Val Loss: 0.824316 | Best Val: 0.824316
+2026-06-01 14:20:03,251 - INFO - Epoch 050 | Train Loss: 0.327564 | Val Loss: 0.250778 | Best Val: 0.234333
+2026-06-01 14:29:57,710 - INFO - Epoch 100 | Train Loss: 0.319795 | Val Loss: 0.215303 | Best Val: 0.208143
+2026-06-01 14:39:52,331 - INFO - Epoch 150 | Train Loss: 0.272465 | Val Loss: 0.197165 | Best Val: 0.197165
+2026-06-01 14:49:46,968 - INFO - Epoch 200 | Train Loss: 0.271201 | Val Loss: 0.204386 | Best Val: 0.194566
+2026-06-01 14:58:06,428 - INFO - Early stopping triggered at epoch 242. Best Val Loss: 0.194566
+2026-06-01 14:58:07,025 - INFO - Fold 4 | PGA_h -> R2: 0.7712 | MAE: 0.0340 | RMSE: 0.0445
+2026-06-01 14:58:07,026 - INFO - Fold 4 | PGA_v -> R2: 0.9238 | MAE: 0.0213 | RMSE: 0.0277
+2026-06-01 14:58:07,027 - INFO - Fold 4 | TAF_h -> R2: 0.7625 | MAE: 0.0621 | RMSE: 0.0847
+2026-06-01 14:58:07,028 - INFO - Fold 4 | TAF_v -> R2: 0.7784 | MAE: 0.5876 | RMSE: 1.1192
+2026-06-01 14:58:07,028 - INFO - --- Model: transformer, Fold 5/5 ---
+2026-06-01 14:58:19,082 - INFO - Epoch 001 | Train Loss: 0.896052 | Val Loss: 0.745668 | Best Val: 0.745668
+2026-06-01 15:08:04,976 - INFO - Epoch 050 | Train Loss: 0.315481 | Val Loss: 0.220371 | Best Val: 0.220371
+2026-06-01 15:18:02,660 - INFO - Epoch 100 | Train Loss: 0.282954 | Val Loss: 0.218669 | Best Val: 0.206789
+2026-06-01 15:28:00,054 - INFO - Epoch 150 | Train Loss: 0.312295 | Val Loss: 0.222947 | Best Val: 0.203187
+2026-06-01 15:38:00,918 - INFO - Epoch 200 | Train Loss: 0.312080 | Val Loss: 0.228920 | Best Val: 0.202855
+2026-06-01 15:43:11,521 - INFO - Early stopping triggered at epoch 226. Best Val Loss: 0.202855
+2026-06-01 15:43:12,109 - INFO - Fold 5 | PGA_h -> R2: 0.7330 | MAE: 0.0345 | RMSE: 0.0446
+2026-06-01 15:43:12,110 - INFO - Fold 5 | PGA_v -> R2: 0.9142 | MAE: 0.0213 | RMSE: 0.0276
+2026-06-01 15:43:12,111 - INFO - Fold 5 | TAF_h -> R2: 0.7322 | MAE: 0.0602 | RMSE: 0.0816
+2026-06-01 15:43:12,112 - INFO - Fold 5 | TAF_v -> R2: 0.7269 | MAE: 0.7148 | RMSE: 1.2827
+2026-06-01 15:43:12,112 - INFO - --- Overall OOF Performance for TRANSFORMER ---
+2026-06-01 15:43:12,113 - INFO - OOF Overall | PGA_h -> R2: 0.7871 | MAE: 0.0319 | RMSE: 0.0423
+2026-06-01 15:43:12,113 - INFO - OOF Overall | PGA_v -> R2: 0.9231 | MAE: 0.0200 | RMSE: 0.0268
+2026-06-01 15:43:12,114 - INFO - OOF Overall | TAF_h -> R2: 0.7896 | MAE: 0.0572 | RMSE: 0.0787
+2026-06-01 15:43:12,115 - INFO - OOF Overall | TAF_v -> R2: 0.8187 | MAE: 0.5590 | RMSE: 1.0327
+2026-06-01 15:43:12,123 - INFO - ========== Starting 5-Fold GroupKFold CV for DEEPONET ==========
+2026-06-01 15:43:12,125 - INFO - --- Model: deeponet, Fold 1/5 ---
+2026-06-01 15:43:12,548 - INFO - Epoch 001 | Train Loss: 0.806907 | Val Loss: 0.755359 | Best Val: 0.755359
+2026-06-01 15:43:29,723 - INFO - Epoch 050 | Train Loss: 0.186611 | Val Loss: 0.197714 | Best Val: 0.181226
+2026-06-01 15:43:47,474 - INFO - Epoch 100 | Train Loss: 0.159604 | Val Loss: 0.157695 | Best Val: 0.147200
+2026-06-01 15:44:06,036 - INFO - Epoch 150 | Train Loss: 0.151909 | Val Loss: 0.141647 | Best Val: 0.139815
+2026-06-01 15:44:24,666 - INFO - Epoch 200 | Train Loss: 0.149370 | Val Loss: 0.136661 | Best Val: 0.135970
+2026-06-01 15:44:36,379 - INFO - Early stopping triggered at epoch 232. Best Val Loss: 0.135970
+2026-06-01 15:44:36,434 - INFO - Fold 1 | PGA_h -> R2: 0.8273 | MAE: 0.0296 | RMSE: 0.0405
+2026-06-01 15:44:36,435 - INFO - Fold 1 | PGA_v -> R2: 0.9195 | MAE: 0.0201 | RMSE: 0.0279
+2026-06-01 15:44:36,436 - INFO - Fold 1 | TAF_h -> R2: 0.8417 | MAE: 0.0537 | RMSE: 0.0750
+2026-06-01 15:44:36,436 - INFO - Fold 1 | TAF_v -> R2: 0.9477 | MAE: 0.2900 | RMSE: 0.5684
+2026-06-01 15:44:36,436 - INFO - --- Model: deeponet, Fold 2/5 ---
+2026-06-01 15:44:36,854 - INFO - Epoch 001 | Train Loss: 0.844594 | Val Loss: 0.658914 | Best Val: 0.658914
+2026-06-01 15:44:55,088 - INFO - Epoch 050 | Train Loss: 0.192382 | Val Loss: 0.173391 | Best Val: 0.168396
+2026-06-01 15:45:13,535 - INFO - Epoch 100 | Train Loss: 0.162106 | Val Loss: 0.142343 | Best Val: 0.140428
+2026-06-01 15:45:32,088 - INFO - Epoch 150 | Train Loss: 0.145823 | Val Loss: 0.125362 | Best Val: 0.123302
+2026-06-01 15:45:50,341 - INFO - Epoch 200 | Train Loss: 0.136409 | Val Loss: 0.119101 | Best Val: 0.118333
+2026-06-01 15:46:08,610 - INFO - Epoch 250 | Train Loss: 0.134756 | Val Loss: 0.118346 | Best Val: 0.117868
+2026-06-01 15:46:14,130 - INFO - Early stopping triggered at epoch 265. Best Val Loss: 0.117868
+2026-06-01 15:46:14,190 - INFO - Fold 2 | PGA_h -> R2: 0.7984 | MAE: 0.0280 | RMSE: 0.0389
+2026-06-01 15:46:14,191 - INFO - Fold 2 | PGA_v -> R2: 0.9145 | MAE: 0.0195 | RMSE: 0.0277
+2026-06-01 15:46:14,192 - INFO - Fold 2 | TAF_h -> R2: 0.8103 | MAE: 0.0494 | RMSE: 0.0696
+2026-06-01 15:46:14,193 - INFO - Fold 2 | TAF_v -> R2: 0.9496 | MAE: 0.3015 | RMSE: 0.5645
+2026-06-01 15:46:14,193 - INFO - --- Model: deeponet, Fold 3/5 ---
+2026-06-01 15:46:14,613 - INFO - Epoch 001 | Train Loss: 0.852553 | Val Loss: 0.691208 | Best Val: 0.691208
+2026-06-01 15:46:32,703 - INFO - Epoch 050 | Train Loss: 0.197213 | Val Loss: 0.168409 | Best Val: 0.152372
+2026-06-01 15:46:51,171 - INFO - Epoch 100 | Train Loss: 0.163276 | Val Loss: 0.128946 | Best Val: 0.128946
+2026-06-01 15:47:09,570 - INFO - Epoch 150 | Train Loss: 0.154105 | Val Loss: 0.120032 | Best Val: 0.119213
+2026-06-01 15:47:27,981 - INFO - Epoch 200 | Train Loss: 0.144476 | Val Loss: 0.116844 | Best Val: 0.116257
+2026-06-01 15:47:46,418 - INFO - Epoch 250 | Train Loss: 0.145365 | Val Loss: 0.116359 | Best Val: 0.116087
+2026-06-01 15:47:47,904 - INFO - Early stopping triggered at epoch 254. Best Val Loss: 0.116087
+2026-06-01 15:47:47,964 - INFO - Fold 3 | PGA_h -> R2: 0.8325 | MAE: 0.0282 | RMSE: 0.0384
+2026-06-01 15:47:47,964 - INFO - Fold 3 | PGA_v -> R2: 0.9213 | MAE: 0.0190 | RMSE: 0.0262
+2026-06-01 15:47:47,965 - INFO - Fold 3 | TAF_h -> R2: 0.8415 | MAE: 0.0504 | RMSE: 0.0701
+2026-06-01 15:47:47,966 - INFO - Fold 3 | TAF_v -> R2: 0.9485 | MAE: 0.2686 | RMSE: 0.5171
+2026-06-01 15:47:47,966 - INFO - --- Model: deeponet, Fold 4/5 ---
+2026-06-01 15:47:48,377 - INFO - Epoch 001 | Train Loss: 0.820907 | Val Loss: 0.681474 | Best Val: 0.681474
+2026-06-01 15:48:06,570 - INFO - Epoch 050 | Train Loss: 0.201801 | Val Loss: 0.172193 | Best Val: 0.165794
+2026-06-01 15:48:25,336 - INFO - Epoch 100 | Train Loss: 0.170096 | Val Loss: 0.136818 | Best Val: 0.136818
+2026-06-01 15:48:43,947 - INFO - Epoch 150 | Train Loss: 0.159904 | Val Loss: 0.126760 | Best Val: 0.125492
+2026-06-01 15:49:02,305 - INFO - Epoch 200 | Train Loss: 0.145813 | Val Loss: 0.117063 | Best Val: 0.113947
+2026-06-01 15:49:20,897 - INFO - Epoch 250 | Train Loss: 0.141529 | Val Loss: 0.110281 | Best Val: 0.108745
+2026-06-01 15:49:36,747 - INFO - Early stopping triggered at epoch 293. Best Val Loss: 0.108745
+2026-06-01 15:49:36,805 - INFO - Fold 4 | PGA_h -> R2: 0.8415 | MAE: 0.0279 | RMSE: 0.0370
+2026-06-01 15:49:36,805 - INFO - Fold 4 | PGA_v -> R2: 0.9378 | MAE: 0.0186 | RMSE: 0.0251
+2026-06-01 15:49:36,806 - INFO - Fold 4 | TAF_h -> R2: 0.8520 | MAE: 0.0501 | RMSE: 0.0669
+2026-06-01 15:49:36,807 - INFO - Fold 4 | TAF_v -> R2: 0.9490 | MAE: 0.2787 | RMSE: 0.5367
+2026-06-01 15:49:36,807 - INFO - --- Model: deeponet, Fold 5/5 ---
+2026-06-01 15:49:37,227 - INFO - Epoch 001 | Train Loss: 0.824264 | Val Loss: 0.593192 | Best Val: 0.593192
+2026-06-01 15:49:55,486 - INFO - Epoch 050 | Train Loss: 0.190809 | Val Loss: 0.160211 | Best Val: 0.158346
+2026-06-01 15:50:13,905 - INFO - Epoch 100 | Train Loss: 0.154087 | Val Loss: 0.128587 | Best Val: 0.127775
+2026-06-01 15:50:32,447 - INFO - Epoch 150 | Train Loss: 0.145879 | Val Loss: 0.120566 | Best Val: 0.116191
+2026-06-01 15:50:50,732 - INFO - Epoch 200 | Train Loss: 0.135649 | Val Loss: 0.115726 | Best Val: 0.114783
+2026-06-01 15:51:09,166 - INFO - Epoch 250 | Train Loss: 0.139244 | Val Loss: 0.114503 | Best Val: 0.114216
+2026-06-01 15:51:26,764 - INFO - Early stopping triggered at epoch 298. Best Val Loss: 0.114216
+2026-06-01 15:51:26,820 - INFO - Fold 5 | PGA_h -> R2: 0.8115 | MAE: 0.0284 | RMSE: 0.0375
+2026-06-01 15:51:26,821 - INFO - Fold 5 | PGA_v -> R2: 0.9244 | MAE: 0.0191 | RMSE: 0.0260
+2026-06-01 15:51:26,821 - INFO - Fold 5 | TAF_h -> R2: 0.8240 | MAE: 0.0496 | RMSE: 0.0662
+2026-06-01 15:51:26,822 - INFO - Fold 5 | TAF_v -> R2: 0.9232 | MAE: 0.3545 | RMSE: 0.6803
+2026-06-01 15:51:26,822 - INFO - --- Overall OOF Performance for DEEPONET ---
+2026-06-01 15:51:26,823 - INFO - OOF Overall | PGA_h -> R2: 0.8235 | MAE: 0.0284 | RMSE: 0.0385
+2026-06-01 15:51:26,824 - INFO - OOF Overall | PGA_v -> R2: 0.9241 | MAE: 0.0193 | RMSE: 0.0266
+2026-06-01 15:51:26,825 - INFO - OOF Overall | TAF_h -> R2: 0.8354 | MAE: 0.0506 | RMSE: 0.0696
+2026-06-01 15:51:26,826 - INFO - OOF Overall | TAF_v -> R2: 0.9437 | MAE: 0.2984 | RMSE: 0.5758
+2026-06-01 15:51:26,836 - INFO - All model architectures trained and evaluated successfully!

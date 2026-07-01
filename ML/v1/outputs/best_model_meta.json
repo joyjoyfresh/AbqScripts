@@ -1,0 +1,33 @@
+{
+  "model_name": "6-XGBoost",
+  "feature_cols": [
+    "h",
+    "i",
+    "angle",
+    "x/h",
+    "eq_code",
+    "log_h",
+    "i_rad",
+    "angle_rad",
+    "tan_i",
+    "h_norm",
+    "i_norm",
+    "angle_norm",
+    "h_tan_i",
+    "angle_xh"
+  ],
+  "val_metrics": {
+    "R2": 0.916445,
+    "MAE": 0.028382,
+    "RMSE": 0.045165,
+    "MaxErr": 0.417974,
+    "MAPE(%)": 2.75163
+  },
+  "train_metrics": {
+    "R2": 0.982248,
+    "MAE": 0.014974,
+    "RMSE": 0.023356,
+    "MaxErr": 0.20686,
+    "MAPE(%)": 1.457013
+  }
+}

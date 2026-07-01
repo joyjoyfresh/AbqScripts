@@ -1,0 +1,54 @@
+# VAB_oblique_multilayer_nonlinear_v2.py 变更说明 (CHANGELOG)
+
+> 维护约定：**以后每次改动 `VAB_oblique_multilayer_nonlinear_v2.py` 脚本，都必须同步修改本 CHANGELOG**，记录本次改动内容与动机，保持两者一致。若改动属于小型改动可在当前版本就地更新；大型改动（功能新增、架构调整）则新建脚本版本并新建对应 CHANGELOG。
+
+本脚本 = `VAB_oblique_TAF_multilayer`（v8/v9.1 谱系）去掉平坦对照模型(flat) + 新增土体非线性(EQL)。
+线性建模 / 自由场 / 网格 / 阻尼等机制沿用 v9.1；土体非线性见下方机制(7)。
+
+---
+
+## 一、脚本主要用法 (Usage)
+
+1. **参数配置**：默认参数在脚本内 `material_cfg` 等字典中定义。若工况目录下存在
+   `case_config.json`，脚本运行时会自动加载并覆盖默认配置。
+2. **layers 约定**：基岩之上的有限层列表自顶向下配置，例如：
+   - `[]` ：单层均质（仅基岩）
+   - `[{'name': 'overlying', ...}]` ：双层模型
+   - `[{'name': 'surface', ...}, {'name': 'overlying', ...}]` ：三层模型（表层在前）
+3. **运行执行**：通过 Abaqus 命令行静默调用：
+   ```
+   abaqus cae noGUI=VAB_oblique_multilayer_nonlinear_v2.py
+   ```
+
+---
+
+## 二、已实现的关键效果与机制 (Features & Results)
+
+1. **频域精确自由场 (fd 引擎)**：内置 Thomson-Haskell 全局矩阵法，逐频求解一维层状斜入射
+   自由场（包含多次波、层间耦合及瑞利阻尼衰减），已引入临界角自检与硬化校验（≥临界角拒绝建模）。
+2. **地形等厚表层几何 (terrain 模式)**：支持 `surface_geometry='terrain'`，使表层沿地形起伏
+   等厚铺设，自由场与弹簧边界均实现"按局部埋深取层"。
+3. **自动对拍与建模自检**：
+   - 建模前自动执行一维解析解对拍（半空间退化 + 单层 SH 校验），误差 > 1e-3 即强行中止。
+   - 自动计算远场一维地表 PGA 理论值，并向 `case_meta.json` 写入 `ff_theory` 块用于精度 QA。
+4. **逐层重锚定阻尼** (`damping_cfg['anchor']='perband'`)：每层瑞利拟合频带按【该层自身共振基频
+   `f_layer=Vs/(4·d)` 及其谐波】重锚定——`f1=min(f1_factor·fc, f_layer)`、
+   `f2=max(f2_factor·fc, harmonics_cover·f_layer)`，把软薄层混响频段纳入拟合带，
+   避免其落在刚度比例项 β 主导的高频段被严重过阻尼（旧 `'input'`/`'dual'` 模式保留可选）。
+5. **ODB 瘦身与频域提取前置**：
+   - 延长 `time_cfg['tail_seconds']` 静默尾段，便于捕捉坡体混响衰减并提取频域传递函数 H(f)；
+   - `run_cfg['surface_only']=True` 可只输出地表节点全时程并对整体场输出降频，急剧骤降 ODB 体积。
+6. **网格自适应与时间步诊断**：基于最软层 K-L 判据自适应划分网格（`mesh_cfg.auto`）；
+   分层非均匀网格（`mesh_cfg.graded`，默认开）——按层波速比缩放单元尺寸（软层细/深部粗，
+   自由四边形平滑过渡），在保证各层 K-L 精度的同时大幅减少深部基岩单元数；
+   软层谐波自适应加密（`resolve_harmonics` + `min_elems_through_thickness`）：薄软层按其
+   共振谐波 `resolve_harmonics·f_layer` 与穿层单元数判据自动加密（与 perband 阻尼保留频带对齐），
+   下限优先满足穿层判据（不被 `min_size` 钳），解决薄软层混响高次谐波的空间欠采样；
+   模拟步长始终 = 输入地震动 txt 的 dt，不再重采样（避免改变步数），仅在输入偏粗时给出警告。
+7. **土体非线性：等效线性 EQL**（`eql_cfg`；默认 `enable=False` 即线性=原行为）：
+   - ① **1D 模式**（`mode='1d'`，默认）：上平台自由场柱按 SHAKE 应变相容迭代——降软层 Vs、增 ξ，
+     再喂给 2D FE 与斜入射自由场（同口径）；经验曲线可切换（darendeli / seed_idriss_sand / vucetic_dobry）；
+     结果（各非线性层 `γ_eff`/`G_Gmax`/`Vs0→Vs`/`ξ`）写入 `case_meta['eql']`。
+   - ② **逐单元 2D 模式**（`mode='2d_element'`，重型，需 Abaqus 实测）：从 ODB 逐单元读最大剪应变、
+     按应变分箱更新 G/ξ、迭代重跑 2D FE，抓坡顶局部软化；建模自动对软层单元请求应变场 E。
+   - 强度由输入波幅值决定（输入=基岩入射 E、露头=2E）；扫描=按不同幅值的输入多跑几次。

@@ -8,28 +8,9 @@ __pycache__/
 .venv/
 venv/
 
-# 分发/打包
-*.egg-info/
-dist/
-build/
-
 # 编辑器/IDE 临时文件
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# PDF 文件
-*.pdf
-
-# 图片
-*.png
-*.PNG
-*.jpg
-*.jpeg
-
-# 自定义
-test*/
-outputs*/
-images/
-docs/

@@ -1,23 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-坡顶建筑地震响应（TSSI）自包含脚本 —— v3 坡面波动引擎 + 可选叠加坡顶框架结构
+坡顶框架结构地震响应（TSSI）自包含建模脚本
 ================================================================================
-开题内容(4)：坡顶多层框架地震响应。本脚本【自包含单文件】= v3 坡面波动引擎整段并入
-（VAB_oblique_multilayer_nonlinear_v3：上土下岩分层 + 粘弹性吸收边界 + 斜入射 SV 等效力
-+ 频域 fd 自由场引擎 + EQL 土非线性；逐字保留、物理不动），并用 tssi_cfg 开关在其上叠加建筑。
-
-【单一流程】main 即 v3 的 main，多波(find_acc_txt 逐波)天然保留：
-  tssi_cfg['enable']=False → 纯 v3 坡面自由场（行为与 v3 完全一致）→ 坡顶 TAF 用 v3 的
-      Postprocess/General/Postprocess_PGA_v3.py + Compute_TAF_v2.py 后处理。
-  tssi_cfg['enable']=True  → create_model 建好坡地模型后 add_frame_on_crest 挂坡顶框架(Tie 耦合)，
-      build_models 复制到各波 → 每波 = 坡顶土+建筑(SSI) → 建筑响应用
-      Postprocess/Hybrid/Postprocess_SSI_response_v1.py 后处理（读 tssi_meta.json + job-*.odb）。
-
-建筑坐 v3 坡地几何/材料的坡顶（右缘贴坡肩 x=left_flat）；框架参数见文件头 frame_cfg/frame_material_cfg。
-配置全在文件头：引擎配置 material_cfg/geometry_cfg/boundary_cfg… + TSSI 配置 tssi_cfg/frame_cfg。
-
-运行：abaqus cae noGUI=slope_frame_ssi_full_v1.py   （工作目录放一条或多条加速度 .txt）
-Py2.7 兼容。
+1. 功能：在 v3 坡面波动引擎（上土下岩分层、粘弹性边界、斜入射等效力、EQL 非线性等）基础上，
+   通过 tssi_cfg['enable'] 开关控制是否叠加坡顶多层框架（采用 Tie 耦合）。
+2. 后处理：
+   - 启用 TSSI：每波建立 SSI 模型，用 Postprocess/Hybrid/Postprocess_SSI_response_v1.py 处理。
+   - 禁用 TSSI：退化为纯坡地模型，用 Postprocess/General/Postprocess_PGA_v3.py 处理。
+3. 运行方式：abaqus cae noGUI=slope_frame_ssi_full_v1.py （工作目录存放加速度记录文件）
+4. 兼容性：兼容 Python 2.7。
 """
 
 from abaqus import *
@@ -166,17 +157,38 @@ eql_cfg = {
 #  TSSI 坡顶建筑/SSI 配置（与引擎配置并列在文件头）
 # ==========================================================
 
-tssi_cfg = {'enable': True, 'history_freq': 1}  #! enable=True 时在坡顶追加框架(Tie); 建筑用 v3 坡地几何/材料
+# TSSI 总开关配置
+tssi_cfg = {
+    'enable': False,                      #! True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
+    'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
+}
 
 # 坡顶框架（B21 梁 + 楼层集中质量；坐坡顶右缘贴坡肩 x=left_flat）
 frame_cfg = {
-    'n_story': 5, 'n_bay': 3, 'story_height': 3.0, 'bay_width': 6.0,
-    'column': {'width': 0.5, 'depth': 0.5}, 'beam': {'width': 0.3, 'depth': 0.6},
-    'floor_mass': 5.0e4,
+    'n_story': 5,                        # 框架层数
+    'n_bay': 3,                          # 框架跨数
+    'story_height': 3.0,                 # 层高（m）
+    'bay_width': 6.0,                    # 跨度（m）
+    'column': {
+        'width': 0.5,                    # 柱截面宽度（m）
+        'depth': 0.5,                    # 柱截面高度（m）
+    },
+    'beam': {
+        'width': 0.3,                    # 梁截面宽度（m）
+        'depth': 0.6,                    # 梁截面高度（m）
+    },
+    'floor_mass': 5.0e4,                 # 每层楼板集中质量（kg）
 }
+
+# 框架材料配置（混凝土 C30，含瑞利阻尼拟合频段）
 frame_material_cfg = {
-    'name': 'Concrete_C30', 'E': 30.0e9, 'nu': 0.2, 'density': 10.0,
-    'damping_ratio': 0.05, 'f1': 1.0, 'f2': 5.0,
+    'name': 'Concrete_C30',              # 材料名称
+    'E': 30.0e9,                         # 弹性模量（Pa）
+    'nu': 0.2,                           # 泊松比
+    'density': 10.0,                     # 密度（kg/m^3，已按结构等效折算）
+    'damping_ratio': 0.05,               # 瑞利阻尼目标阻尼比
+    'f1': 1.0,                           # 瑞利阻尼拟合下限频率（Hz）
+    'f2': 5.0,                           # 瑞利阻尼拟合上限频率（Hz）
 }
 
 
@@ -189,9 +201,9 @@ DEFAULT_STEP_NAME = 'Step-earthquake'  # 默认分析步名称
 BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # 边界节点集名称
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 边界处理顺序(左/右/底)
 
-# 以下两项仅 ray 引擎(回归对比)用；fd 默认引擎用不到
 MAX_REFLECT_ORDER = 3   # ray 覆盖层多次反射截断阶数(默认3，可由 case_config.json 顶层 max_reflect_order 覆盖)
 _REFL_COEFF_CACHE = {}  # ray 等效反射/转换系数缓存(运行时填充)
+_FD_SOLVER_CACHE = {}  # fd 引擎缓存：键=round(ymax_col,4) 的柱解；另含 '_input' 键缓存输入谱
 
 
 # ============================================================
@@ -1037,14 +1049,6 @@ def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis
 
     return {'time': td, 'ux': ux, 'uy': uy, 'dotux': dotux, 'dotuy': dotuy,
             'sigmax': sigmax, 'sigmay': sigmay}  # 应力分量
-
-
-# ============================================================
-#  频域精确分层自由场引擎（fd 引擎，默认）
-# ============================================================
-
-
-_FD_SOLVER_CACHE = {}  # fd 引擎缓存：键=round(ymax_col,4) 的柱解；另含 '_input' 键缓存输入谱
 
 
 def _next_pow2(n):  # 求不小于 n 的最小 2 的幂
@@ -1932,7 +1936,6 @@ def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logg
 
 def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Model-1'):
     """逐边界逐节点用射线法计算自由场并组装等效节点力时程，返回 {'<label>-<边界>-fx/fy': Nx2 数组}。
-
     等效力 = K·u_ff + C·v̇_ff + A·σ_ff，其中应力 σ_ff 的各边界公式已内嵌外法向符号
       （见 _compute_freefield_at_node），故此处面力项统一取 +A·σ：
       侧边(l/r)：fx=kn·ux+cn·u̇x+A·σx, fy=kt·uy+ct·u̇y+A·σy；
@@ -2292,7 +2295,7 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
 
 
 # ==========================================================
-#  主入口
+#  工况配置加载与元数据写出（主入口辅助函数）
 # ==========================================================
 
 
@@ -2342,25 +2345,10 @@ def _deep_merge(base, override):
 
 def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
                       mesh_cfg_in=None, time_cfg_in=None, max_reflect_order_in=None):  # 加载工况配置注入
-    """若当前工况文件夹存在 case_config.json，则用其覆盖默认配置（支持部分覆盖或整体改 layers/几何/网格/阻尼）。
-
-    v6 新增支持 freefield_cfg / run_cfg 两类注入（自由场引擎与运行控制）。
-    v7 注入要点：material_cfg 可含 "surface_geometry": "terrain"（表层沿地形等厚铺设），
-    mesh_cfg 可含 "elem": "CPE4R"（减缩积分单元）——均经既有深合并机制生效，无需新键名。
-    v8 注入要点：time_cfg 可含 "tail_seconds"（静默尾段秒数），run_cfg 可含 "surface_only"
-    （地表全时程输出瘦身），damping_cfg 可含 "anchor": "dual"（场地基频双控锚定）。
-    case_config.json 结构（各键可选，缺省即用默认）：
-      {
-        "material_cfg": {"surface_geometry": "terrain", ...}, "geometry_cfg": {...},
-        "damping_cfg": {...}, "mesh_cfg": {"size": 4, "elem": "CPE4"}, "time_cfg": {...},
-        "max_reflect_order": 3,
-        "freefield_cfg": {"engine": "fd"}, "run_cfg": {"surface_only": true}, "eql_cfg": {"enable": false},
-        "boundary_cfg": {"dashpot_scale": 1.0, "spring_scale": 1.0}
-      }
-    v9.1：基准网格尺寸并入 mesh_cfg['size']；仍兼容旧写法顶层 "mesh_size"（自动映射到 mesh_cfg['size']）。
-    返回覆盖后的 (material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg,
-                  max_reflect_order, freefield_cfg, run_cfg)。
-    无文件或解析失败则原样返回默认。
+    """加载并注入用户自定义工况配置（来自 case_config.json），覆盖默认配置。
+    支持对材料、几何、阻尼、网格、时间步、自由场引擎、等效线性化(EQL)、人工边界等配置项进行部分或整体覆盖。
+    返回覆盖后的完整配置元组：(material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg, 
+                          max_reflect_order, freefield_cfg, run_cfg)。
     """
     mesh_cfg_out = dict(mesh_cfg_in) if mesh_cfg_in else dict(mesh_cfg)  # 初始化网格自适应配置（用全局默认）
     time_cfg_out = dict(time_cfg_in) if time_cfg_in else dict(time_cfg)  # 初始化时间步校验配置（用全局默认）
@@ -2906,6 +2894,130 @@ def _run_2d_element_eql(base_model, part_name, inst_name, site, geom, eql_cfg, d
     return model_name
 
 
+# ==========================================================
+#  TSSI 坡顶建筑结构（tssi_cfg['enable']=True 时在 v3 坡地模型上追加框架 + Tie 耦合）
+# ==========================================================
+
+
+def rayleigh_coeffs(xi, f1, f2):
+    w1 = 2.0 * math.pi * f1; w2 = 2.0 * math.pi * f2
+    return 2.0 * xi * w1 * w2 / (w1 + w2), 2.0 * xi / (w1 + w2)
+
+
+# ==========================================================
+#  框架 Part（局部基底 y=0；同 step2a）
+# ==========================================================
+
+def build_frame_part(model, logger):
+    nb = int(frame_cfg['n_bay']); ns = int(frame_cfg['n_story'])
+    bw = float(frame_cfg['bay_width']); sh = float(frame_cfg['story_height'])
+    xs = [j * bw for j in range(nb + 1)]; ys = [k * sh for k in range(ns + 1)]; z = 0.0
+    sk = model.ConstrainedSketch(name='__frame__', sheetSize=max(xs[-1], ys[-1]) * 2.0)
+    for x in xs:
+        for k in range(ns):
+            sk.Line(point1=(x, ys[k]), point2=(x, ys[k + 1]))
+    for k in range(1, ns + 1):
+        for j in range(nb):
+            sk.Line(point1=(xs[j], ys[k]), point2=(xs[j + 1], ys[k]))
+    part = model.Part(name='Frame', dimensionality=TWO_D_PLANAR, type=DEFORMABLE_BODY)
+    part.BaseWire(sketch=sk)
+    del model.sketches['__frame__']
+
+    mc = frame_material_cfg
+    mat = model.Material(name=mc['name'])
+    mat.Elastic(table=((mc['E'], mc['nu']),))
+    mat.Density(table=((mc['density'],),))
+    a_r, b_r = rayleigh_coeffs(mc['damping_ratio'], mc['f1'], mc['f2'])
+    mat.Damping(alpha=a_r, beta=b_r)
+    col = frame_cfg['column']; bm = frame_cfg['beam']
+    model.RectangularProfile(name='ColProf', a=col['width'], b=col['depth'])
+    model.RectangularProfile(name='BeamProf', a=bm['width'], b=bm['depth'])
+    model.BeamSection(name='ColSec', profile='ColProf', material=mc['name'], integration=DURING_ANALYSIS, poissonRatio=mc['nu'])
+    model.BeamSection(name='BeamSec', profile='BeamProf', material=mc['name'], integration=DURING_ANALYSIS, poissonRatio=mc['nu'])
+    col_mids = [((x, (ys[k] + ys[k + 1]) / 2.0, z),) for x in xs for k in range(ns)]
+    beam_mids = [(((xs[j] + xs[j + 1]) / 2.0, ys[k], z),) for k in range(1, ns + 1) for j in range(nb)]
+    part.Set(edges=part.edges.findAt(*col_mids), name='COLS')
+    part.Set(edges=part.edges.findAt(*beam_mids), name='BEAMS')
+    part.SectionAssignment(region=part.sets['COLS'], sectionName='ColSec')
+    part.SectionAssignment(region=part.sets['BEAMS'], sectionName='BeamSec')
+    part.assignBeamSectionOrientation(region=part.Set(edges=part.edges, name='ALL_E'), method=N1_COSINES, n1=(0.0, 0.0, -1.0))
+    part.Set(vertices=part.vertices.findAt(*[((x, ys[0], z),) for x in xs]), name='BASE')
+    floor_full = {}
+    for k in range(1, ns + 1):
+        part.Set(vertices=part.vertices.findAt(((xs[0], ys[k], z),)), name='FLOOR_%d' % k)
+        part.Set(vertices=part.vertices.findAt(*[((x, ys[k], z),) for x in xs]), name='FLOORALL_%d' % k)
+        floor_full[k] = ('FLOORALL_%d' % k, len(xs))
+    part.seedEdgeByNumber(edges=part.edges, number=1, constraint=FIXED)
+    part.setElementType(regions=(part.edges,), elemTypes=(mesh.ElemType(elemCode=B21, elemLibrary=STANDARD),))
+    part.generateMesh()
+    log_step(logger, u'框架 Part: B21, 层=%d 跨=%d, 单元=%d', ns, nb, len(part.elements))
+    return part, floor_full, ns
+
+
+# ==========================================================
+#  坡顶框架 Tie 耦合 + 历史输出 + TSSI 元数据
+# ==========================================================
+
+def add_frame_on_crest(model_name, geom, soil_part_name, soil_inst_name, logger):
+    """框架坐坡顶(右缘贴坡肩) + Tie 基底到坡顶土面 + 楼层集中质量。返回 (frame_inst, ns)。"""
+    model = mdb.models[model_name]
+    asm = model.rootAssembly
+    frame, floor_full, ns = build_frame_part(model, logger)
+    frame_inst = 'Frame-1'
+    asm.Instance(name=frame_inst, part=frame, dependent=ON)
+    fw = int(frame_cfg['n_bay']) * float(frame_cfg['bay_width'])
+    x_off = float(geom.left_flat) - fw        # 右缘贴坡肩 x=left_flat
+    asm.translate(instanceList=(frame_inst,), vector=(x_off, geom.H_upper, 0.0))
+    m_total = float(frame_cfg['floor_mass'])
+    for k in range(1, ns + 1):
+        nm, cnt = floor_full[k]
+        asm.engineeringFeatures.PointMassInertia(
+            name='Mass_%d' % k, region=asm.instances[frame_inst].sets[nm], mass=m_total / float(cnt))
+    # 坡顶平台土面 [0,left_flat] 建 Tie 主面
+    soil_part = model.parts[soil_part_name]
+    crest_edge = soil_part.edges.findAt(((geom.left_flat * 0.5, geom.H_upper, 0.0),))
+    soil_part.Surface(side1Edges=crest_edge, name='CREST_SURF')
+    model.Tie(name='FrameSoil', master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
+              slave=asm.instances[frame_inst].sets['BASE'],
+              positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=OFF, thickness=ON)
+    # 坡顶参考节点(TOP_SURFACE 中 x 最接近 left_flat)——供 SSI 后处理(框架基础运动/TAF)
+    top = asm.instances[soil_inst_name].sets['TOP_SURFACE']
+    crest_node = min(top.nodes, key=lambda n: abs(n.coordinates[0] - geom.left_flat))
+    asm.Set(name='CREST_REF', nodes=asm.instances[soil_inst_name].nodes.sequenceFromLabels([crest_node.label]))
+    log_step(logger, u'[%s] 坡顶框架已挂(x_off=%.1f,y=%.0f)+Tie耦合, 坡顶参考x=%.0f', model_name, x_off, geom.H_upper, crest_node.coordinates[0])
+    return frame_inst, ns
+
+
+def add_frame_outputs(model_name, logger):
+    """给已建步的 SSI 模型加坡顶参考(CREST_REF)+框架各层历史输出(U1/A1)。build_models 建步后逐波调用。"""
+    model = mdb.models[model_name]
+    asm = model.rootAssembly
+    freq = int(tssi_cfg.get('history_freq', 1))
+    ns = int(frame_cfg['n_story'])
+    model.HistoryOutputRequest(name='H-Crest', createStepName=DEFAULT_STEP_NAME,
+                               variables=('U1', 'A1'), region=asm.sets['CREST_REF'], frequency=freq)
+    for k in range(1, ns + 1):
+        model.HistoryOutputRequest(name='H-Floor%d' % k, createStepName=DEFAULT_STEP_NAME,
+                                   variables=('U1', 'V1', 'A1'),
+                                   region=asm.instances['Frame-1'].sets['FLOOR_%d' % k], frequency=freq)
+    log_step(logger, u'[%s] TSSI 框架输出已配: 坡顶参考 + %d 层', model_name, ns)
+
+
+def write_tssi_meta(logger):
+    """写 tssi_meta.json：框架参数(供 SSI 后处理 Postprocess_SSI_response 读取)。"""
+    meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
+            'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
+            'inst_frame': 'Frame-1', 'T_fixed_step1': 0.5}  # T_fixed_step1: step1 固定基础 T1(周期延长基准)
+    with open('tssi_meta.json', 'w') as fh:
+        json.dump(meta, fh, indent=2, ensure_ascii=False)
+    log_step(logger, u'tssi_meta.json 已写(框架参数, 供 SSI 后处理)')
+
+
+# ==========================================================
+#  主入口
+# ==========================================================
+
+
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""
     global material_cfg, geometry_cfg, damping_cfg, MAX_REFLECT_ORDER  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
@@ -3071,129 +3183,6 @@ def main():
         log_step(logger, '脚本失败: %s', str(exc))
         logger.error('异常堆栈:\n%s', traceback.format_exc())
         raise
-
-
-
-
-# ==========================================================
-#  TSSI 坡顶建筑结构（tssi_cfg['enable']=True 时在 v3 坡地模型上追加框架 + Tie 耦合）
-# ==========================================================
-
-
-def rayleigh_coeffs(xi, f1, f2):
-    w1 = 2.0 * math.pi * f1; w2 = 2.0 * math.pi * f2
-    return 2.0 * xi * w1 * w2 / (w1 + w2), 2.0 * xi / (w1 + w2)
-
-
-# ==========================================================
-#  框架 Part（局部基底 y=0；同 step2a）
-# ==========================================================
-
-def build_frame_part(model, logger):
-    nb = int(frame_cfg['n_bay']); ns = int(frame_cfg['n_story'])
-    bw = float(frame_cfg['bay_width']); sh = float(frame_cfg['story_height'])
-    xs = [j * bw for j in range(nb + 1)]; ys = [k * sh for k in range(ns + 1)]; z = 0.0
-    sk = model.ConstrainedSketch(name='__frame__', sheetSize=max(xs[-1], ys[-1]) * 2.0)
-    for x in xs:
-        for k in range(ns):
-            sk.Line(point1=(x, ys[k]), point2=(x, ys[k + 1]))
-    for k in range(1, ns + 1):
-        for j in range(nb):
-            sk.Line(point1=(xs[j], ys[k]), point2=(xs[j + 1], ys[k]))
-    part = model.Part(name='Frame', dimensionality=TWO_D_PLANAR, type=DEFORMABLE_BODY)
-    part.BaseWire(sketch=sk)
-    del model.sketches['__frame__']
-
-    mc = frame_material_cfg
-    mat = model.Material(name=mc['name'])
-    mat.Elastic(table=((mc['E'], mc['nu']),))
-    mat.Density(table=((mc['density'],),))
-    a_r, b_r = rayleigh_coeffs(mc['damping_ratio'], mc['f1'], mc['f2'])
-    mat.Damping(alpha=a_r, beta=b_r)
-    col = frame_cfg['column']; bm = frame_cfg['beam']
-    model.RectangularProfile(name='ColProf', a=col['width'], b=col['depth'])
-    model.RectangularProfile(name='BeamProf', a=bm['width'], b=bm['depth'])
-    model.BeamSection(name='ColSec', profile='ColProf', material=mc['name'], integration=DURING_ANALYSIS, poissonRatio=mc['nu'])
-    model.BeamSection(name='BeamSec', profile='BeamProf', material=mc['name'], integration=DURING_ANALYSIS, poissonRatio=mc['nu'])
-    col_mids = [((x, (ys[k] + ys[k + 1]) / 2.0, z),) for x in xs for k in range(ns)]
-    beam_mids = [(((xs[j] + xs[j + 1]) / 2.0, ys[k], z),) for k in range(1, ns + 1) for j in range(nb)]
-    part.Set(edges=part.edges.findAt(*col_mids), name='COLS')
-    part.Set(edges=part.edges.findAt(*beam_mids), name='BEAMS')
-    part.SectionAssignment(region=part.sets['COLS'], sectionName='ColSec')
-    part.SectionAssignment(region=part.sets['BEAMS'], sectionName='BeamSec')
-    part.assignBeamSectionOrientation(region=part.Set(edges=part.edges, name='ALL_E'), method=N1_COSINES, n1=(0.0, 0.0, -1.0))
-    part.Set(vertices=part.vertices.findAt(*[((x, ys[0], z),) for x in xs]), name='BASE')
-    floor_full = {}
-    for k in range(1, ns + 1):
-        part.Set(vertices=part.vertices.findAt(((xs[0], ys[k], z),)), name='FLOOR_%d' % k)
-        part.Set(vertices=part.vertices.findAt(*[((x, ys[k], z),) for x in xs]), name='FLOORALL_%d' % k)
-        floor_full[k] = ('FLOORALL_%d' % k, len(xs))
-    part.seedEdgeByNumber(edges=part.edges, number=1, constraint=FIXED)
-    part.setElementType(regions=(part.edges,), elemTypes=(mesh.ElemType(elemCode=B21, elemLibrary=STANDARD),))
-    part.generateMesh()
-    log_step(logger, u'框架 Part: B21, 层=%d 跨=%d, 单元=%d', ns, nb, len(part.elements))
-    return part, floor_full, ns
-
-
-# ==========================================================
-#  用 Multi 引擎建坡面土 + 边界 + 斜入射
-# ==========================================================
-
-def add_frame_on_crest(model_name, geom, soil_part_name, soil_inst_name, logger):
-    """框架坐坡顶(右缘贴坡肩) + Tie 基底到坡顶土面 + 楼层集中质量。返回 (frame_inst, ns)。"""
-    model = mdb.models[model_name]
-    asm = model.rootAssembly
-    frame, floor_full, ns = build_frame_part(model, logger)
-    frame_inst = 'Frame-1'
-    asm.Instance(name=frame_inst, part=frame, dependent=ON)
-    fw = int(frame_cfg['n_bay']) * float(frame_cfg['bay_width'])
-    x_off = float(geom.left_flat) - fw        # 右缘贴坡肩 x=left_flat
-    asm.translate(instanceList=(frame_inst,), vector=(x_off, geom.H_upper, 0.0))
-    m_total = float(frame_cfg['floor_mass'])
-    for k in range(1, ns + 1):
-        nm, cnt = floor_full[k]
-        asm.engineeringFeatures.PointMassInertia(
-            name='Mass_%d' % k, region=asm.instances[frame_inst].sets[nm], mass=m_total / float(cnt))
-    # 坡顶平台土面 [0,left_flat] 建 Tie 主面
-    soil_part = model.parts[soil_part_name]
-    crest_edge = soil_part.edges.findAt(((geom.left_flat * 0.5, geom.H_upper, 0.0),))
-    soil_part.Surface(side1Edges=crest_edge, name='CREST_SURF')
-    model.Tie(name='FrameSoil', master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
-              slave=asm.instances[frame_inst].sets['BASE'],
-              positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=OFF, thickness=ON)
-    # 坡顶参考节点(TOP_SURFACE 中 x 最接近 left_flat)——供 SSI 后处理(框架基础运动/TAF)
-    top = asm.instances[soil_inst_name].sets['TOP_SURFACE']
-    crest_node = min(top.nodes, key=lambda n: abs(n.coordinates[0] - geom.left_flat))
-    asm.Set(name='CREST_REF', nodes=asm.instances[soil_inst_name].nodes.sequenceFromLabels([crest_node.label]))
-    log_step(logger, u'[%s] 坡顶框架已挂(x_off=%.1f,y=%.0f)+Tie耦合, 坡顶参考x=%.0f', model_name, x_off, geom.H_upper, crest_node.coordinates[0])
-    return frame_inst, ns
-
-
-
-
-def add_frame_outputs(model_name, logger):
-    """给已建步的 SSI 模型加坡顶参考(CREST_REF)+框架各层历史输出(U1/A1)。build_models 建步后逐波调用。"""
-    model = mdb.models[model_name]
-    asm = model.rootAssembly
-    freq = int(tssi_cfg.get('history_freq', 1))
-    ns = int(frame_cfg['n_story'])
-    model.HistoryOutputRequest(name='H-Crest', createStepName=DEFAULT_STEP_NAME,
-                               variables=('U1', 'A1'), region=asm.sets['CREST_REF'], frequency=freq)
-    for k in range(1, ns + 1):
-        model.HistoryOutputRequest(name='H-Floor%d' % k, createStepName=DEFAULT_STEP_NAME,
-                                   variables=('U1', 'V1', 'A1'),
-                                   region=asm.instances['Frame-1'].sets['FLOOR_%d' % k], frequency=freq)
-    log_step(logger, u'[%s] TSSI 框架输出已配: 坡顶参考 + %d 层', model_name, ns)
-
-
-def write_tssi_meta(logger):
-    """写 tssi_meta.json：框架参数(供 SSI 后处理 Postprocess_SSI_response 读取)。"""
-    meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
-            'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
-            'inst_frame': 'Frame-1', 'T_fixed_step1': 0.5}  # T_fixed_step1: step1 固定基础 T1(周期延长基准)
-    with open('tssi_meta.json', 'w') as fh:
-        json.dump(meta, fh, indent=2, ensure_ascii=False)
-    log_step(logger, u'tssi_meta.json 已写(框架参数, 供 SSI 后处理)')
 
 
 if __name__ == '__main__':
