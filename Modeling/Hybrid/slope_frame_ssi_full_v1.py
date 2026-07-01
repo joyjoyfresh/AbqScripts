@@ -161,6 +161,7 @@ eql_cfg = {
 tssi_cfg = {
     'enable': False,                      #! True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
     'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
+    'nonlinear': True,                   #! step3: True=梁柱用CDP混凝土+钢筋(非线性纤维截面); False=退回纯弹性(step2 行为)
 }
 
 # 坡顶框架（B21 梁 + 楼层集中质量；坐坡顶右缘贴坡肩 x=left_flat）
@@ -180,15 +181,41 @@ frame_cfg = {
     'floor_mass': 5.0e4,                 # 每层楼板集中质量（kg）
 }
 
-# 框架材料配置（混凝土 C30，含瑞利阻尼拟合频段）
+# 框架材料配置（混凝土 C30，含瑞利阻尼拟合频段 + step3 CDP 本构参数）
 frame_material_cfg = {
     'name': 'Concrete_C30',              # 材料名称
-    'E': 30.0e9,                         # 弹性模量（Pa）
+    'E': 30.0e9,                         # 弹性模量（Pa，GB50010 表4.1.5 C30 弹性模量 Ec）
     'nu': 0.2,                           # 泊松比
-    'density': 10.0,                     # 密度（kg/m^3，已按结构等效折算）
+    'density': 10.0,                     # 密度（kg/m^3，已按结构等效折算；真实楼层质量走 floor_mass 集中质量）
     'damping_ratio': 0.05,               # 瑞利阻尼目标阻尼比
     'f1': 1.0,                           # 瑞利阻尼拟合下限频率（Hz）
     'f2': 5.0,                           # 瑞利阻尼拟合上限频率（Hz）
+    'fc_mpa': 20.1,                      # 轴心抗压强度标准值 fck（MPa，GB50010 表4.1.3-1 C30）
+    'ft_mpa': 2.01,                      # 轴心抗拉强度标准值 ftk（MPa，GB50010 表4.1.3-1 C30）
+    'dilation_angle': 30.0,              # CDP 膨胀角（度，混凝土常用取值）
+    'eccentricity': 0.1,                 # CDP 流动势偏心率(默认)
+    'fb0_fc0': 1.16,                     # CDP 双轴/单轴抗压强度比(默认)
+    'K': 0.6667,                         # CDP 拉压子午线形状系数(默认)
+    'viscosity': 0.0005,                 # CDP 粘性正则化参数(小值,助收敛,不显著改变本构)
+}
+
+# 框架钢筋配置（HRB400，角部配筋；纤维截面用 *Rebar Line 关键字注入，Abaqus/CAE 不支持梁钢筋图形化建模）
+rebar_cfg = {
+    'material': 'Rebar_HRB400',          # 钢筋材料名称
+    'Es': 200.0e9,                       # 钢筋弹性模量（Pa）
+    'nu': 0.3,                           # 钢筋泊松比
+    'fy': 400.0e6,                       # 屈服强度（Pa，HRB400）
+    'hardening_ratio': 0.01,             # 屈服后切线模量/Es(小值强化,防止理想弹塑性数值病态)
+    'density': 7850.0,                   # 钢筋密度（kg/m^3，仅用于材料定义；梁钢筋质量不计入求解——已按 step1 说明用 floor_mass 集中质量代表结构质量）
+    'cover': 0.03,                       # 保护层厚度（m，到钢筋中心近似简化，不再扣半径）
+    'column': {
+        'ratio': 0.015,                  # 柱配筋率(总钢筋面积/截面毛面积)，取常规RC柱经验值
+        'bar_diameter': 0.022,           # 单根钢筋直径(m)，仅用于摆放校验，面积按配筋率反算
+    },
+    'beam': {
+        'ratio': 0.008,                  # 梁配筋率
+        'bar_diameter': 0.018,           # 单根钢筋直径(m)
+    },
 }
 
 
@@ -2234,11 +2261,18 @@ def build_models(acc_info, base_model, part_name, inst_name,
 
         model = mdb.models[new_model_name]
         tail = float((tcfg or {}).get('tail_seconds', 0.0) or 0.0)  # v8：静默尾段时长（与 fd 自由场时窗一致）
-        model.ImplicitDynamicsStep(
-            name=step_name, previous='Initial',
-            timePeriod=tp + tail, timeIncrementationMethod=FIXED, initialInc=inc,
-            maxNumInc=1000000,
-            nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 关闭几何非线性；TRANSIENT_FIDELITY(α≈-0.05)降数值阻尼，让物理材料阻尼主导
+        if tssi_cfg.get('enable') and tssi_cfg.get('nonlinear', True):  # step3：CDP材料非线性用自动增量(可回缩重试)，FIXED遇不收敛会直接中止
+            model.ImplicitDynamicsStep(
+                name=step_name, previous='Initial',
+                timePeriod=tp + tail, timeIncrementationMethod=AUTOMATIC,
+                initialInc=inc, minInc=inc * 1.0e-4, maxInc=inc, maxNumInc=1000000,
+                nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 若仍不收敛需按路线图 step3 转 Explicit
+        else:  # 纯坡地/弹性框架(已验证行为)：固定增量不变
+            model.ImplicitDynamicsStep(
+                name=step_name, previous='Initial',
+                timePeriod=tp + tail, timeIncrementationMethod=FIXED, initialInc=inc,
+                maxNumInc=1000000,
+                nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 关闭几何非线性；TRANSIENT_FIDELITY(α≈-0.05)降数值阻尼，让物理材料阻尼主导
 
         model.fieldOutputRequests['F-Output-1'].setValues(
             variables=variables, frequency=frequency)  # 指定输出变量和频率
@@ -2401,6 +2435,11 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         if isinstance(cfg.get('boundary_cfg'), dict):  # 人工边界吸收缩放覆盖（边界吸收对照实验）
             boundary_cfg.update(cfg['boundary_cfg'])  # 就地更新全局 boundary_cfg(扁平字典，与 eql_cfg 同模式)
             _merged_keys.append('boundary_cfg')
+        for _tssi_key, _tssi_dict in (('tssi_cfg', tssi_cfg), ('frame_cfg', frame_cfg), ('rebar_cfg', rebar_cfg)):  # TSSI三块含嵌套dict(column/beam)需深合并，就地更新(无需global)
+            if isinstance(cfg.get(_tssi_key), dict):
+                _merged = _deep_merge(_tssi_dict, cfg[_tssi_key])
+                _tssi_dict.clear(); _tssi_dict.update(_merged)
+                _merged_keys.append(_tssi_key)
         if logger:
             log_step(logger, '已合并配置段: %s', ', '.join(_merged_keys) if _merged_keys else '(无)')
             log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, i=%s, 阻尼=%s/%s, mesh_auto=%s, order=%s, 引擎=%s',  # 输出关键覆盖项
@@ -2461,18 +2500,11 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
 
 def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None, ffcfg=None,
                      sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None):  # 写出统一工况元数据（v7 理论台阶 + v8 自检 + v2 EQL）
-    """把本工况参数固化为当前工况文件夹的 case_meta.json（自包含、不依赖任何外部模块）。失败仅告警、不中断建模。
-
-    本函数是工况元数据的【唯一写入者 / 单一真相源】：所有派生量公式（a0_base、波速比、模型类型等）只在此处定义；
-    下游 Collect/Plot 仅读取生成的 JSON 数据、不共享本处代码，因此不存在跨 Abaqus/普通 Python 的字段口径漂移。
-    damping: 解析后的阻尼配置（含 fc），写入 'damping' 块（逐层 Q/xi/alpha/beta），供复现与追溯。
-    ffcfg  : 自由场引擎配置（v6），写入 'freefield' 块。
-    v6 新增 'ff_normalization' 块：TAF 解析分母（基岩半空间自由地表运动，论文式(5) 口径），
-    供 Compute_TAF_v2.py 直接读取：PGA_ff_h = factor_h × max|输入加速度|。
-    v7 新增：'surface_geometry' 键、geometry 块 x_crest/x_toe、derived 块 a0、
-    'ff_theory' 块（用 fd 引擎算左/右远场柱的一维理论台阶 taf_h/taf_v，QA 锚点）。
-    sgeom    : v7 表层几何模式；acc_path：首条输入记录路径（理论台阶用，None 则跳过 ff_theory）。
-    返回 ff_theory dict（计算成功时），否则 None（供主流程日志打印）。
+    """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
+    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、自由场配置及一维理论台阶等参数，
+    供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
+    返回：
+        一维解析自由场理论台阶(ff_theory)字典（计算成功时），否则返回 None。
     """
     try:  # 元数据写出不应影响建模主流程
         bedrock = _meta_material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料字典
@@ -2727,7 +2759,7 @@ def _run_freefield_eql(site, geom, eql_cfg, acc_in, dt, logger=None):  # 一维�
 
 
 # ==========================================================
-#  土体非线性 ② 逐单元 2D EQL（v2，重型；Abaqus 运行部分标 [需实测]）
+#  土体非线性 ② 逐单元 2D EQL
 # ==========================================================
 
 def _eql_bins_from_strains(geff_by_elem, n_bins):  # 纯函数：按有效剪应变给单元分箱(对数)
@@ -2905,6 +2937,89 @@ def rayleigh_coeffs(xi, f1, f2):
 
 
 # ==========================================================
+#  step3: 混凝土 CDP 单轴本构曲线（GB50010-2010 附录 C.2 经验公式）
+# ==========================================================
+
+def _monotone_inelastic_pairs(x_vals, stress_fn, damage_fn, eps_peak, E0):
+    """把(x=ε/ε_peak)采样点转成 Abaqus 要求的单调递增(应力,非弹性应变)与(损伤因子,非弹性应变)表。
+
+    x_vals按升序输入；返回 (hardening_pairs, damage_pairs)，均为 [(值, 非弹性应变Pa/无量纲), ...]，
+    首行非弹性应变强制为 0（代表本构开始偏离线弹性的起点应力/损伤）。
+    """
+    hardening, damage = [], []
+    zero_stress, zero_damage = None, 0.0
+    for x in x_vals:
+        eps_total = x * eps_peak
+        sigma = stress_fn(x)
+        d = min(max(damage_fn(x), 0.0), 0.999)
+        eps_in = eps_total - sigma / E0
+        if eps_in <= 0.0:
+            zero_stress, zero_damage = sigma, d  # 仍处线性段，记录该段末尾值供首行使用
+            continue
+        if not hardening:  # 第一次进入非线性，写入首行(非弹性应变=0)
+            hardening.append((zero_stress if zero_stress is not None else sigma, 0.0))
+            damage.append((zero_damage, 0.0))
+        if eps_in > hardening[-1][1] * (1.0 + 1e-9):  # 严格递增才追加(丢弃数值噪声导致的非递增点)
+            hardening.append((sigma, eps_in))
+            damage.append((d, eps_in))
+    if not hardening:  # 全程未进入非线性(极端参数兜底)，退化为单点
+        hardening.append((zero_stress if zero_stress is not None else stress_fn(x_vals[-1]), 0.0))
+        damage.append((zero_damage, 0.0))
+    return hardening, damage
+
+
+def _gb50010_concrete_cdp_curves(fc_mpa, ft_mpa, Ec_pa, n_pts=40):
+    """按 GB50010-2010 附录 C.2 单轴应力-应变与损伤因子经验公式生成 CDP 材料曲线(SI 单位, 直接喂 Abaqus)。
+
+    fc_mpa/ft_mpa: 轴心抗压/抗拉强度代表值(MPa)；Ec_pa: 弹性模量(Pa)。
+    返回 dict: comp_hardening/comp_damage/tension_stiffening/tension_damage，均为 Abaqus 表格式元组序列。
+    注：公式为规范附录经验拟合，未逐项与规范原文核对，实跑前建议抽查曲线首尾数值量级是否合理。
+    """
+    fc, ft, E0 = fc_mpa * 1.0e6, ft_mpa * 1.0e6, Ec_pa
+    eps_c = (700.0 + 172.0 * math.sqrt(fc_mpa)) * 1.0e-6         # 峰值压应变
+    alpha_a = 2.4 - 0.0125 * fc_mpa                              # 受压上升段参数
+    alpha_d = 0.157 * fc_mpa ** 0.785 - 0.905                    # 受压下降段参数
+    rho_c = fc / (E0 * eps_c)
+    n_c = E0 * eps_c / (E0 * eps_c - fc)
+    eps_t = 65.0e-6 * ft_mpa ** 0.54                             # 峰值拉应变
+    alpha_t = 0.312 * ft_mpa ** 2                                # 受拉下降段参数
+    rho_t = ft / (E0 * eps_t)
+
+    def comp_y(x):
+        return (alpha_a * x + (3.0 - 2.0 * alpha_a) * x ** 2 + (alpha_a - 2.0) * x ** 3) if x <= 1.0 \
+            else x / (alpha_d * (x - 1.0) ** 2 + x)
+
+    def comp_d(x):
+        return (1.0 - rho_c * n_c / (n_c - 1.0 + x ** n_c)) if x <= 1.0 \
+            else (1.0 - rho_c / (alpha_d * (x - 1.0) ** 2 + x))
+
+    def tens_y(x):
+        return (1.2 * x - 0.2 * x ** 6) if x <= 1.0 else x / (alpha_t * (x - 1.0) ** 1.7 + x)
+
+    def tens_d(x):
+        return (1.0 - rho_t * (1.2 - 0.2 * x ** 5)) if x <= 1.0 \
+            else (1.0 - rho_t / (alpha_t * (x - 1.0) ** 1.7 + x))
+
+    x_c = [0.02 + i * (5.0 - 0.02) / (n_pts - 1) for i in range(n_pts)]      # 受压：x 至 5(深入软化段)
+    x_t = [0.02 + i * (12.0 - 0.02) / (n_pts - 1) for i in range(n_pts)]     # 受拉：x 至 12(拉伸软化更慢)
+    comp_hardening, comp_damage = _monotone_inelastic_pairs(
+        x_c, lambda x: comp_y(x) * fc, comp_d, eps_c, E0)
+    tension_stiffening, tension_damage = _monotone_inelastic_pairs(
+        x_t, lambda x: tens_y(x) * ft, tens_d, eps_t, E0)
+    return {'comp_hardening': tuple(comp_hardening), 'comp_damage': tuple(comp_damage),
+            'tension_stiffening': tuple(tension_stiffening), 'tension_damage': tuple(tension_damage)}
+
+
+def _corner_rebar_positions(width, depth, cover, ratio):
+    """矩形截面 4 角配筋：按配筋率反算单根钢筋面积，四角对称布置。返回 [(area, x1, x2), ...]，x1沿宽度、x2沿深度(截面局部轴,原点=形心)。"""
+    a_total = ratio * width * depth
+    a_bar = a_total / 4.0
+    x1 = width / 2.0 - cover
+    x2 = depth / 2.0 - cover
+    return [(a_bar, x1, x2), (a_bar, -x1, x2), (a_bar, x1, -x2), (a_bar, -x1, -x2)]
+
+
+# ==========================================================
 #  框架 Part（局部基底 y=0；同 step2a）
 # ==========================================================
 
@@ -2929,6 +3044,21 @@ def build_frame_part(model, logger):
     mat.Density(table=((mc['density'],),))
     a_r, b_r = rayleigh_coeffs(mc['damping_ratio'], mc['f1'], mc['f2'])
     mat.Damping(alpha=a_r, beta=b_r)
+    if tssi_cfg.get('nonlinear', True):  # step3：混凝土 CDP 非线性(GB50010 附录C.2 本构) + 钢筋弹塑性材料
+        cdp = _gb50010_concrete_cdp_curves(mc['fc_mpa'], mc['ft_mpa'], mc['E'])
+        mat.ConcreteDamagedPlasticity(table=((mc['dilation_angle'], mc['eccentricity'], mc['fb0_fc0'],
+                                              mc['K'], mc['viscosity']),))
+        mat.concreteDamagedPlasticity.ConcreteCompressionHardening(table=cdp['comp_hardening'])
+        mat.concreteDamagedPlasticity.ConcreteCompressionDamage(table=cdp['comp_damage'])
+        mat.concreteDamagedPlasticity.ConcreteTensionStiffening(table=cdp['tension_stiffening'], type=STRAIN)
+        mat.concreteDamagedPlasticity.ConcreteTensionDamage(table=cdp['tension_damage'], type=STRAIN)
+        rc = rebar_cfg
+        mat_s = model.Material(name=rc['material'])
+        mat_s.Elastic(table=((rc['Es'], rc['nu']),))
+        mat_s.Density(table=((rc['density'],),))
+        mat_s.Plastic(table=((rc['fy'], 0.0), (rc['fy'] + rc['hardening_ratio'] * rc['Es'] * 0.05, 0.05)))
+        log_step(logger, u'框架材料: 混凝土CDP(fc=%.1fMPa,ft=%.2fMPa) + 钢筋%s(fy=%.0fMPa) 已定义',
+                 mc['fc_mpa'], mc['ft_mpa'], rc['material'], rc['fy'] / 1.0e6)
     col = frame_cfg['column']; bm = frame_cfg['beam']
     model.RectangularProfile(name='ColProf', a=col['width'], b=col['depth'])
     model.RectangularProfile(name='BeamProf', a=bm['width'], b=bm['depth'])
@@ -3003,11 +3133,68 @@ def add_frame_outputs(model_name, logger):
     log_step(logger, u'[%s] TSSI 框架输出已配: 坡顶参考 + %d 层', model_name, ns)
 
 
+def _find_beamsection_keyword_index(sie_blocks, elset_tag):
+    """在 keywordBlock.sieBlocks 中定位 '*Beam Section, elset=<elset_tag>...' 所在块索引(sieBlocks每项=整块非单行)，找不到返回 None。"""
+    prefix = '*Beam Section'
+    tag = 'elset=%s' % elset_tag
+    for i, line in enumerate(sie_blocks):
+        if line.startswith(prefix) and tag in line:
+            return i
+    return None
+
+
+def add_frame_rebar(model_name, logger):
+    """给已完成建步/边界/输出配置的 SSI 模型注入梁柱角部钢筋(*Rebar Line 关键字)。
+
+    Abaqus/CAE 图形化建模不支持梁截面钢筋（*REBAR LINE 只能通过关键字编辑器/脚本 keywordBlock 注入），
+    故用 model.keywordBlock 在 '*Beam Section, elset=COLS/BEAMS' 的截面尺寸数据行后插入钢筋定义。
+    按 Abaqus 惯例，keyword 编辑应是对模型的【最后一步操作】(此后不应再对该模型做图形化修改)，
+    故须在 build_models(建步+边界)与 add_frame_outputs(历史输出)都完成后、提交作业前调用。
+    """
+    if not tssi_cfg.get('nonlinear', True):  # 非线性关闭时(=step2弹性行为)不注入钢筋
+        return
+    model = mdb.models[model_name]
+    rc = rebar_cfg
+    col = frame_cfg['column']; bm = frame_cfg['beam']
+    col_bars = _corner_rebar_positions(col['width'], col['depth'], rc['cover'], rc['column']['ratio'])
+    beam_bars = _corner_rebar_positions(bm['width'], bm['depth'], rc['cover'], rc['beam']['ratio'])
+    model.keywordBlock.synchVersions(storeNodesAndElements=False)
+
+    def _rebar_text(bars, tag):
+        lines = ['*Rebar Line']
+        for k, (area, x1, x2) in enumerate(bars):
+            lines.append('%s-%d, %.6e, %.6f, %.6f, %s' % (tag, k + 1, area, x1, x2, rc['material']))
+        return '\n'.join(lines)
+
+    # 注：sieBlocks 每项是【整块】(*Beam Section 关键字行+其截面尺寸数据行合并为一个 String)，
+    # insert(position, text) 语义是"插到 position 这一块之后"，故直接用 idx（非 idx+1/+2）。
+    idx_c = _find_beamsection_keyword_index(model.keywordBlock.sieBlocks, 'COLS')
+    if idx_c is not None:
+        model.keywordBlock.insert(idx_c, _rebar_text(col_bars, 'RebarC'))
+    else:
+        log_step(logger, u'[%s] 未找到 *Beam Section elset=COLS 关键字块，柱钢筋注入跳过', model_name)
+
+    idx_b = _find_beamsection_keyword_index(model.keywordBlock.sieBlocks, 'BEAMS')  # 上次插入后块索引已整体后移，需重新查找
+    if idx_b is not None:
+        model.keywordBlock.insert(idx_b, _rebar_text(beam_bars, 'RebarB'))
+    else:
+        log_step(logger, u'[%s] 未找到 *Beam Section elset=BEAMS 关键字行，梁钢筋注入跳过', model_name)
+
+    n_eff_col = col_bars[0][0] / (math.pi * rc['column']['bar_diameter'] ** 2 / 4.0)  # 单角等效Φd实际根数(配筋率反算面积/单根面积)
+    n_eff_beam = beam_bars[0][0] / (math.pi * rc['beam']['bar_diameter'] ** 2 / 4.0)
+    log_step(logger, u'[%s] 梁柱钢筋已注入: 柱4角×%.0fmm²(≈%.1f根Φ%.0fmm), 梁4角×%.0fmm²(≈%.1f根Φ%.0fmm)',
+             model_name, col_bars[0][0] * 1.0e6, n_eff_col, rc['column']['bar_diameter'] * 1000,
+             beam_bars[0][0] * 1.0e6, n_eff_beam, rc['beam']['bar_diameter'] * 1000)
+
+
 def write_tssi_meta(logger):
     """写 tssi_meta.json：框架参数(供 SSI 后处理 Postprocess_SSI_response 读取)。"""
     meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
             'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
-            'inst_frame': 'Frame-1', 'T_fixed_step1': 0.5}  # T_fixed_step1: step1 固定基础 T1(周期延长基准)
+            'inst_frame': 'Frame-1', 'T_fixed_step1': 0.5,  # T_fixed_step1: step1 固定基础 T1(周期延长基准)
+            'nonlinear': bool(tssi_cfg.get('nonlinear', True)),  # step3: True=CDP混凝土+钢筋纤维截面
+            'concrete_fc_mpa': frame_material_cfg.get('fc_mpa'), 'concrete_ft_mpa': frame_material_cfg.get('ft_mpa'),
+            'rebar_ratio_column': rebar_cfg['column']['ratio'], 'rebar_ratio_beam': rebar_cfg['beam']['ratio']}
     with open('tssi_meta.json', 'w') as fh:
         json.dump(meta, fh, indent=2, ensure_ascii=False)
     log_step(logger, u'tssi_meta.json 已写(框架参数, 供 SSI 后处理)')
@@ -3168,6 +3355,7 @@ def main():
         if tssi_cfg.get('enable') and model_names:  # TSSI: 各波 SSI 模型追加框架层历史输出(步已建)
             for _mn in model_names:
                 add_frame_outputs(_mn, logger)
+                add_frame_rebar(_mn, logger)  # step3：keyword注入梁柱钢筋，须最后调用(其后不再对模型做图形化修改)
 
         log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
         for model_name in model_names:
