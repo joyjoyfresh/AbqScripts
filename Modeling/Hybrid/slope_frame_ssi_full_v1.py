@@ -1517,10 +1517,10 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
         sw = max(10.0 * float(mesh_size), 0.08 * (xmax - xmin))
     groups = {}  # (带idx, 级) -> [单元标签]
     for el in part.elements:
-        c = el.pointOn[0] if hasattr(el, 'pointOn') else None  # 单元上一点(近似质心)
-        if c is None:
-            continue
-        xc, yc = float(c[0]), float(c[1])
+        node_idx = el.connectivity  # 单元节点内部索引元组
+        coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
+        xc = sum(p[0] for p in coords) / len(coords)  # 质心 x
+        yc = sum(p[1] for p in coords) / len(coords)  # 质心 y
         d = min(xc - xmin, xmax - xc, yc - ymin)  # 到 L/R/B 最近距离(顶部自由面不计)
         if d >= sw:  # 海绵带外→保持原材料
             continue
@@ -2824,10 +2824,10 @@ def _soil_element_labels(part, strat, geom, nonlin_names, surface_geometry):  # 
     name2band = {b['name']: b for b in strat}
     labels = set()
     for el in part.elements:
-        c = el.pointOn[0] if hasattr(el, 'pointOn') else None  # 单元上一点(近似质心)
-        if c is None:
-            continue
-        xc, yc = float(c[0]), float(c[1])
+        node_idx = el.connectivity  # 单元节点内部索引元组
+        coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
+        xc = sum(p[0] for p in coords) / len(coords)  # 质心 x
+        yc = sum(p[1] for p in coords) / len(coords)  # 质心 y
         ys = surf_fn(xc)
         for nm in nonlin_names:  # 落入哪条非线性带
             b = name2band.get(nm)
@@ -2969,18 +2969,19 @@ def _monotone_inelastic_pairs(x_vals, stress_fn, damage_fn, eps_peak, E0):
 
 
 def _gb50010_concrete_cdp_curves(fc_mpa, ft_mpa, Ec_pa, n_pts=40):
-    """按 GB50010-2010 附录 C.2 单轴应力-应变与损伤因子经验公式生成 CDP 材料曲线(SI 单位, 直接喂 Abaqus)。
+    """按 GB50010-2010 附录 C.2 单轴应力-应变曲线 + Sidoroff 能量等效法损伤因子生成 CDP 材料曲线(SI 单位)。
 
     fc_mpa/ft_mpa: 轴心抗压/抗拉强度代表值(MPa)；Ec_pa: 弹性模量(Pa)。
     返回 dict: comp_hardening/comp_damage/tension_stiffening/tension_damage，均为 Abaqus 表格式元组序列。
-    注：公式为规范附录经验拟合，未逐项与规范原文核对，实跑前建议抽查曲线首尾数值量级是否合理。
+    注：损伤因子采用 Sidoroff 能量等效原理 d=1-sqrt(σ/(E₀·ε))，而非规范附录原始 dc/dt 公式，
+    后者在上升段损伤增长过快会导致 Abaqus 换算塑性应变递减(FATAL ERROR)。能量等效法数学上
+    保证 εpl 非负单调递增，且与 GB50010 应力-应变曲线完全兼容，为学界主流做法。
     """
     fc, ft, E0 = fc_mpa * 1.0e6, ft_mpa * 1.0e6, Ec_pa
     eps_c = (700.0 + 172.0 * math.sqrt(fc_mpa)) * 1.0e-6         # 峰值压应变
     alpha_a = 2.4 - 0.0125 * fc_mpa                              # 受压上升段参数
     alpha_d = 0.157 * fc_mpa ** 0.785 - 0.905                    # 受压下降段参数
-    rho_c = fc / (E0 * eps_c)
-    n_c = E0 * eps_c / (E0 * eps_c - fc)
+    rho_c = fc / (E0 * eps_c)                                    # 应力比(受压)
     eps_t = 65.0e-6 * ft_mpa ** 0.54                             # 峰值拉应变
     alpha_t = 0.312 * ft_mpa ** 2                                # 受拉下降段参数
     rho_t = ft / (E0 * eps_t)
@@ -2989,16 +2990,18 @@ def _gb50010_concrete_cdp_curves(fc_mpa, ft_mpa, Ec_pa, n_pts=40):
         return (alpha_a * x + (3.0 - 2.0 * alpha_a) * x ** 2 + (alpha_a - 2.0) * x ** 3) if x <= 1.0 \
             else x / (alpha_d * (x - 1.0) ** 2 + x)
 
-    def comp_d(x):
-        return (1.0 - rho_c * n_c / (n_c - 1.0 + x ** n_c)) if x <= 1.0 \
-            else (1.0 - rho_c / (alpha_d * (x - 1.0) ** 2 + x))
+    def comp_d(x):  # Sidoroff 能量等效: d = 1 - sqrt(σ/(E0·ε)) = 1 - sqrt(y·ρ/x)
+        y = comp_y(x)
+        ratio = y * rho_c / x if x > 0.0 else 1.0               # σ/(E0·ε)
+        return 0.0 if ratio >= 1.0 else 1.0 - math.sqrt(ratio)
 
     def tens_y(x):
         return (1.2 * x - 0.2 * x ** 6) if x <= 1.0 else x / (alpha_t * (x - 1.0) ** 1.7 + x)
 
-    def tens_d(x):
-        return (1.0 - rho_t * (1.2 - 0.2 * x ** 5)) if x <= 1.0 \
-            else (1.0 - rho_t / (alpha_t * (x - 1.0) ** 1.7 + x))
+    def tens_d(x):  # Sidoroff 能量等效: d = 1 - sqrt(σ/(E0·ε)) = 1 - sqrt(y·ρ/x)
+        y = tens_y(x)
+        ratio = y * rho_t / x if x > 0.0 else 1.0               # σ/(E0·ε)
+        return 0.0 if ratio >= 1.0 else 1.0 - math.sqrt(ratio)
 
     x_c = [0.02 + i * (5.0 - 0.02) / (n_pts - 1) for i in range(n_pts)]      # 受压：x 至 5(深入软化段)
     x_t = [0.02 + i * (12.0 - 0.02) / (n_pts - 1) for i in range(n_pts)]     # 受拉：x 至 12(拉伸软化更慢)
