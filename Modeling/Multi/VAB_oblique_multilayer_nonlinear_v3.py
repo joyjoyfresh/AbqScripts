@@ -120,7 +120,7 @@ boundary_cfg = {
     'dashpot_scale': 1.0,               # 阻尼器(吸收)cn,ct 缩放：1.0=全吸收(Liu)/0<k<1=弱吸收/0=纯弹簧全反射
     'spring_scale': 1.0,                # 弹簧(恢复)kn,kt 缩放：1.0=现行(α0.5/0.25)/2.0=标准Liu/0=纯黏性(弹簧关)
     'sponge_enable': False,             # 边界内侧阻尼海绵层开关(opt-in)：L/R/B 内侧加渐变阻尼带吸收残余反射
-    'sponge_width': 0.0,                # 海绵带宽 m：0=自动(10×基准网格)；建议≥若干主波长
+    'sponge_width': 0.0,                # 海绵带宽 m：0=自动 max(10×基准网格,8%域宽)；graded 网格远场粗须用域宽项
     'sponge_grades': 5,                 # 海绵分级数：阻尼从内缘 0 渐增到贴边界，级越多越平滑
     'sponge_xi_max': 0.3,               # 贴边界处附加阻尼比(占主频 fc)：海绵最外层 ξ 附加量，0.3≈强吸收
 }
@@ -1441,11 +1441,11 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
         return
     ngrade = max(1, int(boundary_cfg.get('sponge_grades', 5)))  # 分级数
     xi_max = float(boundary_cfg.get('sponge_xi_max', 0.3))      # 贴边界处附加阻尼比(占主频)
-    sw = float(boundary_cfg.get('sponge_width', 0.0))           # 海绵带宽 m
-    if sw <= 0.0:  # 0=自动：10 倍基准网格(约 10 单元宽)
-        sw = 10.0 * float(mesh_size)
     xs = [n.coordinates[0] for n in part.nodes]; ys_all = [n.coordinates[1] for n in part.nodes]  # 域包围盒
     xmin, xmax, ymin = min(xs), max(xs), min(ys_all)
+    sw = float(boundary_cfg.get('sponge_width', 0.0))           # 海绵带宽 m
+    if sw <= 0.0:  # 0=自动：max(10×基准网格, 8%域宽)——graded 网格远场单元粗，纯 10×网格常过小、捕不到单元
+        sw = max(10.0 * float(mesh_size), 0.08 * (xmax - xmin))
     groups = {}  # (带idx, 级) -> [单元标签]
     for el in part.elements:
         c = el.pointOn[0] if hasattr(el, 'pointOn') else None  # 单元上一点(近似质心)
