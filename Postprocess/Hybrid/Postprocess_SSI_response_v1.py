@@ -136,7 +136,7 @@ def main():
         print(u'■ %s' % rec)
         print(u'  周期延长: T_ssi=%.3fs / T_fixed=%.3fs = %.2f%s'
               % (r['T_ssi'] or 0, r['T_fixed'], r['period_ratio'] or 0,
-                 u' ✓' if r['period_ratio'] and r['period_ratio'] > 1.02 else u''))
+                 u' [显著]' if r['period_ratio'] and r['period_ratio'] > 1.02 else u''))
         print(u'  基底剪力=%.3eN  最大层间位移角=%.4f' % (r['base_shear'], r['max_drift']))
         print(u'  坡顶基础 PGA=%.3f  顶层 PGA=%.3f  建筑放大(顶/坡顶)=%.2f×'
               % (r['crest_pga'], r['roof_pga'], r['building_amp'] or 0))

@@ -14,3 +14,9 @@ venv/
 *.swp
 *.swo
 
+# Abaqus 工作目录，整个不进版本库
+test/Abaqus/
+
+# OpenSees 工作目录，整个不进版本库
+test/OpenSees/
+

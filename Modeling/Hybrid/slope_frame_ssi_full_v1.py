@@ -37,34 +37,35 @@ from collections import namedtuple
 material_cfg = {
     'angle': 15,                        # SV 波入射角度（度）
     'surface_geometry': 'horizontal',   #! 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
-    # 基岩材料参数
+    # 基岩材料参数（剪切波速直接给定，杨氏模量由 E=2ρVs²(1+ν) 内部换算）
     'bedrock': {
-        'elastic_modulus': 26e9,        # 基岩杨氏模量（Pa），对应 Vs = 2000 m/s
+        'vs': 2000.0,                   # 基岩剪切波速（m/s）
         'poisson_ratio': 0.3,           # 基岩泊松比
         'density': 2500,                # 基岩密度（kg/m^3）
     },
-    # 基岩之上的有限层（自顶向下配置；最底层为覆盖层，厚度由几何决定）
+    # 基岩之上的土层（自顶向下配置，每层显式给定厚度；剩余深度全部归基岩；layers=[] 即全基岩坡）
     'layers': [
         {'name': 'surface',             # 表层名称
-        'velocity_ratio': 5.0,          # 该层波速比 Vr/Vs1
+        'vs': 400.0,                    # 表层剪切波速（m/s）
         'poisson_ratio': 0.3,           # 该层泊松比
         'density': 2500,                # 该层密度（kg/m^3）
-        'thickness': 50},               # 该层固定厚度（m）
+        'thickness': 50},               # 该层厚度（m）
         {'name': 'overlying',           # 覆盖层
-        'velocity_ratio': 2.5,          # 覆盖层波速比 Vr/Vs2
+        'vs': 800.0,                    # 覆盖层剪切波速（m/s）
         'poisson_ratio': 0.3,           # 覆盖层泊松比
-        'density': 2500},               # 覆盖层密度（kg/m^3，厚度由几何决定）
+        'density': 2500,                # 覆盖层密度（kg/m^3）
+        'thickness': 350},              # 该层厚度（m，坡顶面以下 50+350=400，与旧默认模型一致）
     ],
 }
 
 # 几何参数配置
 geometry_cfg = {
-    'H_minus_h': 200.0,                 # 斜坡高度差 H - h (m)
-    'i': 45.0,                          # 斜坡倾角 (度)
-    'h_over_H': 0.5,                    # 深度比 h / H
-    'total_L': 1800.0,                  # 总模型长度 (m)
-    'left_flat': 1000.0,                # 上平台长度 (m)
-    'bedrock_thickness': 200.0,         # 基岩层厚度 (m)
+    'slope_height': 200.0,              # 坡高 hs = 坡顶与坡脚地表高程差 (m)——唯一绝对尺度
+    'slope_angle': 45.0,                # 坡角 (度)
+    'crest_window': 3.0,                # 坡顶观测窗（hs 倍数，计划书 A_max；地形放大 x/h≈3~4 已衰减回 1）
+    'toe_window': 2.0,                  # 坡脚观测窗（hs 倍数，计划书 C_max）
+    'side_clearance': 1.0,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
+    'base_depth': 2.0,                  # 坡脚面以下模型深度（hs 倍数，恒定不随地层变；土层扣完剩余全归基岩）
 }
 
 # 作业参数配置
@@ -199,7 +200,7 @@ frame_material_cfg = {
     'viscosity': 0.0005,                 # CDP 粘性正则化参数(小值,助收敛,不显著改变本构)
 }
 
-# 框架钢筋配置（HRB400，角部配筋；纤维截面用 *Rebar Line 关键字注入，Abaqus/CAE 不支持梁钢筋图形化建模）
+# 框架钢筋配置（HRB400，角部配筋；纤维截面用 *Rebar, element=BEAM 关键字注入，Abaqus/CAE 不支持梁钢筋图形化建模）
 rebar_cfg = {
     'material': 'Rebar_HRB400',          # 钢筋材料名称
     'Es': 200.0e9,                       # 钢筋弹性模量（Pa）
@@ -240,13 +241,13 @@ _FD_SOLVER_CACHE = {}  # fd 引擎缓存：键=round(ymax_col,4) 的柱解；另
 #   派生量 GG/lam/cp/EE 仍由物理核心函数按需计算，故此处只存输入。
 #   thickness=None 表示：基岩半空间，或最底有限层（覆盖层，厚度由几何决定）。
 Material = namedtuple('Material', ['cs', 'vv', 'density', 'thickness', 'name'])  # 单层材料输入
-# Site：基岩半空间 + 有限层列表（layers 从上到下）+ 基岩层厚度
-Site = namedtuple('Site', ['bedrock', 'layers', 'bedrock_thickness'])  # 多层场地（支持 0/1/2... 个有限层）
-# Geometry：斜坡几何（输入项 + 一次算好的派生项）
+# Site：基岩半空间 + 土层列表（layers 从上到下，厚度均显式给定）+ 基岩顶面高程（=坡顶地表−Σ土层厚）
+Site = namedtuple('Site', ['bedrock', 'layers', 'bedrock_thickness'])  # 多层场地（支持 0/1/2... 个土层）
+# Geometry：斜坡几何（外形输入项 + 一次算好的派生项；H/h/h_over_H 为派生记录量，h 可负=基岩坡面出露）
 Geometry = namedtuple('Geometry', [
-    'total_L', 'i', 'left_flat', 'H_minus_h', 'h_over_H', 'bedrock_thickness',  # 输入项
+    'total_L', 'i', 'left_flat', 'H_minus_h', 'h_over_H', 'bedrock_thickness',  # 外形与地层派生
     'H', 'h', 'H_upper', 'H_lower', 'H_flat', 'w_slope',  # 派生项
-    'layer_interfaces'])  # 派生项：固定层间界面 y（从下到上，不含基岩界面），用于切分与材料分配
+    'layer_interfaces'])  # 派生项：土层间界面 y（从下到上，不含基岩顶面），用于切分与材料分配
 # BoundaryNode：单个边界节点的几何与粘弹性边界参数（取代裸 numpy 列索引）
 BoundaryNode = namedtuple('BoundaryNode',
                           ['label', 'x', 'y', 'influence', 'kn', 'cn', 'kt', 'ct'])  # 边界节点
@@ -366,11 +367,6 @@ def _ensure_str(obj):  # 递归将 unicode 转为原生 str（Py2 兼容 Abaqus 
 # ==========================================================
 
 
-def _compute_wave_speed_from_elastic_modulus(elastic_modulus, poisson_ratio, density):
-    """根据杨氏模量、泊松比和密度计算剪切波速。"""
-    return math.sqrt((elastic_modulus / (2 * (1 + poisson_ratio))) / density)
-
-
 def _compute_elastic_modulus_from_wave_speed(cs, vv, density):
     """根据剪切波速、泊松比和密度计算杨氏模量 E。"""
     GG = density * (cs ** 2)
@@ -480,14 +476,11 @@ def _site_fundamental_freq(site, geom):  # 估算上平台柱场地基频 f_site
     供 damping_cfg['anchor']=='dual' 的瑞利双控拟合使用（f1 锚定 min(f1_factor·fc, f_site)），
     对应 research_plan.md 中"场地基频与输入卓越频率双控"的设计要点。
     """
-    if not site.layers:  # 均质场地（无有限层）
+    if not site.layers:  # 均质场地（无土层）
         return None
-    fixed_sum = sum([L.thickness for L in site.layers if L.thickness is not None])
     travel = 0.0
-    for L in site.layers:  # 自上而下遍历有限层
-        d = L.thickness if L.thickness is not None else (geom.H_upper - geom.bedrock_thickness - fixed_sum)
-        if d > 0:
-            travel += d / float(L.cs)
+    for L in site.layers:  # 自上而下遍历土层（厚度均显式给定）
+        travel += float(L.thickness) / float(L.cs)
     if travel <= 0:
         return None
     return 1.0 / (4.0 * travel)  # 场地基频 f_site = 1/(4Σd/Vs)
@@ -507,15 +500,11 @@ def _band_resonance_freq(band):
 
 
 def _material_resonance_freq(mat, site, geom):  # 由材料层厚估算共振基频（meta 用，与分层带同口径）
-    """返回有限层 mat 的共振基频 cs/(4·d)；固定厚度层取 thickness，最底覆盖层厚度由几何推算。
+    """返回土层 mat 的共振基频 cs/(4·d)；厚度均显式给定。
 
-    仅对有限层调用（基岩半空间无共振概念，应由调用方传 None）。厚度无效返回 None。
+    仅对土层调用（基岩半空间无共振概念，应由调用方传 None）。厚度无效返回 None。
     """
-    if mat.thickness is not None:  # 固定厚度层
-        d = float(mat.thickness)
-    else:  # 最底覆盖层：厚度 = 上平台覆盖总厚 − 其上各固定层厚之和
-        fixed_sum = sum([L.thickness for L in site.layers if L.thickness is not None])
-        d = float(geom.H_upper - geom.bedrock_thickness - fixed_sum)
+    d = float(mat.thickness)  # 该层厚度（土层厚度均显式给定）
     if d <= 0:
         return None
     return float(mat.cs) / (4.0 * d)  # 四分之一波长共振基频
@@ -602,44 +591,40 @@ def _build_stratigraphy(site, geom, ymin=0.0, surface_geometry='horizontal'):
     返回 list，每项 dict：{'name','mat'(Material),'y0','y1','fix',...}；
     y0/y1 为该带的【标称】下/上界 y（按上平台地表 H_upper 计），
     fix 标记该带边界如何随柱地表高度换算（见 _band_bounds_at）：
-      'elevation' : 上下界为固定高程（基岩带；horizontal 模式下的全部带）；
-      'depth'     : 上下界为距局部地表的固定埋深 d0/d1（terrain 模式的固定厚度表层）；
-      'fill'      : 下界固定高程 y0、上界=局部地表−dtop（terrain 模式的最底有限层/覆盖层）。
-    顺序：基岩带在前（最底），向上依次为覆盖层(最底有限层)…表层(最顶有限层)。
-    单层(site.layers 为空)时只返回基岩带（其上界取坡顶 H_upper，即全场均质基岩）。
+      'elevation' : 上下界为固定高程（horizontal 模式下的全部带）；
+      'depth'     : 上下界为距局部地表的固定埋深 d0/d1（terrain 模式的土层带）；
+      'fill'      : 下界固定高程 y0、上界=局部地表−dtop（terrain 模式的基岩带，顶面随地形）。
+    顺序：基岩带在前（最底），向上依次为各土层（每层厚度均显式给定，剩余深度归基岩）。
+    全基岩坡(site.layers 为空)时只返回基岩带（其上界取坡顶 H_upper）。
     """
-    H_upper = geom.H_upper  # 坡顶地表高度（最顶有限层标称上界基准）
-    bt = geom.bedrock_thickness  # 基岩界面 y
-    layers_td = list(site.layers)  # 有限层（从上到下）
+    H_upper = geom.H_upper  # 坡顶地表高度（最顶土层标称上界基准）
+    bt = geom.bedrock_thickness  # 基岩顶面高程（=坡顶地表 − Σ土层厚）
+    layers_td = list(site.layers)  # 土层（从上到下）
     if not layers_td:
         return [{'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': H_upper, 'fix': 'elevation'}]  # 全场均质基岩带
     terrain = (surface_geometry == 'terrain')  # 是否沿地形等厚铺设
     bands_td = []
     y_top = H_upper
     depth_top = 0.0
-    for L in layers_td:  # 自上而下遍历有限层
-        if L.thickness is not None:  # 固定厚度层（表层等）
-            band = {'name': L.name, 'mat': L, 'y0': y_top - L.thickness, 'y1': y_top}  # 标称上下界（上平台口径）
-            if terrain:  # terrain 模式：该层按"距局部地表的埋深"定位
-                band['fix'] = 'depth'
-                band['d0'] = depth_top  # 该层顶埋深
-                band['d1'] = depth_top + L.thickness
-            else:  # horizontal 模式：固定高程水平带
-                band['fix'] = 'elevation'
-            bands_td.append(band)
-            y_top -= L.thickness
-            depth_top += L.thickness
-        else:  # 最底有限层（覆盖层，厚度由几何决定，填充至基岩界面）
-            band = {'name': L.name, 'mat': L, 'y0': bt, 'y1': y_top}  # 标称：基岩界面到剩余高度
-            if terrain:  # terrain 模式：上界跟随"局部地表 − 累计固定埋深"
-                band['fix'] = 'fill'
-                band['dtop'] = depth_top  # 其上界距局部地表的埋深
-            else:  # horizontal 模式
-                band['fix'] = 'elevation'
-            bands_td.append(band)
-    bedrock_band = {'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': bt, 'fix': 'elevation'}  # 基岩带（恒为固定高程）
+    for L in layers_td:  # 自上而下遍历土层（厚度均显式给定）
+        band = {'name': L.name, 'mat': L, 'y0': y_top - L.thickness, 'y1': y_top}  # 标称上下界（上平台口径）
+        if terrain:  # terrain 模式：该层按"距局部地表的埋深"定位
+            band['fix'] = 'depth'
+            band['d0'] = depth_top  # 该层顶埋深
+            band['d1'] = depth_top + L.thickness
+        else:  # horizontal 模式：固定高程水平带
+            band['fix'] = 'elevation'
+        bands_td.append(band)
+        y_top -= L.thickness
+        depth_top += L.thickness
+    bedrock_band = {'name': site.bedrock.name, 'mat': site.bedrock, 'y0': ymin, 'y1': bt}  # 基岩带（标称上界=基岩顶面）
+    if terrain:  # terrain 模式：基岩顶面随地形（=局部地表 − 土层总厚）
+        bedrock_band['fix'] = 'fill'
+        bedrock_band['dtop'] = depth_top  # 基岩顶面距局部地表的埋深（=Σ土层厚）
+    else:  # horizontal 模式：基岩顶面为固定高程
+        bedrock_band['fix'] = 'elevation'
     bands_bt = list(reversed(bands_td))  # 反转为"从下到上"
-    return [bedrock_band] + bands_bt  # 基岩带在前 + 有限层带（从下到上）
+    return [bedrock_band] + bands_bt  # 基岩带在前 + 土层带（从下到上）
 
 
 def _band_bounds_at(band, ys):
@@ -662,24 +647,84 @@ def _band_bounds_at(band, ys):
 # ==========================================================
 
 
-def make_geometry(total_L, H_minus_h, i, h_over_H, left_flat, bedrock_thickness, fixed_thicknesses=None):
-    """根据斜坡几何输入计算全部派生量并打包为 Geometry。
+def _resolve_geometry_cfg(gcfg, logger=None):  # 无量纲几何设计 → 引擎绝对尺寸
+    """把以坡高 hs 为基准的无量纲几何设计换算成引擎所需的绝对尺寸。
 
-    fixed_thicknesses: 顶部各有限层的固定厚度列表（从上到下，不含最底覆盖层），
-        用于推算固定层间界面 y。空/None 表示双层或单层（无固定层间界面）。
+    参数
+    ----
+    gcfg : dict
+        无量纲几何设计（6 个键全部必填，观测窗/净空/深度均为 hs 倍数）：
+        slope_height 坡高 hs (m，唯一绝对尺度)；slope_angle 坡角(度)；
+        crest_window/toe_window 坡顶/坡脚观测窗；side_clearance 侧向边界净空；
+        base_depth 坡脚面以下模型深度（恒定，不随地层配置变）。
+    logger : 日志器（None 则不打印换算结果）
+
+    返回
+    ----
+    dict：引擎几何键 {total_L, left_flat, H_minus_h, i, H_lower}，
+    其中 H_lower=base_depth·hs 为坡脚地表高程（模型底边 y=0）。
+
+    换算公式：left_flat=(crest_window+side_clearance)·hs；w_slope=hs/tan(i)；
+    right_flat=(toe_window+side_clearance)·hs；total_L=三段之和。
+    几何只定外形，地层划分（各土层厚度、基岩顶面）全部由 material_cfg['layers'] 决定。
     """
-    H = H_minus_h / (1.0 - h_over_H)
-    h = H - H_minus_h
-    H_upper = bedrock_thickness + H
-    H_lower = bedrock_thickness + h
-    H_flat = bedrock_thickness + H
+    hs = float(gcfg['slope_height'])  # 坡高（唯一绝对尺度）
+    i_deg = float(gcfg['slope_angle'])  # 坡角（度）
+    crest_win = float(gcfg['crest_window'])  # 坡顶观测窗倍数
+    toe_win = float(gcfg['toe_window'])  # 坡脚观测窗倍数
+    clear = float(gcfg['side_clearance'])  # 侧向净空倍数
+    base = float(gcfg['base_depth'])  # 坡脚面以下深度倍数
+    if not (hs > 0.0):
+        raise ValueError('slope_height(坡高)必须>0，当前: %r' % gcfg['slope_height'])  # 尺度非法
+    if not (0.0 < i_deg < 90.0):
+        raise ValueError('slope_angle 需在(0,90)度内，当前: %r' % gcfg['slope_angle'])  # 坡角非法
+    if min(crest_win, toe_win, clear) < 0.0:
+        raise ValueError('crest_window/toe_window/side_clearance 需>=0: %r/%r/%r'
+                         % (crest_win, toe_win, clear))  # 倍数非法
+    if base < 1.0:
+        raise ValueError('base_depth 需>=1（保证底部至少留出基岩净空），当前: %r' % gcfg['base_depth'])  # 深度不足
+    left_flat = (crest_win + clear) * hs  # 坡顶平台 = 观测窗 + 净空
+    right_flat = (toe_win + clear) * hs  # 坡脚平台 = 观测窗 + 净空
+    w_slope = hs / math.tan(math.radians(i_deg))  # 坡面水平长（仅换算 total_L 用，派生量仍由 make_geometry 统一算）
+    total_L = left_flat + w_slope + right_flat  # 总长随 hs、坡角浮动
+    resolved = {'H_minus_h': hs,  # 引擎键：斜坡高度差
+                'i': i_deg,  # 引擎键：坡角
+                'left_flat': left_flat,  # 引擎键：上平台长度
+                'total_L': total_L,  # 引擎键：模型总长
+                'H_lower': base * hs}  # 引擎键：坡脚地表高程（=坡脚面以下模型深度）
+    if logger is not None:  # 打印换算结果，供日志核对
+        log_step(logger, '几何换算(hs=%.1f m): left_flat=%.1f(%.2fh) + w_slope=%.1f(%.2fh) + right_flat=%.1f(%.2fh) = total_L=%.1f(%.2fh); 坡脚面以下深度=%.1f(%.2fh)',
+                 hs, left_flat, left_flat / hs, w_slope, w_slope / hs,
+                 right_flat, right_flat / hs, total_L, total_L / hs,
+                 resolved['H_lower'], base)
+    return resolved
+
+
+def make_geometry(total_L, H_minus_h, i, left_flat, toe_surface_y, soil_thicknesses=None):
+    """根据斜坡外形与土层厚度表计算全部派生量并打包为 Geometry。
+
+    toe_surface_y    : 坡脚地表高程（=base_depth·hs，模型底边 y=0，所有工况一致）
+    soil_thicknesses : 各土层厚度列表（从上到下，全部显式给定；空/None=全基岩坡）
+
+    基岩顶面高程 bedrock_thickness = 坡顶地表 − Σ土层厚（土层扣完剩余全归基岩）。
+    H/h/h_over_H 仅作派生记录量（对位论文口径）：H=坡顶下土层总厚，h=坡脚下土层厚，
+    h 可为负（土层总厚<坡高 → 基岩在坡面出露），全基岩坡时 H=0、h_over_H=None。
+    """
+    soil = [float(t) for t in (soil_thicknesses or [])]  # 土层厚度表（从上到下）
+    H_lower = float(toe_surface_y)  # 坡脚地表高程
+    H_upper = H_lower + H_minus_h  # 坡顶地表高程
+    H_flat = H_upper  # 平坦对照模型地表高程（与坡顶齐平）
     w_slope = H_minus_h / math.tan(math.radians(i))
-    fixed = list(fixed_thicknesses or [])  # 规范化为列表（默认空）
+    total_soil = sum(soil)  # 土层总厚
+    bedrock_thickness = H_upper - total_soil  # 基岩顶面高程（=旧口径"基岩厚度"，底边 y=0）
+    H = total_soil  # 派生记录：坡顶下土层总厚
+    h = H_lower - bedrock_thickness  # 派生记录：坡脚下土层厚（可为负=基岩坡面出露）
+    h_over_H = (h / H) if H > 0.0 else None  # 派生记录：深度比（全基岩坡无定义）
     layer_interfaces = []
     cum = 0.0
-    for t in fixed:  # 自上而下遍历各固定层厚度
+    for t in soil[:-1]:  # 自上而下遍历土层间界面（最底土层底界=基岩顶面，单列字段）
         cum += t
-        layer_interfaces.append(H_upper - cum)  # 该层底界面 y = 坡顶 - 累计固定厚度
+        layer_interfaces.append(H_upper - cum)  # 该层底界面 y = 坡顶 - 累计厚度
     layer_interfaces = sorted(layer_interfaces)
     return Geometry(total_L=total_L, i=i, left_flat=left_flat, H_minus_h=H_minus_h,
                     h_over_H=h_over_H, bedrock_thickness=bedrock_thickness,
@@ -1519,8 +1564,8 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
     for el in part.elements:
         node_idx = el.connectivity  # 单元节点内部索引元组
         coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
-        xc = sum(p[0] for p in coords) / len(coords)  # 质心 x
-        yc = sum(p[1] for p in coords) / len(coords)  # 质心 y
+        xc = sum([p[0] for p in coords]) / len(coords)  # 质心 x（用列表避免通配 sum 拒收生成器）
+        yc = sum([p[1] for p in coords]) / len(coords)  # 质心 y
         d = min(xc - xmin, xmax - xc, yc - ymin)  # 到 L/R/B 最近距离(顶部自由面不计)
         if d >= sw:  # 海绵带外→保持原材料
             continue
@@ -2334,36 +2379,41 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
 
 
 def build_site(material_cfg, geometry_cfg):
-    """由配置构建 Site 对象（基岩 + 从上到下的有限层列表），并校验层厚约束。
+    """由配置构建 Site 对象（基岩 + 从上到下的土层列表），并校验厚度与基岩净空。
 
-    单层(layers 为空)→ 仅基岩；双层 → 基岩 + 覆盖层；三层 → 基岩 + 表层 + 覆盖层。
-    返回 (site, fixed_thicknesses)，fixed_thicknesses 为顶部各固定层厚度（从上到下，供 make_geometry 用）。
+    每个土层必须显式给定正厚度 thickness；剩余深度全部归基岩（半空间+底部净空）。
+    layers 为空 → 全基岩坡。返回 (site, soil_thicknesses)，
+    soil_thicknesses 为各土层厚度（从上到下，供 make_geometry 推界面用）。
     """
-    cs_bedrock = _compute_wave_speed_from_elastic_modulus(
-        material_cfg['bedrock']['elastic_modulus'],  # 基岩杨氏模量
-        material_cfg['bedrock']['poisson_ratio'],  # 基岩泊松比
-        material_cfg['bedrock']['density'])  # 基岩密度
+    cs_bedrock = float(material_cfg['bedrock']['vs'])  # 基岩剪切波速（直接给定）
+    if cs_bedrock <= 0.0:
+        raise ValueError('bedrock.vs(基岩剪切波速)必须>0，当前: %r' % material_cfg['bedrock']['vs'])  # 波速非法
     bedrock = Material(cs=cs_bedrock, vv=material_cfg['bedrock']['poisson_ratio'],  # 构建基岩材料（半空间）
                        density=material_cfg['bedrock']['density'], thickness=None, name='Bedrock')  # 基岩无固定厚度
     layers_cfg = material_cfg.get('layers', [])
     layers = []
-    fixed_thicknesses = []
-    nL = len(layers_cfg)  # 有限层数量
-    for idx, lc in enumerate(layers_cfg):  # 自上而下遍历各有限层配置
-        cs = cs_bedrock / lc['velocity_ratio']
-        is_bottom = (idx == nL - 1)  # 是否为最底有限层（覆盖层，厚度由几何决定）
-        thickness = None if is_bottom else lc['thickness']  # 最底层厚度为 None，其余取固定厚度
-        if not is_bottom:
-            fixed_thicknesses.append(lc['thickness'])
+    soil_thicknesses = []
+    for lc in layers_cfg:  # 自上而下遍历各土层配置
+        cs = float(lc['vs'])  # 该层剪切波速（直接给定）
+        if cs <= 0.0:
+            raise ValueError('层[%s].vs(剪切波速)必须>0，当前: %r' % (lc.get('name'), lc['vs']))  # 波速非法
+        if lc.get('thickness') is None:
+            raise ValueError('层[%s]必须显式给定 thickness（土层不再自动填充，剩余厚度归基岩）' % lc.get('name'))  # 厚度缺失
+        t = float(lc['thickness'])  # 该层厚度
+        if t <= 0.0:
+            raise ValueError('层[%s].thickness 必须>0，当前: %r' % (lc.get('name'), lc['thickness']))  # 厚度非法
+        soil_thicknesses.append(t)
         layers.append(Material(cs=cs, vv=lc['poisson_ratio'], density=lc['density'],
-                               thickness=thickness, name=lc['name']))
-    site = Site(bedrock=bedrock, layers=layers, bedrock_thickness=geometry_cfg['bedrock_thickness'])
-    # 层厚约束校验：覆盖层须有正厚度（坡顶 H - 顶部固定厚度之和 > 0）
-    H = geometry_cfg['H_minus_h'] / (1.0 - geometry_cfg['h_over_H'])  # 总覆盖厚度 H
-    if sum(fixed_thicknesses) >= H - 1e-6 and nL >= 1:  # 顶部固定层之和不得吃光覆盖层厚度
-        raise ValueError('顶部固定层厚度之和(%.2f) >= 总覆盖厚 H(%.2f)，覆盖层无正厚度' %  # 抛出层厚错误
-                         (sum(fixed_thicknesses), H))
-    return site, fixed_thicknesses
+                               thickness=t, name=lc['name']))
+    # 基岩净空校验：基岩顶面高程 = 坡顶地表 − Σ土层厚，须留 ≥2·坡高 的底部 VAB 净空
+    hs = float(geometry_cfg['H_minus_h'])  # 坡高
+    H_upper = float(geometry_cfg['H_lower']) + hs  # 坡顶地表高程
+    bedrock_top = H_upper - sum(soil_thicknesses)  # 基岩顶面高程
+    if bedrock_top < 2.0 * hs - 1e-6:
+        raise ValueError('土层总厚(%.2f)过大: 基岩顶面高程 %.2f < 底部净空要求 2h=%.2f（需 Σt ≤ base_depth·h − h）' %
+                         (sum(soil_thicknesses), bedrock_top, 2.0 * hs))  # 抛出净空错误
+    site = Site(bedrock=bedrock, layers=layers, bedrock_thickness=bedrock_top)
+    return site, soil_thicknesses
 
 
 def _deep_merge(base, override):
@@ -2442,8 +2492,8 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
                 _merged_keys.append(_tssi_key)
         if logger:
             log_step(logger, '已合并配置段: %s', ', '.join(_merged_keys) if _merged_keys else '(无)')
-            log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, i=%s, 阻尼=%s/%s, mesh_auto=%s, order=%s, 引擎=%s',  # 输出关键覆盖项
-                     material_cfg.get('angle'), len(material_cfg.get('layers', [])), geometry_cfg.get('i'),
+            log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, 坡角=%s, 阻尼=%s/%s, mesh_auto=%s, order=%s, 引擎=%s',  # 输出关键覆盖项
+                     material_cfg.get('angle'), len(material_cfg.get('layers', [])), geometry_cfg.get('slope_angle'),
                      damping_cfg.get('enable'), damping_cfg.get('method'),
                      mesh_cfg_out.get('auto'), max_reflect_order_out,
                      ff_cfg_out.get('engine'))
@@ -2702,11 +2752,9 @@ def _run_freefield_eql(site, geom, eql_cfg, acc_in, dt, logger=None):  # 一维�
     sigma0 = float(eql_cfg.get('sigma0_kpa', 100.0)); ratio = float(eql_cfg.get('strain_ratio', 0.65))
     tol = float(eql_cfg.get('tol', 0.02)); maxit = int(eql_cfg.get('max_iter', 15))
     nonlin_names = set(eql_cfg.get('nonlinear_layers', ['surface']))
-    fixed_sum = sum([L.thickness for L in site.layers if L.thickness is not None])
     Vs0, rho, h, names, nonlin = [], [], [], [], []
     for L in site.layers:
-        thk = L.thickness if L.thickness is not None else (geom.H_upper - geom.bedrock_thickness - fixed_sum)
-        Vs0.append(float(L.cs)); rho.append(float(L.density)); h.append(float(thk))
+        Vs0.append(float(L.cs)); rho.append(float(L.density)); h.append(float(L.thickness))  # 土层厚度均显式给定
         names.append(L.name); nonlin.append(L.name in nonlin_names)
     Vs0 = np.array(Vs0); rho = np.array(rho); h = np.array(h); nonlin = np.array(nonlin)
     Vb, rhob, xib = float(site.bedrock.cs), float(site.bedrock.density), 0.005
@@ -2826,8 +2874,8 @@ def _soil_element_labels(part, strat, geom, nonlin_names, surface_geometry):  # 
     for el in part.elements:
         node_idx = el.connectivity  # 单元节点内部索引元组
         coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
-        xc = sum(p[0] for p in coords) / len(coords)  # 质心 x
-        yc = sum(p[1] for p in coords) / len(coords)  # 质心 y
+        xc = sum([p[0] for p in coords]) / len(coords)  # 质心 x（用列表避免通配 sum 拒收生成器）
+        yc = sum([p[1] for p in coords]) / len(coords)  # 质心 y
         ys = surf_fn(xc)
         for nm in nonlin_names:  # 落入哪条非线性带
             b = name2band.get(nm)
@@ -3147,9 +3195,9 @@ def _find_beamsection_keyword_index(sie_blocks, elset_tag):
 
 
 def add_frame_rebar(model_name, logger):
-    """给已完成建步/边界/输出配置的 SSI 模型注入梁柱角部钢筋(*Rebar Line 关键字)。
+    """给已完成建步/边界/输出配置的 SSI 模型注入梁柱角部钢筋(*Rebar, element=BEAM 关键字)。
 
-    Abaqus/CAE 图形化建模不支持梁截面钢筋（*REBAR LINE 只能通过关键字编辑器/脚本 keywordBlock 注入），
+    Abaqus/CAE 图形化建模不支持梁截面钢筋（*REBAR 只能通过关键字编辑器/脚本 keywordBlock 注入），
     故用 model.keywordBlock 在 '*Beam Section, elset=COLS/BEAMS' 的截面尺寸数据行后插入钢筋定义。
     按 Abaqus 惯例，keyword 编辑应是对模型的【最后一步操作】(此后不应再对该模型做图形化修改)，
     故须在 build_models(建步+边界)与 add_frame_outputs(历史输出)都完成后、提交作业前调用。
@@ -3163,23 +3211,26 @@ def add_frame_rebar(model_name, logger):
     beam_bars = _corner_rebar_positions(bm['width'], bm['depth'], rc['cover'], rc['beam']['ratio'])
     model.keywordBlock.synchVersions(storeNodesAndElements=False)
 
-    def _rebar_text(bars, tag):
-        lines = ['*Rebar Line']
+    def _rebar_text(bars, tag, elset_tag):
+        # NAME/MATERIAL 是 *Rebar 关键字参数(非数据行字段)；数据行首列须是elset/单元标签(非面积)，此处整个elset共用同一根钢筋定义
+        blocks = []
         for k, (area, x1, x2) in enumerate(bars):
-            lines.append('%s-%d, %.6e, %.6f, %.6f, %s' % (tag, k + 1, area, x1, x2, rc['material']))
-        return '\n'.join(lines)
+            name = '%s-%d' % (tag, k + 1)
+            blocks.append('*Rebar, element=BEAM, material=%s, name=%s\n%s, %.6e, %.6f, %.6f'
+                           % (rc['material'], name, elset_tag, area, x1, x2))
+        return '\n'.join(blocks)
 
     # 注：sieBlocks 每项是【整块】(*Beam Section 关键字行+其截面尺寸数据行合并为一个 String)，
     # insert(position, text) 语义是"插到 position 这一块之后"，故直接用 idx（非 idx+1/+2）。
     idx_c = _find_beamsection_keyword_index(model.keywordBlock.sieBlocks, 'COLS')
     if idx_c is not None:
-        model.keywordBlock.insert(idx_c, _rebar_text(col_bars, 'RebarC'))
+        model.keywordBlock.insert(idx_c, _rebar_text(col_bars, 'RebarC', 'COLS'))
     else:
         log_step(logger, u'[%s] 未找到 *Beam Section elset=COLS 关键字块，柱钢筋注入跳过', model_name)
 
     idx_b = _find_beamsection_keyword_index(model.keywordBlock.sieBlocks, 'BEAMS')  # 上次插入后块索引已整体后移，需重新查找
     if idx_b is not None:
-        model.keywordBlock.insert(idx_b, _rebar_text(beam_bars, 'RebarB'))
+        model.keywordBlock.insert(idx_b, _rebar_text(beam_bars, 'RebarB', 'BEAMS'))
     else:
         log_step(logger, u'[%s] 未找到 *Beam Section elset=BEAMS 关键字行，梁钢筋注入跳过', model_name)
 
@@ -3224,8 +3275,10 @@ def main():
         mesh_size = float(_mesh_cfg.get('size', 4.0))  # v9.1：基准网格尺寸改由 mesh_cfg['size'] 提供（兼容旧顶层 mesh_size）
         MAX_REFLECT_ORDER = _max_reflect_order  # 全局更新反射截断阶数（仅 ray 引擎使用）
 
-        # 构建场地材料（基岩 + 有限层列表）并校验层厚
-        site, fixed_thicknesses = build_site(material_cfg, geometry_cfg)
+        geometry_cfg = _resolve_geometry_cfg(geometry_cfg, logger)  # 无量纲几何设计 → 绝对尺寸（研究计划§2.1，total_L 浮动）
+
+        # 构建场地材料（基岩 + 土层列表）并校验厚度与基岩净空
+        site, soil_thicknesses = build_site(material_cfg, geometry_cfg)
         n_total_layers = 1 + len(site.layers)  # 总层数（含基岩）
         sgeom = str(material_cfg.get('surface_geometry', 'horizontal'))  # v7：表层几何模式（可由 case_config.json 注入）
         if sgeom not in ('horizontal', 'terrain'):  # 校验模式合法性
@@ -3234,20 +3287,20 @@ def main():
                  n_total_layers, [L.name for L in site.layers], sgeom)
         log_step(logger, '基岩: Vs=%.0f m/s, ν=%.2f, ρ=%.0f kg/m³',
                  site.bedrock.cs, site.bedrock.vv, site.bedrock.density)
-        for _L in site.layers:  # 逐层记录有限层波速与厚度
-            _thk = _L.thickness if _L.thickness is not None else '由几何决定'  # 该层厚度（最底覆盖层由几何决定）
+        for _L in site.layers:  # 逐层记录土层波速与厚度
             _vr = site.bedrock.cs / _L.cs if _L.cs > 0 else None  # 该层相对基岩波速比
-            log_step(logger, '有限层[%s]: Vs=%.0f m/s, Vr/Vs=%.2f, ν=%.2f, ρ=%.0f, 厚度=%s',
-                     _L.name, _L.cs, _vr, _L.vv, _L.density, _thk)
+            log_step(logger, '土层[%s]: Vs=%.0f m/s, Vr/Vs=%.2f, ν=%.2f, ρ=%.0f, 厚度=%.1f m',
+                     _L.name, _L.cs, _vr, _L.vv, _L.density, _L.thickness)
+        log_step(logger, '基岩顶面高程=%.1f m（坡脚面以下深度 %.1f m 恒定，土层扣完剩余归基岩）',
+                 site.bedrock_thickness, geometry_cfg['H_lower'])
 
         geom = make_geometry(
             total_L=geometry_cfg['total_L'],  # 模型总长度
             H_minus_h=geometry_cfg['H_minus_h'],  # 斜坡高度差
             i=geometry_cfg['i'],  # 斜坡倾角
-            h_over_H=geometry_cfg['h_over_H'],  # 深度比 h/H
             left_flat=geometry_cfg['left_flat'],  # 上平台长度
-            bedrock_thickness=geometry_cfg['bedrock_thickness'],  # 基岩层厚度
-            fixed_thicknesses=fixed_thicknesses)  # 顶部固定层厚度（推算固定层间界面）
+            toe_surface_y=geometry_cfg['H_lower'],  # 坡脚地表高程（坡脚面以下深度恒定）
+            soil_thicknesses=soil_thicknesses)  # 各土层厚度（从上到下，推层间界面与基岩顶面）
 
         acc_info = find_acc_txt(logger)
 

@@ -32,7 +32,7 @@
 ### 目录组织规则
 
 1. **文档**（.md/.docx）统一放 `/docs`；为方便查阅可改描述性名（用中文名 + `_v{n}`）。
-2. **测试**统一放项目根目录 `/test/<模块>/`（按模块分子文件夹，如 `test/Multi`、`test/Hybrid`）。
+2. **测试**统一放项目根目录 `/test/` 下，具体分类规则见下方"代码测试规则"。
 3. **后处理脚本**统一放 `/Postprocess/<模块>/`（已有 `General`/`Multi`/`Single`/`Hybrid` 子文件夹）。
 4. **建模脚本**留在 `Modeling/<模块>/`。
 5. **批处理** `Autorun_*.py` 放 `/Batch`。
@@ -40,5 +40,7 @@
 
 ### 代码测试规则
 
-1. 测试文件统一放项目根目录 `/test/<模块>/` 子文件夹（按模块分类），在其中运行。
-2. Abaqus脚本的测试可以直接运行，不需要进入Abaqus环境。
+1. 纯Python测试（不跑Abaqus/OpenSees求解器）统一放项目根目录 `/test/<模块>/` 子文件夹（按模块分类，如 `test/Multi`、`test/Hybrid`），在其中运行，正常入库。
+2. OpenSees相关测试（脚本+运行产物，如.tcl/.out/.log）统一放 `/test/OpenSees/`，与其他模块测试分开，该目录整体 `.gitignore` 排除，不进版本库。
+3. Abaqus相关测试（脚本+运行产物）统一放 `/test/Abaqus/`，该目录整体 `.gitignore` 排除，不进版本库。
+4. Abaqus测试脚本以 `Batch/Autorun_template_v1.py` 为模板，放 `test/Batch/` 下，可直接运行，不需要进入Abaqus环境：用 `sys.argv[1]` 接收工况根目录（否则回退 `__file__` 所在目录），命令行两个路径都用绝对路径，按 `python C:\Users\12462\Documents\Code\AbqScripts\test\Batch\Autorun_xxx_v1.py C:\Users\12462\Documents\Code\AbqScripts\test\Abaqus\xxx-test` 的形式运行，把产物指到 `/test/Abaqus/` 下对应工况文件夹。
