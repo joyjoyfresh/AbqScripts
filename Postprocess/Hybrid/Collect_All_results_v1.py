@@ -14,13 +14,25 @@ import shutil  # 导入文件复制模块
 import csv  # 导入 CSV 写入模块
 import io  # 导入 io 模块
 import json  # 导入 JSON 模块
+try:
+    if hasattr(sys, 'setdefaultencoding'):  # 仅在 Python 2 下执行
+        eval("reload(sys)")  # 用 eval 动态执行，避开 Python 3 静态分析对未定义 reload 的报错
+        sys.setdefaultencoding('utf-8')  # 设置默认编码
+except Exception:
+    pass
+
 
 
 # ==============================================================================
 #  配置
 # ==============================================================================
-COLLECT_PREFIXES = ('TAF', 'PGA', 'TIMESERIES', 'surface_response', 'H_surface_h', 'H_surface_v', 'H_topo_h')  # 收集前缀 / 包含旧前缀与新后处理前缀
+COLLECT_PREFIXES = ('TAF', 'PGA', 'TIMESERIES', 'surface_response', 'H_surface_h', 'H_surface_v', 'H_topo_h',
+                    'sgrid_response', 'sgrid_H_surface_h', 'sgrid_H_surface_v', 'sgrid_H_topo_h')  # 收集前缀 / 含 v2 统一 s 子网格对齐产物
 KNOWN_PREFIXES = [  # 已知前缀转换映射表 / 长度从长到短排列防截断错误
+    ('sgrid_H_surface_h_', 'SGRID_H_SURFACE_H'),  # 对齐水平传函（v2 重采样）
+    ('sgrid_H_surface_v_', 'SGRID_H_SURFACE_V'),  # 对齐竖向传函（v2 重采样）
+    ('sgrid_H_topo_h_', 'SGRID_H_TOPO_H'),  # 对齐地形谱比（v2 重采样）
+    ('sgrid_response_', 'SGRID_RESPONSE'),  # 对齐响应表（v2 重采样）
     ('surface_response_', 'SURFACE_RESPONSE'),  # 地表响应
     ('H_surface_h_', 'H_SURFACE_H'),  # 水平地表传函
     ('H_surface_v_', 'H_SURFACE_V'),  # 竖向地表传函
@@ -130,6 +142,18 @@ def _flatten(meta):  # 展平嵌套元数据为规范一维字典
     }
 
 
+def _to_py2_str(val):  # 兼容 Py2/Py3 字符串转码
+    """在 Python 2.7 下将 unicode 递归编码为 utf-8 字节串；Python 3 下保持原样。"""
+    if sys.version_info[0] < 3:  # 处于 Python 2 环境
+        if isinstance(val, unicode):  # unicode 字符
+            return val.encode('utf-8')  # 编码
+        elif isinstance(val, (list, tuple)):  # 列表元组
+            return [_to_py2_str(item) for item in val]  # 递归转换
+        elif isinstance(val, dict):  # 字典
+            return {k: _to_py2_str(v) for k, v in val.items()}  # 递归转换键值
+    return val  # 保持原样
+
+
 def split_csv_name(stem):  # 剥离前缀并解析场景与记录名
     """通过最长匹配原则将文件名剥离为类型、记录名和场景。
 
@@ -175,7 +199,11 @@ def main():  # 主入口逻辑
     root = sys.argv[1] if len(sys.argv) >= 2 else os.getcwd()  # 收集根目录路径
     root = os.path.abspath(root)  # 转换为绝对路径
     out_dir = os.path.abspath(sys.argv[2]) if len(sys.argv) >= 3 else os.path.join(root, OUT_DIRNAME)  # 集中输出路径
-    os.makedirs(out_dir, exist_ok=True)  # 创建集中输出目录
+    if not os.path.exists(out_dir):  # 检查输出目录是否存在
+        try:  # 尝试创建目录
+            os.makedirs(out_dir)  # 递归创建目录
+        except OSError:  # 异常忽略
+            pass
     print('>>> 收集根目录: %s' % root)  # 输出提示
     print('>>> 输出目录:   %s' % out_dir)  # 输出提示
 
@@ -207,7 +235,7 @@ def main():  # 主入口逻辑
             print('--- %s  (警告: 缺 case_meta.json，元数据列留空，建议重跑补元数据) ---' % entry)  # 提示用户警告
         else:  # 元数据存在
             meta_flat = _flatten(meta)  # 展平元数据列
-            print('--- %s  (type=%s, i=%s, θs=%s, n_layers=%s, Vr/Vs2=%s) ---' % (  # 打印工况摘要信息
+            print('--- %s  (type=%s, i=%s, theta_s=%s, n_layers=%s, Vr/Vs2=%s) ---' % (  # 打印工况摘要信息
                 entry, meta_flat.get('model_type'), meta_flat.get('slope_i'),
                 meta_flat.get('incident_angle'), meta_flat.get('n_layers_total'),
                 meta_flat.get('vr_over_vs2')))
@@ -254,11 +282,20 @@ def main():  # 主入口逻辑
     # 将清单写出至 index.csv 文件中
     index_path = os.path.join(out_dir, 'index.csv')  # 清单输出绝对路径
     fields = BASE_FIELDS + list(INDEX_META_FIELDS) + ['AR_max', 'suspect']  # 表头组合清单列
-    with open(index_path, 'w', newline='', encoding='utf-8-sig') as f:  # UTF-8 带 BOM CSV 写入
+    if sys.version_info[0] >= 3:  # 处于 Python 3 环境
+        f = io.open(index_path, 'w', newline='', encoding='utf-8-sig')  # 自动写 BOM
+    else:  # 处于 Python 2 环境
+        f = open(index_path, 'wb')  # 二进制写入模式避免 csv write 编码冲突
+        f.write('\xef\xbb\xbf')  # 手动写 UTF-8 BOM 字节以使 Excel 能够识别
+        
+    try:  # 安全块写入
         w = csv.DictWriter(f, fieldnames=fields)  # 创建写入器
         w.writeheader()  # 写表头
         for row in manifest:  # 循环行
-            w.writerow({k: row.get(k) for k in fields})  # 单独提取写入规范的列数据
+            clean_row = {k: _to_py2_str(row.get(k)) for k in fields}  # 转换 unicode
+            w.writerow(clean_row)  # 写入 csv 行
+    finally:
+        f.close()  # 确保关闭文件句柄
 
     print('\n>>> 完成：从 %d 个工况文件夹收集 %d 个 CSV 到 %s' % (n_folders, n_files, out_dir))  # 结束提示
     if n_missing_meta:  # 提示缺失元数据状况

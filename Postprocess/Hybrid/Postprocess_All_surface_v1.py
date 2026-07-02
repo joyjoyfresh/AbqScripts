@@ -38,17 +38,24 @@ import math
 import numpy as np
 
 openOdb = None  # 占位
-# 仅当解释器为 Abaqus 时才导入 odbAccess，防止普通 Python 启动时发生 OdbAccess 的自举行为
-exe_name = os.path.basename(sys.executable).lower()
-if 'abq' in exe_name or 'abaqus' in exe_name:
+is_abaqus = False
+try:
+    # 尝试导入 abaqusConstants，若成功说明处于 Abaqus 环境。该导入在普通 Python 下抛出 ImportError 且无自举风险。
+    import abaqusConstants
+    is_abaqus = True
+except ImportError:
+    pass
+
+if is_abaqus:
     try:
         from odbAccess import openOdb  # Abaqus ODB 接口
     except Exception:
         pass
 
 try:
-    reload(sys)                       # noqa: F821  Py2.7 控制台中文输出兜底
-    sys.setdefaultencoding('utf-8')   # noqa
+    if hasattr(sys, 'setdefaultencoding'):  # 仅在 Python 2 下执行
+        eval("reload(sys)")                 # 动态求值以避开 Pylance 静态检查
+        sys.setdefaultencoding('utf-8')
 except Exception:
     pass
 
