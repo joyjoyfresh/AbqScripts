@@ -9,6 +9,8 @@
   4. 多线程并行执行。
   5. 自动清理指定的中间大文件（如 odb/inp 等）。
   6. 执行全局汇总与出图的后处理脚本。
+  7. 地震波经 run_cfg.wave_files 注入（波形文件留在源目录，不拷贝进工况文件夹，
+     要求建模脚本支持 case_config.json 的 run_cfg['wave_files'] 键）。
 """
 
 import os  # 导入操作系统相关路径与目录操作模块
@@ -24,8 +26,12 @@ DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim"]  # 
 MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
 
-STATIC_SOURCE_PATHS = [  # 固定源文件路径列表，将拷入每个工况文件夹
-    # r"C:\path\to\your\wave.txt",  # 示例源文件路径 / 需替换为实际输入波或控制文件路径
+STATIC_SOURCE_PATHS = [  # 固定源文件路径列表，将拷入每个工况文件夹（地震波不走这里，用 WAVE_FILES 注入）
+    # r"C:\path\to\your\control_file.dat",  # 示例源文件路径 / 需替换为实际控制文件路径
+]
+
+WAVE_FILES = [  # 全局兜底地震波列表：工况 config 未写 run_cfg.wave_files 时注入；留空且工况也未写=不注入（建模脚本回退扫工况目录 .txt）
+    # r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",  # 示例主脉冲 / 排首条兼作阻尼 fc 自估源
 ]
 
 SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路径
@@ -38,21 +44,27 @@ POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行�
     # r"C:\path\to\your\plot.py",  # 绘图脚本路径 / 绘制汇总对比图表
 ]
 
-PARAMETER_CASES = [  # 变参数工况列表，每项需包含 config 配置覆盖字典
+PARAMETER_CASES = [  # 变参数工况列表，每项需包含 config 配置覆盖字典；工况级 run_cfg.wave_files 优先于全局 WAVE_FILES
     {
-        "name": "case_example_1",  # 工况名称 / 可选，若省略则按 config 自动命名
+        "name": "case_example_1",  # 工况名称 / 可选，若省略则按 config 自动命名（含波形文件名）
         "config": {  # 参数覆盖字典 / 建模脚本中需通过读取 json 文件覆盖默认配置
             "material": {"velocity": 800.0, "density": 2500.0},  # 材料配置 / 速度与密度值
             "geometry": {"slope_angle": 30.0},  # 几何配置 / 边坡角度
             "mesh_size": 2.0,  # 网格尺寸 / 网格最大尺寸
+            "run_cfg": {"wave_files": [  # 工况级地震波 / 每个工况可指定不同波
+                r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",  # 本工况用 4Hz 主脉冲
+            ]},
         }
     },
     {
-        "name": "case_example_2",  # 工况名称 / 可选，若省略则按 config 自动命名
+        "name": "case_example_2",  # 工况名称 / 可选，若省略则按 config 自动命名（含波形文件名）
         "config": {  # 参数覆盖字典
             "material": {"velocity": 1200.0, "density": 2500.0},  # 材料配置 / 速度与密度值
             "geometry": {"slope_angle": 45.0},  # 几何配置 / 边坡角度
             "mesh_size": 2.0,  # 网格尺寸 / 网格最大尺寸
+            "run_cfg": {"wave_files": [  # 工况级地震波 / 与工况1不同波
+                r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_2Hz.txt",  # 本工况用 2Hz 补低频脉冲
+            ]},
         }
     }
 ]
@@ -159,7 +171,9 @@ def name_from_config(config):  # 根据配置字典自动生成唯一的工况�
     for key, val in sorted(config.items()):  # 遍历一级配置键值对
         if isinstance(val, dict):  # 若值为子字典结构
             for sub_key, sub_val in sorted(val.items()):  # 遍历二级键值对
-                if not isinstance(sub_val, (dict, list)):  # 仅提取标量基本类型
+                if sub_key == "wave_files" and isinstance(sub_val, (list, tuple)):  # 波形列表：取文件名主干参与命名（区分同参数不同波的工况）
+                    tokens.extend(os.path.splitext(os.path.basename(str(p)))[0] for p in sub_val)  # 逐条追加波名片段
+                elif not isinstance(sub_val, (dict, list)):  # 仅提取标量基本类型
                     tokens.append("{}{}".format(sub_key, _fmt_num(sub_val)))  # 拼接二级键名与数值
         elif not isinstance(val, list):  # 若值为一级标量基本类型
             tokens.append("{}{}".format(key, _fmt_num(val)))  # 拼接一级键名与数值
@@ -179,6 +193,42 @@ def build_folder_name(case):  # 确定工况文件夹名称
     if not tag:  # 若未指定
         tag = name_from_config(case.get("config") or {})  # 根据配置字典自动生成
     return "{}{}".format(FOLDER_PREFIX, _sanitize(tag))  # 返回拼接前缀后的规范化名称
+
+
+def resolve_wave_files(config):  # 解析单工况最终使用的地震波列表（工况级优先，全局 WAVE_FILES 兜底）
+    """解析单工况最终使用的地震波列表。
+
+    参数说明:
+        config (dict): 单工况参数覆盖字典。
+
+    返回值:
+        list: 绝对路径波形列表；工况级 run_cfg.wave_files 优先，否则用全局 WAVE_FILES，均未配置返回空列表。
+    """
+    wf = ((config or {}).get("run_cfg") or {}).get("wave_files")  # 工况级波形配置
+    if wf:  # 工况显式指定
+        wf_list = wf if isinstance(wf, (list, tuple)) else [wf]  # 允许单条字符串写法
+    else:  # 未指定则用全局兜底
+        wf_list = WAVE_FILES
+    return [os.path.abspath(str(p)) for p in wf_list]  # 统一转绝对路径
+
+
+def inject_wave_files(config):  # 把解析后的地震波列表写入工况配置的 run_cfg.wave_files
+    """把解析后的地震波列表写入工况配置的 run_cfg.wave_files。
+
+    参数说明:
+        config (dict): 单工况参数覆盖字典。
+
+    返回值:
+        dict: 注入后的配置副本（波形路径已绝对化）；全局与工况级均未配置波形时原样返回。
+    """
+    wave_list = resolve_wave_files(config)  # 解析最终波形列表
+    if not wave_list:  # 无任何波形配置
+        return config  # 原样返回（建模脚本回退扫目录旧行为）
+    new_config = dict(config)  # 浅拷贝避免污染 PARAMETER_CASES 原字典
+    new_run_cfg = dict(config.get("run_cfg") or {})  # 拷贝运行控制配置
+    new_run_cfg["wave_files"] = wave_list  # 写入绝对化后的波形列表
+    new_config["run_cfg"] = new_run_cfg  # 挂回配置副本
+    return new_config  # 返回注入后的配置
 
 
 def create_and_fill_folder(folder_path, source_files, config):  # 创建目录并注入配置文件与源文件
@@ -264,6 +314,16 @@ def main():  # 批处理主控制流程
         sys.exit(1)  # 异常退出
     if not ensure_no_duplicate_targets(duplicate_items):  # 校验并处理复制文件名冲突
         sys.exit(1)  # 异常退出
+    missing_waves = [("WAVE_FILES", p) for p in WAVE_FILES if not os.path.isfile(os.path.abspath(str(p)))]  # 校验全局波形存在性
+    for idx, case in enumerate(PARAMETER_CASES, start=1):  # 校验各工况级波形存在性
+        if isinstance(case, dict):  # 非法工况节点留给后续 config 校验报错
+            missing_waves.extend(("第{}组工况".format(idx), p) for p in resolve_wave_files(case.get("config"))
+                                 if not os.path.isfile(p))  # 记录该工况缺失的波形
+    if missing_waves:  # 存在缺失波形文件
+        print("错误：以下地震波文件不存在，请检查 WAVE_FILES 或工况级 run_cfg.wave_files：")  # 打印错误提示头
+        for src, p in missing_waves:  # 遍历缺失记录
+            print("  - [{}] {}".format(src, p))  # 打印来源与缺失路径
+        sys.exit(1)  # 异常退出
     if not PARAMETER_CASES:  # 若工况列表为空
         print("错误：PARAMETER_CASES 为空，请至少配置一组工况。")  # 打印工况缺失提示
         sys.exit(1)  # 异常退出
@@ -295,7 +355,7 @@ def main():  # 批处理主控制流程
         folder_path = os.path.join(root_dir, folder_name)  # 拼接工况绝对路径
         print("\n==============================")  # 打印工况分隔符
         print("开始处理文件夹：{}".format(folder_path))  # 打印开始处理的工况路径
-        create_and_fill_folder(folder_path, source_files, config)  # 建立工况文件夹并准备好配置与物理源文件
+        create_and_fill_folder(folder_path, source_files, inject_wave_files(config))  # 建立工况文件夹并注入配置（含地震波路径）与物理源文件
         ok = run_scripts_in_folder(folder_path, run_order)  # 顺序在目录下启动指定运行脚本
         if types_to_delete:  # 若设置了需要清理的中间格式文件
             delete_files_by_type(folder_path, types_to_delete)  # 清理中间大文件

@@ -125,6 +125,7 @@ freefield_cfg = {
 run_cfg = {
     'surface_only': True,               # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
     'critical_angle_check': False,      # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
+    'wave_files': None,                 #! 地震波文件路径：None=扫工况目录全部.txt(旧行为)/字符串或列表=指定文件(绝对路径或相对工况目录)
 }
 
 # 人工边界配置
@@ -747,14 +748,34 @@ def _build_model_name_from_record(acc_file, scene_tag):
 # ==========================================================
 
 
-def find_acc_txt(logger=None):
-    """查找当前工作目录下所有 .txt 文件，并读取每个加速度文件的分析步时长和增量步。"""
+def find_acc_txt(logger=None, wave_files=None):
+    """检索加速度时程文件，读取每个文件的分析步时长和增量步。
+
+    wave_files : None=扫当前工作目录全部 .txt（旧行为）；
+                 字符串或列表=使用指定文件（绝对路径或相对工况目录），
+                 来源为 case_config.json 的 run_cfg['wave_files']，任一文件缺失即报错中止。
+    返回 [(文件路径, 分析时长, 初始增量), ...]。
+    """
     cwd = os.getcwd()
-    txt_files = sorted([f for f in os.listdir(cwd) if f.lower().endswith('.txt')])
-    if logger:
-        log_step(logger, '开始检索加速度时程文件: 目录=%s, 命中 %d 个 .txt 文件', cwd, len(txt_files))
-    if len(txt_files) == 0:
-        raise IOError('当前目录 {} 下未找到任何 .txt 文件'.format(cwd))  # 抛出文件缺失异常
+    if wave_files:  # 注入了指定波形文件 → 按给定路径读取，不扫目录
+        if not isinstance(wave_files, (list, tuple)):  # 允许单条字符串写法
+            wave_files = [wave_files]
+        txt_files = []
+        for p in wave_files:
+            p = str(p)  # JSON 注入经 _ensure_str 已为 str，此处兜底
+            full = p if os.path.isabs(p) else os.path.abspath(os.path.join(cwd, p))  # 相对路径按工况目录解析
+            if not os.path.isfile(full):  # 指定文件必须存在，缺失立即中止（防止静默漏波）
+                raise IOError('run_cfg[wave_files] 指定的地震波文件不存在: {}'.format(full))
+            txt_files.append(full)
+        if logger:
+            log_step(logger, '使用注入的地震波文件(run_cfg.wave_files): 共 %d 条: %s',
+                     len(txt_files), ', '.join(txt_files))
+    else:  # 旧行为：扫工况目录下全部 .txt
+        txt_files = sorted([f for f in os.listdir(cwd) if f.lower().endswith('.txt')])
+        if logger:
+            log_step(logger, '开始检索加速度时程文件: 目录=%s, 命中 %d 个 .txt 文件', cwd, len(txt_files))
+        if len(txt_files) == 0:
+            raise IOError('当前目录 {} 下未找到任何 .txt 文件'.format(cwd))  # 抛出文件缺失异常
 
     result = []
     for f in txt_files:
@@ -3302,7 +3323,7 @@ def main():
             toe_surface_y=geometry_cfg['H_lower'],  # 坡脚地表高程（坡脚面以下深度恒定）
             soil_thicknesses=soil_thicknesses)  # 各土层厚度（从上到下，推层间界面与基岩顶面）
 
-        acc_info = find_acc_txt(logger)
+        acc_info = find_acc_txt(logger, wave_files=_run_cfg.get('wave_files'))  # 波形来源：注入路径优先，否则扫工况目录
 
         # 解析材料阻尼：若未显式指定主频 fc，则用首条加速度记录估计（多记录同 fc 是标准用法；不同 fc 时以首条为准）
         fc_est = None
