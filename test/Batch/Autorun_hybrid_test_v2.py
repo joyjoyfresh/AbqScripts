@@ -26,11 +26,11 @@ CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置�
 STATIC_SOURCE_PATHS = []  # 测试不需要拷入其他静态源文件 / 空列表
 
 WAVE_FILES = [  # 全局地震波绝对路径 / 作为单工况的主地震波
-    os.path.join(REPO_ROOT, 'Wave', 'Impulse', 'Acceleration', 'ricker_wavelet_4Hz.txt'),  # Ricker 4Hz 绝对路径
+    # os.path.join(REPO_ROOT, 'Wave', 'Impulse', 'Acceleration', 'ricker_wavelet_4Hz.txt'),  # Ricker 4Hz 绝对路径
 ]
 
 SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路径
-    os.path.join(REPO_ROOT, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v1.py'),  # 第1步：进行真实的有限元建模和模拟计算
+    os.path.join(REPO_ROOT, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py'),  # 第1步：进行真实的有限元建模和模拟计算
     os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Postprocess_All_surface_v2.py'),  # 第2步：后处理并出图
 ]
 
@@ -43,12 +43,12 @@ PARAMETER_CASES = [  # 测试参数工况列表（启用框架的完整版工况
         "name": "hybrid_ssi_full_test",  # 完整框架 SSI 工况名
         "config": {  # 参数覆盖字典
             "mesh_cfg": {  # 网格配置注入
-                "size": 8.0,  # 使用中等尺寸网格，在计算时间和精确度之间取得良好折衷
+                "size": 2.0,  # 使用中等尺寸网格，在计算时间和精确度之间取得良好折衷
                 "auto": True  # 启用自适应网格自动加密，测试自适应逻辑
             },
             "material_cfg": {  # 材料配置注入
                 "layers": [  # 注入单一的薄土层（厚度 20m），避免默认的厚土层发生净空超界报错
-                    {"name": "surface", "thickness": 20.0, "vs": 400.0, "poisson_ratio": 0.3, "density": 2500.0}
+                    {"name": "surface", "thickness": 20.0, "vs": 800.0, "poisson_ratio": 0.3, "density": 2500.0}
                 ]
             },
             "geometry_cfg": {  # 几何参数配置注入
@@ -60,7 +60,7 @@ PARAMETER_CASES = [  # 测试参数工况列表（启用框架的完整版工况
                 "base_depth": 2.0  # 模型深度
             },
             "tssi_cfg": {  # 框架配置
-                "enable": True  # 启用坡顶框架结构，进行完整的 SSI 模型测试
+                "enable": False  # 启用坡顶框架结构，进行完整的 SSI 模型测试
             },
             "run_cfg": {  # 运行控制参数注入
                 "wave_files": [  # 工况级地震波形路径

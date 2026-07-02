@@ -45,6 +45,9 @@ import glob
 import csv
 import json
 import math
+import io
+import time
+import logging
 import numpy as np
 
 openOdb = None  # 占位
@@ -75,6 +78,65 @@ FMAX_FACTOR = 2.5        # 可靠带上限 = FMAX_FACTOR×fc（网格 K-L 判据
 PAD_FACTOR = 4           # FFT 补零倍数（防卷绕，与建模脚本 fd 引擎同口径）
 QA_TOL = 0.05            # 远场 AF_h 对拍一维理论台阶的相对误差阈值（±5%）
 TAFV_GUARD = 0.05        # taf_v 低于该值视为"竖向自由场≈0"（垂直入射），TAF_v 置 NaN 防除零
+
+
+_DEFAULT_SCRIPT_NAME = 'Postprocess_All_surface_v2.py'  # __file__ 缺失时的兜底文件名
+
+
+def _script_path():  # 安全获取当前脚本绝对路径（Abaqus 内核可能不定义 __file__）
+    """返回脚本绝对路径；Abaqus 用 execfile/kernel 执行时全局可能无 __file__，此时退化为当前目录下的已知脚本名。"""
+    f = globals().get('__file__')
+    if f:  # __file__ 存在时
+        return os.path.abspath(f)
+    return os.path.join(os.getcwd(), _DEFAULT_SCRIPT_NAME)  # 兜底：当前工作目录(工况文件夹) + 已知脚本名
+
+
+def _script_name():
+    """返回脚本文件名，不依赖 __file__。"""
+    return os.path.basename(_script_path())
+
+
+def _script_dir():
+    """返回脚本所在目录；__file__ 缺失时退化为当前工作目录。"""
+    return os.path.dirname(_script_path())
+
+
+def log_step(logger=None, message=None, *args):
+    """日志函数：首次调用时初始化日志器，后续调用输出带总用时的日志。"""
+    if not hasattr(log_step, '_logger'):
+        if logger is not None and isinstance(logger, str):
+            log_filename = logger
+            logger = None
+        else:
+            script_name = _script_name()  # 获取当前脚本名
+            log_filename = os.path.splitext(script_name)[0] + '.log'  # 使用与脚本同名的日志文件名
+
+        _logger = logging.getLogger('abqpy')
+        _logger.setLevel(logging.INFO)
+        _logger.propagate = False  # 禁止向父日志器传播
+
+        _logger.handlers = []
+        formatter = logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+
+        file_handler = logging.FileHandler(log_filename, mode='w')
+        file_handler.setFormatter(formatter)
+        _logger.addHandler(file_handler)
+
+        log_step._logger = _logger
+        log_step._start_time = time.time()
+        log_step._log_filename = log_filename
+
+        return _logger
+
+    if message is not None:
+        now = time.time()
+        delta_total = now - log_step._start_time
+        log_step._logger.info('[%.3fs] ' + message, delta_total, *args)
+
+    return log_step._logger
 
 
 # ==========================================================
@@ -309,13 +371,14 @@ def write_H_csv(path, freqs, xs, H):
 # ==========================================================
 
 
-def process_one_odb(odb_path, meta, case_cfg):
+def process_one_odb(odb_path, meta, case_cfg, logger=None):
     """处理单条 odb：提取→指标→传函→写文件，返回汇总 dict。"""
+    logger = logger or log_step()
     record = strip_record_name(odb_path)
     factor_h, taf_lr, x_toe, fc = meta_pieces(meta)
     wave = find_wave_file(record, case_cfg)  # 定位输入波（PGA_in 与 H 分母）
     if wave is None:
-        print('警告: %s 找不到匹配输入波 txt，AF/TAF/H 跳过，仅输出 PGA' % record)
+        log_step(logger, '警告: %s 找不到匹配输入波 txt，AF/TAF/H 跳过，仅输出 PGA', record)
     odb = openOdb(path=odb_path, readOnly=True)
     try:
         xs, ys, t, a1_mat, a2_mat = extract_surface_acc(odb)
@@ -335,7 +398,7 @@ def process_one_odb(odb_path, meta, case_cfg):
             a_in = np.interp(t, rec[:, 0], a_in, left=0.0, right=0.0)
     if x_toe is None:  # meta 缺几何时退化：全部归 left
         x_toe = float(xs[-1]) + 1.0
-        print('警告: case_meta 缺 x_toe，同侧规则退化为全 left')
+        log_step(logger, '警告: case_meta 缺 x_toe，同侧规则退化为全 left')
 
     rows = surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, taf_lr, x_toe)  # 逐节点指标
     err_l, err_r, suspect = farfield_qa(rows, taf_lr)  # 远场对拍一维理论
@@ -367,12 +430,12 @@ def process_one_odb(odb_path, meta, case_cfg):
                'AR_max': (float(taf_arr[ar_idx]) if ar_idx is not None else None),  # 峰值放大（招牌标量）
                'AR_max_x': (rows[ar_idx]['x'] if ar_idx is not None else None),  # 峰值位置
                'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r, 'suspect': suspect}
-    print('%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s%s' % (
-        record, len(xs), pga_in,
-        summary['AR_max'], summary['AR_max_x'],
-        ('%.1f%%' % (err_l * 100) if err_l is not None else 'NA'),
-        ('%.1f%%' % (err_r * 100) if err_r is not None else 'NA'),
-        ' [SUSPECT]' if suspect else ''))
+    log_step(logger, '%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s%s',
+             record, len(xs), str(pga_in),
+             str(summary['AR_max']), str(summary['AR_max_x']),
+             ('%.1f%%' % (err_l * 100) if err_l is not None else 'NA'),
+             ('%.1f%%' % (err_r * 100) if err_r is not None else 'NA'),
+             ' [SUSPECT]' if suspect else '')
     return summary
 
 
@@ -470,7 +533,9 @@ def style_axes_local(ax):  # 美化单轴外观
     for spine in ax.spines.values():  # 遍历四周边框
         spine.set_color('black')  # 设为黑色
         spine.set_linewidth(1.0)  # 线宽 1.0（与 v3 一致）
-    ax.minorticks_on()  # 开启次刻度
+    # 只开启 Y 轴的次要刻度，X 轴不开启，以防止段 B (只有一个主刻度 [0.5]) 导致 X 轴 AutoMinorLocator 崩溃
+    import matplotlib.ticker as ticker
+    ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
     ax.grid(True, which='major', linestyle='-', color='#c8c8c8', linewidth=0.6)  # 主网格
     ax.grid(True, which='minor', linestyle=':', color='#dcdcdc', linewidth=0.4)  # 次网格
 
@@ -582,7 +647,7 @@ def _grayscale_preview_local(png_path):  # 生成灰度预览（色盲自检，�
         return None  # 跳过
 
 
-def plot_results(meta, case_cfg):  # 画图主控制函数
+def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
     """遍历 surface_response_*.csv，按【三段分轴】布局生成 3x2 出版级图表。
 
     每个指标面板拆成 坡顶平台(A)/坡面(B)/坡脚平台(C) 三个共 y 轴子轴：
@@ -595,48 +660,49 @@ def plot_results(meta, case_cfg):  # 画图主控制函数
         meta (dict): 从 case_meta.json 加载的元数据字典
         case_cfg (dict): 从 case_config.json 加载的配置字典
     """
+    logger = logger or log_step()
     try:  # 尝试导入绘图包
         import matplotlib  # 导入 matplotlib
         matplotlib.use('Agg')  # 无界面后端防止崩溃
         import matplotlib.pyplot as plt  # 导入 pyplot
         import matplotlib.gridspec as gridspec  # 网格布局（三段分轴用）
     except ImportError:  # 未装绘图包
-        print('[plot] 提示: 未检测到 matplotlib 库，跳过图表自动绘制。')  # 提示
+        log_step(logger, '[plot] 提示: 未检测到 matplotlib 库，跳过图表自动绘制。')  # 提示
         return  # 退出
 
     ctx = _resolve_s_context(meta, case_cfg)  # 解析三段坐标几何上下文（拐点/坡高/观测窗口）
     if ctx is None:  # 上下文不完整
-        print('[plot] 警告: case_meta 缺拐点或坡高（x_crest/x_toe 或 H_minus_h/w_slope·tan(i)），跳过作图。')  # 警告
+        log_step(logger, '[plot] 警告: case_meta 缺拐点或坡高（x_crest/x_toe 或 H_minus_h/w_slope·tan(i)），跳过作图。')  # 警告
         return  # 退出
     x_crest, x_toe, h_slope, a_win, c_win = ctx  # 解包几何上下文
 
-    csvs = glob.glob('surface_response_*.csv')  # 搜索符合的文件
+    csvs = glob.glob('sgrid_response_*.csv')  # 搜索符合的文件
     if not csvs:  # 无文件
-        print('[plot] 未发现任何已生成的 surface_response_*.csv 曲线表，跳过作图。')  # 提示
+        log_step(logger, '[plot] 未发现任何已生成的 sgrid_response_*.csv 曲线表，跳过作图。')  # 提示
         return  # 退出
 
     cjk = None  # 选用中文字体名
     try:  # 尝试应用中文出版级样式
         cjk = setup_cn_journal_style_local()  # 应用配置（返回中文字体名或 None）
     except Exception as e:  # 失败
-        print('[plot] 应用出版级样式失败: %s，回退默认配置。' % str(e))  # 提示
+        log_step(logger, '[plot] 应用出版级样式失败: %s，回退默认配置。', str(e))  # 提示
     use_cn = bool(cjk)  # 找不到中文字体时整图改用英文标签，杜绝方框
     if not use_cn:  # 无中文字体
-        print('[plot] 提示: 未检测到中文字体，图内文字改用英文标签，避免渲染成方框。')  # 提示
+        log_step(logger, '[plot] 提示: 未检测到中文字体，图内文字改用英文标签，避免渲染成方框。')  # 提示
 
     if use_cn:  # 中文标签集
         labels = {'PGA_h': u'水平向 PGA (m/s²)', 'PGA_v': u'垂直向 PGA (m/s²)',
                   'AF_h': u'水平向 AF', 'AF_v': u'垂直向 AF',
                   'TAF_h': u'水平向 TAF', 'TAF_v': u'垂直向 TAF'}  # 纵轴标签
         seg_titles = (u'坡顶平台', u'坡面', u'坡脚平台')  # 三段标题
-        xlabel = u'三段归一化坐标 s'  # 横轴标签
+        xlabel = u'归一化坐标 s'  # 横轴标签
         sup_fmt = u'记录: %s'  # 总标题模板
     else:  # 英文兜底标签集
         labels = {'PGA_h': u'Horizontal PGA (m/s²)', 'PGA_v': u'Vertical PGA (m/s²)',
                   'AF_h': u'Horizontal AF', 'AF_v': u'Vertical AF',
                   'TAF_h': u'Horizontal TAF', 'TAF_v': u'Vertical TAF'}  # 纵轴标签
         seg_titles = (u'Crest plateau', u'Slope', u'Toe plateau')  # 三段标题
-        xlabel = u'Three-segment normalized coordinate s'  # 横轴标签
+        xlabel = u'Normalized coordinate s'  # 横轴标签
         sup_fmt = u'Record: %s'  # 总标题模板
 
     draw_specs = [  # 面板布局：(行, 列, 字段, 颜色)
@@ -649,26 +715,27 @@ def plot_results(meta, case_cfg):  # 画图主控制函数
     ]
 
     for csv_path in csvs:  # 遍历处理各记录
-        record = csv_path[len('surface_response_'):-4]  # 提取记录名
+        record = csv_path[len('sgrid_response_'):-4]  # 提取记录名
         try:  # 尝试画图
             data = read_response_csv_local(csv_path)  # 读取指标数据
             if not data:  # 无数据
                 continue  # 跳过
 
-            xs = [row['x'] for row in data]  # 提取 x 坐标列表
-            s_all = calc_s_coords(xs, x_crest, x_toe, h_slope)  # 转换为 s 坐标（按坡高归一）
+            s_all = np.array([row['s'] for row in data], dtype=float)  # 直接提取无量纲 s 坐标
             a_max = float(a_win) if (a_win and float(a_win) > 0) else max(float(-s_all.min()), 0.5)  # 段A 显示跨度
             c_max = float(c_win) if (c_win and float(c_win) > 0) else max(float(s_all.max()) - 1.0, 0.5)  # 段C 显示跨度
             if not (a_win and c_win):  # 未配置观测窗口
-                print('[plot] 提示: geometry_cfg 未配置 crest_window/toe_window，观测范围不截断（净空段一并画出）。')  # 提示
+                log_step(logger, '[plot] 提示: geometry_cfg 未配置 crest_window/toe_window，观测范围不截断（净空段一并画出）。')  # 提示
             w_b = max(1.0, 0.3 * (a_max + c_max))  # 段B 显示保底宽度（各段特征长度本不同，显示比例允许不同）
 
-            fig = plt.figure(figsize=(6.3, 7.5))  # 双栏宽画布
-            outer = gridspec.GridSpec(3, 2, left=0.10, right=0.985, top=0.90, bottom=0.075,
-                                      hspace=0.32, wspace=0.26)  # 外层 3x2 网格
-            bottom_axes = {}  # 底行两列的 (axA, axC)，用于放横轴标签
+            fig = plt.figure(figsize=(6.3, 8.2))  # 双栏宽画布（增高以留足刻度和标签空间）
+            outer = gridspec.GridSpec(3, 2, left=0.10, right=0.985, top=0.93, bottom=0.065,
+                                      hspace=0.42, wspace=0.26)  # 外层 3x2 网格（调细 hspace）
+            all_panel_axes = []  # 暂存所有面板的 (ax_a, ax_c) 以便添加横轴标签
 
-            for row_idx, col_idx, field, color in draw_specs:  # 遍历面板规格
+            panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
+            for panel_idx, (row_idx, col_idx, field, color) in enumerate(draw_specs):  # 遍历面板规格
+                panel_lbl = panel_labels[panel_idx]
                 inner = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[row_idx, col_idx],
                                                          width_ratios=[a_max, w_b, c_max], wspace=0.0)  # 三段子网格
                 ax_a = fig.add_subplot(inner[0])  # 段A 坡顶平台
@@ -702,10 +769,11 @@ def plot_results(meta, case_cfg):  # 画图主控制函数
                 ax_a.set_xlim(-a_max, 0.0)  # 段A 范围
                 ax_b.set_xlim(0.0, 1.0)  # 段B 范围
                 ax_c.set_xlim(1.0, 1.0 + c_max)  # 段C 范围
-                if y_all:  # 统一三段 ylim（sharey 自动同步）
-                    lo, hi = min(y_all), max(y_all)  # 极值
-                    pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))  # 上下留白
-                    ax_a.set_ylim(lo - pad, hi + pad)  # 设定范围
+                # 统一三段 ylim（sharey 自动同步）
+                # 若无有效值（如全为 NaN），则使用 [0.0, 1.0] 范围以防止 AutoMinorLocator 崩溃
+                lo, hi = (min(y_all), max(y_all)) if y_all else (0.0, 1.0)
+                pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))  # 上下留白
+                ax_a.set_ylim(lo - pad, hi + pad)  # 设定范围
 
                 step_a = max(1, int(math.ceil(a_max / 4.0)))  # 段A 刻度步长（约 4 个主刻度）
                 ax_a.set_xticks([-float(t) for t in range(0, int(math.floor(a_max)) + 1, step_a)])  # 段A 整数刻度
@@ -721,25 +789,24 @@ def plot_results(meta, case_cfg):  # 画图主控制函数
                 plt.setp(ax_b.get_yticklabels(), visible=False)  # 段B 隐藏 y 刻度文本
                 plt.setp(ax_c.get_yticklabels(), visible=False)  # 段C 隐藏 y 刻度文本
 
-                ax_a.text(0.97, 0.94, '#1', transform=ax_a.transAxes, fontsize=7, va='top', ha='right')  # 标注 #1 坡顶棱
-                ax_c.text(0.03, 0.94, '#2', transform=ax_c.transAxes, fontsize=7, va='top', ha='left')  # 标注 #2 坡脚棱
+                # 为每张小图上方都加上“坡顶平台”、“坡面”、“坡脚平台”标注
+                ax_a.set_title(seg_titles[0], fontsize=7, pad=2)  # 段A 标题
+                ax_b.set_title(seg_titles[1], fontsize=7, pad=2)  # 段B 标题
+                ax_c.set_title(seg_titles[2], fontsize=7, pad=2)  # 段C 标题
 
-                if row_idx == 0:  # 首行标注三段名称
-                    ax_a.set_title(seg_titles[0], fontsize=7, pad=2)  # 段A 标题
-                    ax_b.set_title(seg_titles[1], fontsize=7, pad=2)  # 段B 标题
-                    ax_c.set_title(seg_titles[2], fontsize=7, pad=2)  # 段C 标题
-                if row_idx == 2:  # 底行记录轴对象（横轴标签用）
-                    bottom_axes[col_idx] = (ax_a, ax_c)  # 存左右子轴
-                else:  # 非底行
-                    for ax in (ax_a, ax_b, ax_c):  # 隐藏 x 刻度文本
-                        plt.setp(ax.get_xticklabels(), visible=False)  # 隐藏
+                # 记录每一个面板对应的左右子轴及标号以绘制横坐标标签，所有子面板均显示刻度文本
+                all_panel_axes.append((ax_a, ax_c, panel_lbl))
                 ax_a.set_ylabel(labels[field])  # 设置纵轴标签
 
-            for col_idx in bottom_axes:  # 底行两列各放一个居中横轴标签
-                p_a = bottom_axes[col_idx][0].get_position()  # 左子轴位置
-                p_c = bottom_axes[col_idx][1].get_position()  # 右子轴位置
-                fig.text((p_a.x0 + p_c.x1) / 2.0, p_a.y0 - 0.045, xlabel,
-                         ha='center', va='top', fontsize=8)  # 居中放置
+            for ax_a, ax_c, panel_lbl in all_panel_axes:  # 每一张小图都各放一个居中横轴标签
+                p_a = ax_a.get_position()  # 左子轴位置
+                p_c = ax_c.get_position()  # 右子轴位置
+                # 1. 绘制横坐标标签（保持固定标准间距 0.030，与 Y 轴等距对称）
+                fig.text((p_a.x0 + p_c.x1) / 2.0, p_a.y0 - 0.030, xlabel,
+                         ha='center', va='top', fontsize=8)
+                # 2. 独立绘制学术子图编号标签（下移至 0.055 处，强指加粗 Times New Roman 以对齐 SciPilot 期刊规范）
+                fig.text((p_a.x0 + p_c.x1) / 2.0, p_a.y0 - 0.055, panel_lbl,
+                         ha='center', va='top', fontsize=8, fontname='Times New Roman', fontweight='bold')
 
             fig.suptitle(sup_fmt % record, fontsize=9, fontweight='bold', y=0.97)  # 总标题
 
@@ -750,24 +817,23 @@ def plot_results(meta, case_cfg):  # 画图主控制函数
             fig_path = os.path.join(out_dir, 'surface_response_%s' % record)  # 文件基路径
             for fmt in ('png', 'pdf', 'svg'):  # 多格式导出（矢量+栅格，与 Plot_Fig15_compare_v3 口径）
                 try:  # 逐格式保存
+                    old_err = np.seterr(all='ignore')
                     fig.savefig('%s.%s' % (fig_path, fmt), dpi=300, bbox_inches='tight', pad_inches=0.05)  # 保存
+                    np.seterr(**old_err)
                 except Exception as e2:  # 某格式失败不影响其余
-                    print('[plot] 导出 %s 格式失败: %s' % (fmt, str(e2)))  # 提示
+                    log_step(logger, '[plot] 导出 %s 格式失败: %s', fmt, str(e2))  # 提示
             plt.close(fig)  # 关闭释放内存
             gray = _grayscale_preview_local(fig_path + '.png')  # 灰度预览（色盲自检，可选）
-            print('[plot] 成功生成三段分轴图表: %s.{png,pdf,svg}%s' % (
-                fig_path, (' + 灰度预览' if gray else '')))  # 提示用户
+            log_step(logger, '[plot] 成功生成三段分轴图表: %s.{png,pdf,svg}%s',
+                     fig_path, (' + 灰度预览' if gray else ''))  # 提示用户
         except Exception as e:  # 绘图异常
-            print('[plot] 绘制记录 %s 失败: %s' % (record, str(e)))  # 错误提示
+            log_step(logger, '[plot] 绘制记录 %s 失败: %s', record, str(e))  # 错误提示
 
 
 # ==========================================================
 #  三段重采样（研究计划 §4.0 第②步：统一 s 子网格对齐输出，给 POD/ML 用）
 # ==========================================================
-N_A = 120  # 段A(坡顶平台)子网格点数（研究计划 §4.0 推荐值）
-N_B = 60  # 段B(坡面)子网格点数
-N_C = 80  # 段C(坡脚平台)子网格点数
-CREST_REFINE_GAMMA = 2.0  # 段A 近坡顶棱加密指数（>1 越大越密，=1 退化为均匀网格）
+# 统一按 s 坐标每 0.01 划分，原固定个数网格 N_A/N_B/N_C 已废弃
 _SEG_EPS = 1e-9  # 拐点归段容差（s=0/1 两侧段共享）
 SGRID_FIELDS = ['PGA_h', 'PGA_v', 'AF_h', 'TAF_h', 'AF_v', 'TAF_v', 'V_over_H']  # 参与重采样的响应字段
 
@@ -786,21 +852,41 @@ def _resolve_s_context(meta, case_cfg):  # 解析三段坐标几何上下文
     if h_slope is None:  # 坡高缺失
         return None  # 无法计算
     gcfg = (case_cfg or {}).get('geometry_cfg') or {}  # 无量纲几何设计配置
-    return float(x_crest), float(x_toe), float(h_slope), gcfg.get('crest_window'), gcfg.get('toe_window')  # 上下文元组
+    crest_win = gcfg.get('crest_window')  # 坡顶观测窗（hs 倍数）
+    toe_win = gcfg.get('toe_window')  # 坡脚观测窗（hs 倍数）
+    side_clear = gcfg.get('side_clearance')  # 侧向边界净空（hs 倍数）
+    if crest_win is not None and side_clear is not None:
+        crest_win = float(crest_win) + float(side_clear)  # 加上左段 side_clearance
+    if toe_win is not None and side_clear is not None:
+        toe_win = float(toe_win) + float(side_clear)  # 加上右段 side_clearance
+    return float(x_crest), float(x_toe), float(h_slope), crest_win, toe_win  # 上下文元组
 
 
 def build_s_grid(a_max, c_max):  # 构造统一三段 s 子网格
-    """构造统一子网格：段A [-a_max,0] 幂律加密近坡顶棱 / 段B [0,1] 均匀 / 段C [1,1+c_max] 均匀。
+    """构造统一子网格：不分段分个数划分，统一按归一化坐标 s 每 0.01 划分。
 
-    拐点 s=0、s=1 在相邻两段各保留一个网格点（对齐锚点），总长恒为 N_A+N_B+N_C——
-    对应研究计划"向量长度固定、拐点严格对齐"。返回 (s_grid, seg_labels)。
+    范围为 [-a_max, 1.0 + c_max]。返回 (s_grid, seg_labels)。
     """
-    t = np.linspace(0.0, 1.0, N_A)  # 段A 参数坐标
-    s_a = (-float(a_max) * np.power(t, CREST_REFINE_GAMMA))[::-1]  # 幂律映射后翻转为升序，近 s=0 处点距最小
-    s_b = np.linspace(0.0, 1.0, N_B)  # 段B 均匀网格
-    s_c = 1.0 + np.linspace(0.0, float(c_max), N_C)  # 段C 均匀网格
-    seg_labels = ['A'] * N_A + ['B'] * N_B + ['C'] * N_C  # 段标签（网格点归段依据）
-    return np.concatenate([s_a, s_b, s_c]), seg_labels  # 拼接网格与标签
+    # 构造从 -a_max 到 1.0 + c_max 步长为 0.01 的网格
+    # 为防浮点精度问题，使用 100 倍整数索引计算再缩放
+    start_idx = int(np.round(-float(a_max) * 100))
+    end_idx = int(np.round((1.0 + float(c_max)) * 100))
+    indices = np.arange(start_idx, end_idx + 1)
+    s_grid = indices * 0.01
+
+    # 段标签打法（网格点归段依据）：
+    # s <= 0 的打 'A'
+    # 0 < s < 1.0 的打 'B'
+    # s >= 1.0 的打 'C'
+    seg_labels = []
+    for s in s_grid:
+        if s <= 0.0:
+            seg_labels.append('A')
+        elif s < 1.0:
+            seg_labels.append('B')
+        else:
+            seg_labels.append('C')
+    return s_grid, seg_labels  # 返回网格与标签
 
 
 def _seg_mask(arr, seg):  # 数组元素归段掩码
@@ -876,7 +962,7 @@ def read_H_csv_local(path):  # 读回 write_H_csv 产物
         fh.close()  # 关闭句柄
         return np.array(freqs, dtype=float), np.array(xs, dtype=float), np.array(rows, dtype=float).T  # 转 节点×频点
     except Exception as e:  # 解析失败
-        print('[sgrid] 读取 %s 失败: %s' % (path, str(e)))  # 提示
+        log_step(None, '[sgrid] 读取 %s 失败: %s', path, str(e))  # 提示
         return None, None, None  # 返回空
 
 
@@ -901,8 +987,9 @@ def write_sgrid_H_csv(path, freqs, s_grid, seg_labels, H_s):  # 写对齐 H 曲�
     fh.close()  # 关闭
 
 
-def _update_summary_ar(updates):  # 回写 AR_max 段号/归一坐标
+def _update_summary_ar(updates, logger=None):  # 回写 AR_max 段号/归一坐标
     """把各记录 AR_max 的段号与归一坐标（重采样前原始曲线精确值）合并进 surface_summary.json。"""
+    logger = logger or log_step()
     path = 'surface_summary.json'  # 摘要路径
     if not updates or not os.path.isfile(path):  # 无更新或无摘要
         return  # 跳过
@@ -915,12 +1002,12 @@ def _update_summary_ar(updates):  # 回写 AR_max 段号/归一坐标
                 rec.update(extra)  # 合并字段
         with open(path, 'w') as fh:  # 写回
             json.dump(data, fh, indent=2)  # 保存
-        print('[sgrid] AR_max 段号/归一坐标已回写 surface_summary.json')  # 提示
+        log_step(logger, '[sgrid] AR_max 段号/归一坐标已回写 surface_summary.json')  # 提示
     except Exception as e:  # 失败
-        print('[sgrid] 回写 surface_summary.json 失败: %s' % str(e))  # 提示
+        log_step(logger, '[sgrid] 回写 surface_summary.json 失败: %s', str(e))  # 提示
 
 
-def resample_outputs(meta, case_cfg):  # 重采样主控制函数
+def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
     """研究计划 §4.0 第②步：把逐节点曲线与 H(f,s) 曲面插值到统一三段 s 子网格并落盘。
 
     输入：当前目录 surface_response_<record>.csv 与 H_surface_h/v、H_topo_h_<record>.csv（第①步产物）。
@@ -928,17 +1015,18 @@ def resample_outputs(meta, case_cfg):  # 重采样主控制函数
     同时把 AR_max 段号/归一坐标（重采样前原始曲线上精确取值）回写 surface_summary.json。
     普通 Python 即可运行（不依赖 odbAccess），可对已有 CSV 反复重跑。
     """
+    logger = logger or log_step()
     ctx = _resolve_s_context(meta, case_cfg)  # 解析几何上下文
     if ctx is None:  # 上下文不完整
-        print('[sgrid] 警告: case_meta 缺拐点或坡高（x_crest/x_toe 或 H_minus_h/w_slope·tan(i)），跳过重采样。')  # 警告
+        log_step(logger, '[sgrid] 警告: case_meta 缺拐点或坡高（x_crest/x_toe 或 H_minus_h/w_slope·tan(i)），跳过重采样。')  # 警告
         return  # 退出
     x_crest, x_toe, h_slope, a_win, c_win = ctx  # 解包几何上下文
     csvs = sorted(glob.glob('surface_response_*.csv'))  # 第①步响应表
     if not csvs:  # 无输入
-        print('[sgrid] 未发现 surface_response_*.csv，跳过重采样。')  # 提示
+        log_step(logger, '[sgrid] 未发现 surface_response_*.csv，跳过重采样。')  # 提示
         return  # 退出
     if not (a_win and c_win):  # 未配置观测窗口
-        print('[sgrid] 警告: geometry_cfg 未配置 crest_window/toe_window，网格范围退化为本工况数据范围，跨工况将不可比！')  # 警告
+        log_step(logger, '[sgrid] 警告: geometry_cfg 未配置 crest_window/toe_window，网格范围退化为本工况数据范围，跨工况将不可比！')  # 警告
     updates = {}  # summary 回写暂存
     grid_written = False  # 网格参数是否已写盘
     for csv_path in csvs:  # 逐记录处理
@@ -974,49 +1062,54 @@ def resample_outputs(meta, case_cfg):  # 重采样主控制函数
             H_s = resample_H_matrix(H, s_h, s_grid, seg_labels)  # 空间维对齐
             write_sgrid_H_csv(dst_fmt % record, freqs, s_grid, seg_labels, H_s)  # 落盘
             n_h += 1  # 计数
+        n_a_actual = int(np.sum(np.array(seg_labels) == 'A'))  # 实际 A 段点数
+        n_b_actual = int(np.sum(np.array(seg_labels) == 'B'))  # 实际 B 段点数
+        n_c_actual = int(np.sum(np.array(seg_labels) == 'C'))  # 实际 C 段点数
         if not grid_written:  # 网格参数只写一份（对本工况所有记录一致）
             with open('sgrid_params.json', 'w') as fh:  # 写参数文件
-                json.dump({'schema_version': 1, 'N_A': N_A, 'N_B': N_B, 'N_C': N_C,
-                           'A_max': a_max, 'C_max': c_max, 'crest_refine_gamma': CREST_REFINE_GAMMA,
+                json.dump({'schema_version': 1, 'N_A': n_a_actual, 'N_B': n_b_actual, 'N_C': n_c_actual,
+                           'A_max': a_max, 'C_max': c_max, 'step': 0.01,
                            'h_slope': h_slope,
-                           'note': u'研究计划§4.0第②步统一s子网格；段A幂律加密近坡顶棱；拐点s=0/1在相邻段各留一点'},
+                           'note': u'统一 s 子网格；按归一化坐标 s 每 0.01 划分；含 side_clearance 长度'},
                           fh, indent=2)  # 保存（ensure_ascii 默认开，Py2 安全）
             grid_written = True  # 标记已写
-        print('[sgrid] %s: 重采样完成 -> sgrid_response（%d 点/段A %d+段B %d+段C %d） + %d 个 H 曲面' % (
-            record, len(s_grid), N_A, N_B, N_C, n_h))  # 提示
-    _update_summary_ar(updates)  # 回写 AR_max 段号/归一坐标
+        log_step(logger, '[sgrid] %s: 重采样完成 -> sgrid_response（%d 点/段A %d+段B %d+段C %d） + %d 个 H 曲面',
+                 record, len(s_grid), n_a_actual, n_b_actual, n_c_actual, n_h)  # 提示
+    _update_summary_ar(updates, logger=logger)  # 回写 AR_max 段号/归一坐标
 
 
 def main():  # 主入口函数
     """后处理脚本控制流。"""
+    logger = log_step()  # 自动使用与脚本同名的日志文件
+    log_step(logger, '脚本开始执行 (Postprocess_All_surface_v2)')
     meta = _load_json('case_meta.json')  # 读取元数据
     case_cfg = _load_json('case_config.json')  # 读取配置
 
     if openOdb is None:  # 无 Abaqus 环境
-        print('提示: 未检测到 odbAccess (非 Abaqus 环境)，跳过 ODB 提取，直接重采样并重绘图表。')  # 提示
-        resample_outputs(meta, case_cfg)  # §4.0 第②步重采样（可对已有 CSV 反复重跑）
-        plot_results(meta, case_cfg)  # 运行绘图
+        log_step(logger, '提示: 未检测到 odbAccess (非 Abaqus 环境)，跳过 ODB 提取，直接重采样并重绘图表。')  # 提示
+        resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（可对已有 CSV 反复重跑）
+        plot_results(meta, case_cfg, logger=logger)  # 运行绘图
         return  # 正常退出
 
     odbs = sorted(glob.glob('job-*.odb'))  # 搜索 odb 文件
     if not odbs:  # 无 odb
-        print('错误: 当前目录无 job-*.odb，无法提取数据。')  # 报错
+        log_step(logger, '错误: 当前目录无 job-*.odb，无法提取数据。')  # 报错
         sys.exit(1)  # 退出
 
     summaries = []  # 摘要列表
     for p in odbs:  # 遍历
         try:  # 尝试提取
-            summaries.append(process_one_odb(p, meta, case_cfg))  # 处理单条 ODB
+            summaries.append(process_one_odb(p, meta, case_cfg, logger=logger))  # 处理单条 ODB
         except Exception as e:  # 异常
-            print('错误: %s 处理失败: %s' % (p, str(e)))  # 打印错误
+            log_step(logger, '错误: %s 处理失败: %s', p, str(e))  # 打印错误
             summaries.append({'record': strip_record_name(p), 'error': str(e)})  # 记录错误
 
     with open('surface_summary.json', 'w') as fh:  # 写摘要
         json.dump({'schema_version': 1, 'records': summaries}, fh, indent=2)  # 保存 json
-    print('完成: %d 条 odb，汇总见 surface_summary.json' % len(odbs))  # 提示完成
+    log_step(logger, '完成: %d 条 odb，汇总见 surface_summary.json', len(odbs))  # 提示完成
 
-    resample_outputs(meta, case_cfg)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
-    plot_results(meta, case_cfg)  # 提取数据后自动画图
+    resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
+    plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
 
 
 if __name__ == '__main__':  # 程序入口
