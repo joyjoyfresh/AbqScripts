@@ -225,7 +225,7 @@ rebar_cfg = {
 #  模块常量与全局状态
 # ==========================================================
 
-_DEFAULT_SCRIPT_NAME = 'slope_frame_ssi_full_v1.py'  # __file__ 缺失时的兜底文件名
+_DEFAULT_SCRIPT_NAME = 'slope_frame_ssi_full_v2.py'  # __file__ 缺失时的兜底文件名
 DEFAULT_STEP_NAME = 'Step-earthquake'  # 默认分析步名称
 BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # 边界节点集名称
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 边界处理顺序(左/右/底)
@@ -3288,7 +3288,7 @@ def main():
     total_start = time.time()
 
     try:
-        log_step(logger, '脚本开始执行 (slope_frame_ssi_full_v1)')  # 写入脚本启动日志
+        log_step(logger, '脚本开始执行 (slope_frame_ssi_full_v2)')  # 写入脚本启动日志
 
         # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（v6 新增自由场引擎/运行控制注入）
         (material_cfg, geometry_cfg, damping_cfg,

@@ -52,8 +52,8 @@ PARAMETER_CASES = [  # 测试参数工况列表（启用框架的完整版工况
                 ]
             },
             "geometry_cfg": {  # 几何参数配置注入
-                "slope_height": 50.0,  # 坡高缩减为 50m，成倍降低网格密度与求解规模
-                "slope_angle": 45.0,  # 坡角 45度
+                "slope_height": 60.0,  # 坡高缩减为 50m，成倍降低网格密度与求解规模
+                "slope_angle": 30.0,  # 坡角 45度
                 "crest_window": 3.0,  # 观测窗
                 "toe_window": 2.0,  # 观测窗
                 "side_clearance": 1.0,  # 净空
