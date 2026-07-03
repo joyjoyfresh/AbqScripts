@@ -161,13 +161,15 @@ eql_cfg = {
 
 # TSSI 总开关配置
 tssi_cfg = {
-    'enable': False,                      #! True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
+    'enable': False,                     # True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
+    'scene': 'ssi',                      #! 三胞胎场景 'ssi'=全耦合(默认) / 'freefield'=纯坡地提取坡顶运动 / 'fixed'=固定基础框架单体
+    'fixed_input': None,                 #! fixed 场景基底输入加速度 .txt 路径(绝对/相对工况目录); None=自动查找 crest_motion_*.txt
     'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
-    'nonlinear': True,                   #! step3: True=梁柱用CDP混凝土+钢筋(非线性纤维截面); False=退回纯弹性(step2 行为)
-    'gravity': 'off',                    #! P0#1 重力级别 'off'=现状(v1基线) / 'structure'=Level A 仅结构自重(动力步前静力步) / 'full'=Level B 全模型(P2,未实现)
-    'crest_offset_B': 0.0,               #! P0#2 距坡肩距离 M/B(0=右缘贴坡肩=v1基线; step4 扫描参数)
-    'T_fixed': None,                     #! P0#6 固定基础基本周期(s,周期延长基准); None=按层数 0.1N 估算(默认5层=0.5s=v1值), 有实测值时注入覆盖
-    'nlgeom': False,                     #! P1#10 几何非线性(P-Δ大位移) False=OFF(v1基线) / True=ON(强震层间角>1%时批量开)
+    'nonlinear': True,                   # True=梁柱用CDP混凝土+钢筋(非线性纤维截面); False=退回纯弹性(step2 行为)
+    'gravity': 'off',                    # 重力级别 'off'=现状(v1基线) / 'structure'=Level A 仅结构自重(动力步前静力步) / 'full'=Level B 全模型(P2,未实现)
+    'crest_offset_B': 0.0,               # 距坡肩距离 M/B(0=右缘贴坡肩=v1基线; step4 扫描参数)
+    'T_fixed': None,                     # 固定基础基本周期(s,周期延长基准); None=按层数 0.1N 估算(默认5层=0.5s=v1值), 有实测值时注入覆盖
+    'nlgeom': False,                     # 几何非线性(P-Δ大位移) False=OFF(v1基线) / True=ON(强震层间角>1%时批量开)
     'cdp_min_inc_factor': 1.0e-4,        # P1#9 CDP动力步最小增量=initialInc×该系数(收敛降级链:不收敛时调小,见下方降级链注释)
 }
 
@@ -195,7 +197,7 @@ frame_material_cfg = {
     'nu': 0.2,                           # 泊松比
     'density': 10.0,                     # 密度（kg/m^3，已按结构等效折算；真实楼层质量走 floor_mass 集中质量）
     'damping_ratio': 0.05,               # 瑞利阻尼目标阻尼比
-    'rayleigh_mode': 'fixed',            #! P0#4 拟合频段锚定 'fixed'=固定 f1/f2(v1基线) / 'modal'=按 T1 自动锚定(f1=0.8/T1,f2=5/T1 覆盖前三阶)
+    'rayleigh_mode': 'fixed',            #! 拟合频段锚定 'fixed'=固定 f1/f2(v1基线) / 'modal'=按 T1 自动锚定(f1=0.8/T1,f2=5/T1 覆盖前三阶)
     'f1': 1.0,                           # 瑞利阻尼拟合下限频率（Hz，rayleigh_mode='fixed' 时用）
     'f2': 5.0,                           # 瑞利阻尼拟合上限频率（Hz，rayleigh_mode='fixed' 时用）
     'fc_mpa': 20.1,                      # 轴心抗压强度标准值 fck（MPa，GB50010 表4.1.3-1 C30）
@@ -228,14 +230,14 @@ rebar_cfg = {
 
 # 基础形式配置（P1#7/#8：柱脚下条形基础板 + 可选接触升级；默认 'tie' 保持 v1 柱脚点绑定行为）
 foundation_cfg = {
-    'type': 'tie',                       #! P1#7 'tie'=柱脚点绑定土面(v1基线) / 'footing'=柱脚下加实体条形基础板(CPE4)+分布式绑定土面
+    'type': 'tie',                       #! 'tie'=柱脚点绑定土面(v1基线) / 'footing'=柱脚下加实体条形基础板(CPE4)+分布式绑定土面
     'width': None,                       # 基础板宽(m)；None=按框架宽×1.2 自动(保证≥框架宽，两侧各挑出0.1倍)
     'thickness': 0.8,                    # 基础板厚(m)——坐在坡顶面上，顶面接柱脚
     'E': 30.0e9,                         # 基础混凝土弹性模量(Pa，C30)
     'nu': 0.2,                           # 基础泊松比
     'density': 2500.0,                   # 基础密度(kg/m³，混凝土；重力步与惯性均计入)
     'mesh_size': None,                   # 基础板网格尺寸(m)；None=取 thickness/2
-    'contact': False,                    #! P1#8 True=基础底与土面【硬接触+库仑摩擦】(可提离滑移,强震批C专用) / False=Tie绑定(默认)
+    'contact': False,                    #! True=基础底与土面【硬接触+库仑摩擦】(可提离滑移,强震批C专用) / False=Tie绑定(默认)
     'mu': 0.5,                           # 土-基础库仑摩擦系数(contact=True 时用，μ≈0.4~0.6)
 }
 
@@ -3492,6 +3494,7 @@ def write_tssi_meta(logger):
     meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
             'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
             'inst_frame': 'Frame-1',
+            'scene': str(tssi_cfg.get('scene', 'ssi')),  # 三胞胎场景标记(ssi/freefield/fixed)
             'T_fixed_step1': _frame_T1_estimate(),  # P0#6：固定基础 T1(周期延长基准)，注入实测优先否则0.1N，去硬编码0.5
             'crest_offset_B': float(tssi_cfg.get('crest_offset_B', 0.0)),  # P0#2：距坡肩距离 M/B(step4 扫描)
             'gravity': str(tssi_cfg.get('gravity', 'off')),  # P0#1：重力级别(off/structure/full)
@@ -3507,8 +3510,279 @@ def write_tssi_meta(logger):
 
 
 # ==========================================================
+#  三胞胎去耦场景（scene='freefield'/'fixed'/'ssi'）
+# ==========================================================
+
+
+def _add_crest_ref_for_freefield(base_model, geom, inst_name, logger):
+    """freefield 场景：在纯坡地模型上补建 CREST_REF 参考点集 + 历史输出。
+
+    freefield 场景 tssi_cfg['enable']=False 不建框架，但仍需在坡顶创建
+    CREST_REF（坡肩附近节点），以便解算后提取坡顶运动供 fixed 场景输入。
+    逻辑复用 add_frame_on_crest 中 CREST_REF 的创建方式。
+    """
+    model = mdb.models[base_model]
+    asm = model.rootAssembly
+    # 在 TOP_SURFACE 中找 x 最接近坡肩(left_flat)的节点
+    top = asm.instances[inst_name].sets['TOP_SURFACE']
+    # P0#2：距坡肩距离 M=crest_offset_B×框架宽；freefield 场景也需按同 offset 取参考点，与 ssi 一致
+    fw = int(frame_cfg['n_bay']) * float(frame_cfg['bay_width'])  # 框架宽度
+    crest_off_B = float(tssi_cfg.get('crest_offset_B', 0.0))  # 距坡肩距离倍数
+    x_target = float(geom.left_flat) - fw / 2.0 - crest_off_B * fw  # 框架中心 x（与 ssi 场景同口径）
+    x_target = max(0.0, min(x_target, float(geom.left_flat)))  # 截断到上平台范围
+    crest_node = min(top.nodes, key=lambda n: abs(n.coordinates[0] - x_target))  # 最近节点
+    asm.Set(name='CREST_REF', nodes=asm.instances[inst_name].nodes.sequenceFromLabels([crest_node.label]))
+    log_step(logger, u'[freefield] 坡顶参考点 CREST_REF 已建: x=%.1f(目标x=%.1f), y=%.1f',
+             crest_node.coordinates[0], x_target, crest_node.coordinates[1])
+
+
+def _add_freefield_crest_outputs(model_name, inst_name, logger):
+    """给 freefield 场景的各波模型配 CREST_REF 历史输出（A1/A2/U1/U2）。
+
+    在 build_models 建步之后逐波调用（与 ssi 场景的 add_frame_outputs 对应）。
+    输出变量覆盖水平+竖向，供 extract_crest_motion 提取供 fixed 场景消费。
+    """
+    model = mdb.models[model_name]
+    asm = model.rootAssembly
+    freq = int(tssi_cfg.get('history_freq', 1))
+    model.HistoryOutputRequest(name='H-Crest', createStepName=DEFAULT_STEP_NAME,
+                               variables=('U1', 'U2', 'A1', 'A2'),
+                               region=asm.sets['CREST_REF'], frequency=freq)
+    log_step(logger, u'[%s] freefield 坡顶输出已配: CREST_REF U1/U2/A1/A2', model_name)
+
+
+def extract_crest_motion(odb_path, step_name=None, logger=None):
+    """从已解算的 freefield ODB 提取 CREST_REF 节点加速度时程，导出为 .txt 文件。
+
+    参数
+    ----
+    odb_path   : freefield ODB 文件路径（如 'job-Ricker3-slope.odb'）
+    step_name  : 分析步名称（None=使用 DEFAULT_STEP_NAME）
+    logger     : 日志器（None=不打印）
+
+    返回
+    ----
+    dict : {'h': 导出的水平加速度文件路径, 'v': 导出的竖向加速度文件路径}
+
+    导出文件格式：两列（时间, 加速度 m/s²），与 v2 输入记录格式一致。
+    文件名：crest_motion_h.txt / crest_motion_v.txt，写入 ODB 同目录。
+    此函数不在 main() 中自动调用（freefield ODB 须先解算完成），
+    由外部 Autorun 批处理脚本或后处理脚本调用。
+    """
+    from odbAccess import openOdb  # Abaqus ODB 访问模块（仅在调用时导入）
+    step_name = step_name or DEFAULT_STEP_NAME  # 默认分析步名
+    odb = openOdb(str(odb_path), readOnly=True)
+    try:
+        # 定位 CREST_REF 节点（Assembly 级节点集）
+        asm_keys = list(odb.rootAssembly.nodeSets.keys())
+        # Abaqus ODB 中节点集名称可能全大写
+        crest_key = None
+        for k in asm_keys:
+            if k.upper() == 'CREST_REF':
+                crest_key = k
+                break
+        if crest_key is None:
+            raise KeyError(u'ODB 中未找到 CREST_REF 节点集（freefield 场景须先建 CREST_REF）: %s' % odb_path)
+        node_set = odb.rootAssembly.nodeSets[crest_key]
+        # 获取实例名和节点标签（CREST_REF 只含一个节点）
+        inst_name = list(odb.rootAssembly.instances.keys())[0]  # 单 Part 模型只有一个实例
+        node_label = node_set.nodes[0][0].label  # nodeSets.nodes 是 [[node,...],...]（按实例分组）
+        # 从 historyRegions 提取加速度时程
+        step = odb.steps[step_name]
+        hr_key = 'Node %s.%d' % (inst_name, node_label)  # Abaqus 历史区域键格式
+        # 尝试精确匹配，不区分大小写
+        hr = None
+        for k in step.historyRegions.keys():
+            if k.upper() == hr_key.upper():
+                hr = step.historyRegions[k]
+                break
+        if hr is None:
+            raise KeyError(u'ODB 历史区域未找到 CREST_REF 节点: 期望 %s, 可用: %s' % (hr_key, list(step.historyRegions.keys())[:5]))
+        # 提取 A1（水平）和 A2（竖向）
+        out_dir = os.path.dirname(os.path.abspath(str(odb_path)))
+        result = {}
+        for var, suffix in [('A1', 'h'), ('A2', 'v')]:
+            if var in hr.historyOutputs:
+                data = np.array(hr.historyOutputs[var].data, dtype=float)
+                out_file = os.path.join(out_dir, 'crest_motion_%s.txt' % suffix)
+                np.savetxt(out_file, data, fmt='%.10e', delimiter='\t',
+                           header='Time(s)\t%s(m/s2) extracted from %s CREST_REF' % (var, os.path.basename(str(odb_path))))
+                result[suffix] = out_file
+                if logger:
+                    log_step(logger, u'坡顶运动已导出: %s, 点数=%d, |%s|max=%.4f m/s²',
+                             out_file, len(data), var, float(np.max(np.abs(data[:, 1]))))
+            else:
+                if logger:
+                    log_step(logger, u'警告: ODB 中 CREST_REF 无 %s 输出，跳过', var)
+    finally:
+        odb.close()
+    return result
+
+
+def _find_fixed_input(logger):
+    """查找 fixed 场景的基底输入加速度文件。
+
+    优先使用 tssi_cfg['fixed_input'] 指定的路径（绝对或相对工况目录）；
+    未指定时自动在工况目录查找 crest_motion_h.txt（extract_crest_motion 的默认输出）。
+    返回 (文件路径, 时间段, 增量步长) 元组，与 find_acc_txt 返回格式对齐。
+    """
+    fi = tssi_cfg.get('fixed_input')  # 用户指定路径
+    if fi:
+        path = str(fi)
+        if not os.path.isabs(path):  # 相对路径按工况目录解析
+            path = os.path.join(os.getcwd(), path)
+    else:
+        path = os.path.join(os.getcwd(), 'crest_motion_h.txt')  # 默认查找
+    if not os.path.isfile(path):
+        raise IOError(u'fixed 场景输入文件不存在: %s（需先跑 freefield 并调用 extract_crest_motion 导出）' % path)
+    data = np.loadtxt(path)
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise ValueError(u'fixed 输入文件格式错误(需两列 时间/加速度): %s' % path)
+    t = data[:, 0].astype(float)
+    a = data[:, 1].astype(float)
+    dt = float(t[1] - t[0])
+    tp = float(t[-1])
+    if logger:
+        log_step(logger, u'[fixed] 基底输入: %s, 点数=%d, dt=%.5fs, 时长=%.2fs, PGA=%.4f m/s²',
+                 path, len(t), dt, tp, float(np.max(np.abs(a))))
+    return path, t, a, dt, tp
+
+
+def build_fixed_model(logger):
+    """建固定基础框架单体模型（三胞胎 fixed 场景）。
+
+    逻辑参考 frame_ssi_v1.py 的 build_fixed_scene()，但完整适配 v2 配置体系：
+    - 框架 Part：复用 build_frame_part（含 CDP+钢筋材料定义）
+    - 柱脚边界：嵌固（u2=0, ur3=0）+ AccelerationBC（输入 freefield 坡顶运动）
+    - 重力步：继承 tssi_cfg['gravity']（与 ssi 场景一致）
+    - 分析步：AUTOMATIC（CDP 非线性时）或 FIXED（弹性时）
+    - 输出：与 ssi 场景同口径（楼层 U/V/A、柱脚 U、底柱 SF、损伤/能量）
+    - 钢筋注入：add_frame_rebar（keyword 注入，最后调用）
+
+    返回 model_name 列表（与 build_models 返回格式一致，仅含一个模型名）。
+    """
+    # 读取输入时程
+    input_path, t_in, a_in, dt_in, tp_in = _find_fixed_input(logger)
+    record_name = os.path.splitext(os.path.basename(input_path))[0]  # 记录名（用于模型命名）
+    model_name = '%s-fixed' % record_name  # 模型命名
+
+    # 清理同名旧模型
+    if model_name in mdb.models:
+        del mdb.models[model_name]
+    model = mdb.Model(name=model_name)
+    asm = model.rootAssembly
+    asm.DatumCsysByDefault(CARTESIAN)
+
+    # 建框架 Part（复用 build_frame_part：含 CDP 本构 + 瑞利阻尼 + 钢筋材料定义）
+    frame, floor_full, ns = build_frame_part(model, logger)
+    frame_inst = 'Frame-1'
+    asm.Instance(name=frame_inst, part=frame, dependent=ON)
+
+    # 楼层集中质量（与 add_frame_on_crest 同逻辑）
+    m_total = float(frame_cfg['floor_mass'])
+    for k in range(1, ns + 1):
+        nm, cnt = floor_full[k]
+        asm.engineeringFeatures.PointMassInertia(
+            name='Mass_%d' % k, region=asm.instances[frame_inst].sets[nm], mass=m_total / float(cnt))
+
+    # 尾段时长（与 ssi 场景一致）
+    tail = float(tssi_cfg.get('tail_seconds', 0.0) if 'tail_seconds' in tssi_cfg else 0.0)
+
+    # 分析步（隐式动力）
+    nlgeom_flag = ON if tssi_cfg.get('nlgeom', False) else OFF
+    min_inc_factor = float(tssi_cfg.get('cdp_min_inc_factor', 1.0e-4))
+    step_name = DEFAULT_STEP_NAME
+    if tssi_cfg.get('nonlinear', True):  # CDP 非线性用自动增量
+        model.ImplicitDynamicsStep(
+            name=step_name, previous='Initial',
+            timePeriod=tp_in + tail, timeIncrementationMethod=AUTOMATIC,
+            initialInc=dt_in, minInc=dt_in * min_inc_factor, maxInc=dt_in, maxNumInc=1000000,
+            nlgeom=nlgeom_flag, application=TRANSIENT_FIDELITY)
+    else:  # 弹性用固定增量
+        model.ImplicitDynamicsStep(
+            name=step_name, previous='Initial',
+            timePeriod=tp_in + tail, timeIncrementationMethod=FIXED, initialInc=dt_in,
+            maxNumInc=1000000, nlgeom=nlgeom_flag, application=TRANSIENT_FIDELITY)
+
+    # 场输出（与 ssi 场景同口径）
+    variables = _normalize_output_variables(job_cfg.get('variables', ('U', 'V', 'A')))
+    frequency = int(job_cfg.get('frequency', 1))
+    model.fieldOutputRequests['F-Output-1'].setValues(variables=variables, frequency=frequency)
+
+    # P0#1 重力步（与 ssi 场景一致，fixed 场景也需预加轴压以保证 CDP 柱损伤形态正确）
+    grav_mode = str(tssi_cfg.get('gravity', 'off'))
+    if grav_mode != 'off':
+        model.StaticStep(name=GRAVITY_STEP_NAME, previous='Initial', timePeriod=1.0,
+                         initialInc=0.1, minInc=1.0e-6, maxInc=1.0, maxNumInc=100,
+                         nlgeom=nlgeom_flag)
+        # 施加重力（仅框架自重+楼层力，无土体、无基础板）
+        frame_region = asm.instances[frame_inst].sets['ALL_E']
+        try:
+            model.Gravity(name='Grav-frame', createStepName=GRAVITY_STEP_NAME,
+                          comp2=-GRAVITY_G, distributionType=UNIFORM, region=frame_region)
+        except Exception as _e:
+            log_step(logger, u'[%s] 框架 GRAV 施加失败(忽略): %s', model_name, str(_e))
+        n_col = int(frame_cfg['n_bay']) + 1
+        m_node = float(frame_cfg['floor_mass']) / float(n_col)
+        f_node = m_node * GRAVITY_G
+        for k in range(1, ns + 1):
+            model.ConcentratedForce(name='Wt-Floor%d' % k, createStepName=GRAVITY_STEP_NAME,
+                                    region=asm.instances[frame_inst].sets['FLOORALL_%d' % k], cf2=-f_node,
+                                    distributionType=UNIFORM, field='', localCsys=None)
+        log_step(logger, u'[%s] 重力(Level A)已施加: 框架GRAV + %d层楼层力', model_name, ns)
+
+    # 柱脚边界条件：嵌固（竖向+转动约束）
+    base = asm.instances[frame_inst].sets['BASE']
+    model.DisplacementBC(name='BaseVR', createStepName='Initial', region=base, u2=0.0, ur3=0.0)
+
+    # 基底加速度输入（freefield 坡顶运动）
+    amp_data = tuple((float(t_in[i]), float(a_in[i])) for i in range(len(t_in)))
+    model.TabularAmplitude(name='AccAmp', data=amp_data, timeSpan=STEP)
+    model.AccelerationBC(name='BaseAcc', createStepName=step_name, region=base, a1=1.0, amplitude='AccAmp')
+    log_step(logger, u'[%s] 柱脚嵌固 + 基底 AccelerationBC 已施加(输入=%s)', model_name, os.path.basename(input_path))
+
+    # 历史输出（与 ssi 场景同口径）
+    freq = int(tssi_cfg.get('history_freq', 1))
+    first_step = GRAVITY_STEP_NAME if GRAVITY_STEP_NAME in model.steps.keys() else step_name
+    # 楼层：U1/U2/V1/A1/A2
+    for k in range(1, ns + 1):
+        model.HistoryOutputRequest(name='H-Floor%d' % k, createStepName=step_name,
+                                   variables=('U1', 'U2', 'V1', 'A1', 'A2'),
+                                   region=asm.instances[frame_inst].sets['FLOOR_%d' % k], frequency=freq)
+    # 柱脚位移：U1/U2（摇摆角计算用）
+    model.HistoryOutputRequest(name='H-Base', createStepName=first_step,
+                               variables=('U1', 'U2'), region=base, frequency=freq)
+    # 底层柱截面力：SF1/SF2/SM1（基底剪力直取）
+    model.HistoryOutputRequest(name='H-ColBase', createStepName=first_step,
+                               variables=('SF1', 'SF2', 'SM1'),
+                               region=asm.instances[frame_inst].sets['COLS_BASE'], frequency=freq)
+    # 柱脚反力（fixed 场景特有，校核用）
+    model.HistoryOutputRequest(name='H-BaseRF', createStepName=step_name,
+                               variables=('RF1', 'RF2'), region=base, frequency=freq)
+    if tssi_cfg.get('nonlinear', True):  # 损伤场+能量
+        dmg_freq = max(1, freq) * 10
+        model.FieldOutputRequest(name='F-Frame-Damage', createStepName=step_name,
+                                 variables=('DAMAGET', 'DAMAGEC', 'PEEQ', 'S', 'E'),
+                                 region=asm.instances[frame_inst].sets['ALL_E'], frequency=dmg_freq)
+        model.HistoryOutputRequest(name='H-Energy', createStepName=step_name,
+                                   variables=('ALLPD', 'ALLIE', 'ALLKE', 'ALLSE', 'ETOTAL'), frequency=freq)
+
+    mdb.save()
+    log_step(logger, u'[%s] fixed 场景模型已建: %d层%d跨框架, 嵌固基础, %s, 时长=%.2fs',
+             model_name, ns, int(frame_cfg['n_bay']),
+             u'CDP非线性' if tssi_cfg.get('nonlinear', True) else u'弹性',
+             tp_in + tail)
+
+    # 钢筋注入（keyword 编辑，须是对模型的最后操作）
+    add_frame_rebar(model_name, logger)
+
+    return [model_name]
+
+
+# ==========================================================
 #  主入口
 # ==========================================================
+
 
 
 def main():
@@ -3630,6 +3904,41 @@ def main():
 
         log_step(logger, '运行控制: 自由场引擎=%s（已移除平坦对照模型，TAF 分母用解析自由场）', _ff_cfg.get('engine'))
 
+        # ── 三胞胎场景调度 ────────────────────────────────────────────────────
+        scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'
+        if scene not in ('ssi', 'freefield', 'fixed'):
+            raise ValueError("tssi_cfg['scene'] 仅支持 'ssi'/'freefield'/'fixed'，当前: %s" % scene)
+        log_step(logger, '三胞胎场景: scene=%s', scene)
+
+        # ── scene='fixed'：固定基础框架单体，不建土体 ─────────────────────────
+        if scene == 'fixed':
+            log_step(logger, '====== 阶段: fixed 场景——固定基础框架单体(不建土体/VAB) ======')
+            write_tssi_meta(logger)  # 写 tssi_meta（含 scene='fixed'）
+            model_names = build_fixed_model(logger)  # 建模 + 钢筋注入
+
+            log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
+            for model_name in model_names:
+                submit_job(
+                    num_cpus=job_cfg['num_cpus'],
+                    memory_percent=job_cfg['memory_percent'],
+                    model_name=model_name,
+                    logger=logger
+                )
+
+            log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
+            return  # fixed 场景提前返回，不走坡地建模流程
+
+        # ── scene='freefield' 预处理：强制 enable=False ───────────────────────
+        if scene == 'freefield':
+            tssi_cfg['enable'] = False  # freefield 场景不建框架
+            log_step(logger, '[freefield] 已强制 tssi_cfg.enable=False（纯坡地模型）')
+
+        # ── scene='ssi' 预处理：强制 enable=True ─────────────────────────────
+        if scene == 'ssi':
+            tssi_cfg['enable'] = True  # ssi 场景必须有框架
+            log_step(logger, '[ssi] 已强制 tssi_cfg.enable=True（全耦合模型）')
+
+        # ── 坡地建模流程（freefield 和 ssi 共用） ──────────────────────────────
         cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
                                                 int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数
         log_step(logger, '====== 阶段: 创建基础几何与网格模型 (cae=%s) ======', cae_name)
@@ -3638,9 +3947,12 @@ def main():
             site=site, geom=geom, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,  # 场地/几何/自适应网格/文件名/阻尼
             surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)  # v7 单元类型 + v9 分层网格 + v9.1 软层谐波加密(fc)
 
-        if tssi_cfg.get('enable'):  # TSSI: 在坡地基础模型上追加坡顶框架(Tie 耦合); build_models 会复制到各波
+        if tssi_cfg.get('enable'):  # ssi 场景: 在坡地基础模型上追加坡顶框架(Tie 耦合); build_models 会复制到各波
             add_frame_on_crest(base_model, geom, part_name, inst_name, logger)
             write_tssi_meta(logger)
+
+        if scene == 'freefield':  # freefield 场景: 补建 CREST_REF 参考点（不建框架但需提取坡顶运动）
+            _add_crest_ref_for_freefield(base_model, geom, inst_name, logger)
 
         if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element' and site.layers and acc_info:  # ② 逐单元 2D EQL(自管迭代提交)
             log_step(logger, '====== 阶段: 逐单元 2D EQL 迭代(自管建/提/读/更新) ======')
@@ -3660,11 +3972,15 @@ def main():
                 elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v3：单元类型透传(CPE8R 时边界自动用二次一致权重)
             model_names = slope_model_names  # 待提交的模型名称（已移除平坦对照模型）
 
-        if tssi_cfg.get('enable') and model_names:  # TSSI: 各波 SSI 模型追加框架层历史输出(步已建)
+        if tssi_cfg.get('enable') and model_names:  # ssi 场景: 各波 SSI 模型追加框架层历史输出(步已建)
             for _mn in model_names:
                 add_frame_outputs(_mn, logger)
                 add_footing_contact(_mn, inst_name, logger)  # P1#8：footing+contact 时建基础-土硬接触(步已建后)
                 add_frame_rebar(_mn, logger)  # step3：keyword注入梁柱钢筋，须最后调用(其后不再对模型做图形化修改)
+
+        if scene == 'freefield' and model_names:  # freefield 场景: 各波模型追加 CREST_REF 历史输出
+            for _mn in model_names:
+                _add_freefield_crest_outputs(_mn, inst_name, logger)
 
         log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
         for model_name in model_names:
