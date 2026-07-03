@@ -1,15 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-坡顶框架结构地震响应（TSSI）自包含建模脚本
-================================================================================
-1. 功能：在 v3 坡面波动引擎（上土下岩分层、粘弹性边界、斜入射等效力、EQL 非线性等）基础上，
-   通过 tssi_cfg['enable'] 开关控制是否叠加坡顶多层框架（采用 Tie 耦合）。
-2. 后处理：
-   - 启用 TSSI：每波建立 SSI 模型，用 Postprocess/Hybrid/Postprocess_SSI_response_v1.py 处理。
-   - 禁用 TSSI：退化为纯坡地模型，用 Postprocess/General/Postprocess_PGA_v3.py 处理。
-3. 运行方式：abaqus cae noGUI=slope_frame_ssi_full_v1.py （工作目录存放加速度记录文件）
-4. 兼容性：兼容 Python 2.7。
-"""
 
 from abaqus import *
 from abaqusConstants import *
@@ -36,7 +25,7 @@ from collections import namedtuple
 # 默认材料参数配置
 material_cfg = {
     'angle': 15,                        # SV 波入射角度（度）
-    'surface_geometry': 'horizontal',   #! 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
+    'surface_geometry': 'horizontal',   # 表层几何 'horizontal'=固定高程水平带 / 'terrain'=沿地形等厚铺设
     # 基岩材料参数（剪切波速直接给定，杨氏模量由 E=2ρVs²(1+ν) 内部换算）
     'bedrock': {
         'vs': 2000.0,                   # 基岩剪切波速（m/s）

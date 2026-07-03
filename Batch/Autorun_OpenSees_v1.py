@@ -25,7 +25,7 @@ STATIC_SOURCE_PATHS = [
 ]
 
 SCRIPT_SEQUENCE = [
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_TAF_multilayer_opensees_v1.py", # 一体化建模模拟与PGA提取
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\OpenSees\VAB_oblique_OpenSees_v1.py", # 一体化建模模拟与PGA提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py", # 计算 TAF
 ]
 
