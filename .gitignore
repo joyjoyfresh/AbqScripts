@@ -20,3 +20,5 @@ test/Abaqus/
 # OpenSees 工作目录，整个不进版本库
 test/OpenSees/
 
+# 正式工作目录下的所有文件不进版本库
+Run/
