@@ -164,6 +164,11 @@ tssi_cfg = {
     'enable': False,                      #! True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
     'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
     'nonlinear': True,                   #! step3: True=梁柱用CDP混凝土+钢筋(非线性纤维截面); False=退回纯弹性(step2 行为)
+    'gravity': 'off',                    #! P0#1 重力级别 'off'=现状(v1基线) / 'structure'=Level A 仅结构自重(动力步前静力步) / 'full'=Level B 全模型(P2,未实现)
+    'crest_offset_B': 0.0,               #! P0#2 距坡肩距离 M/B(0=右缘贴坡肩=v1基线; step4 扫描参数)
+    'T_fixed': None,                     #! P0#6 固定基础基本周期(s,周期延长基准); None=按层数 0.1N 估算(默认5层=0.5s=v1值), 有实测值时注入覆盖
+    'nlgeom': False,                     #! P1#10 几何非线性(P-Δ大位移) False=OFF(v1基线) / True=ON(强震层间角>1%时批量开)
+    'cdp_min_inc_factor': 1.0e-4,        # P1#9 CDP动力步最小增量=initialInc×该系数(收敛降级链:不收敛时调小,见下方降级链注释)
 }
 
 # 坡顶框架（B21 梁 + 楼层集中质量；坐坡顶右缘贴坡肩 x=left_flat）
@@ -190,8 +195,9 @@ frame_material_cfg = {
     'nu': 0.2,                           # 泊松比
     'density': 10.0,                     # 密度（kg/m^3，已按结构等效折算；真实楼层质量走 floor_mass 集中质量）
     'damping_ratio': 0.05,               # 瑞利阻尼目标阻尼比
-    'f1': 1.0,                           # 瑞利阻尼拟合下限频率（Hz）
-    'f2': 5.0,                           # 瑞利阻尼拟合上限频率（Hz）
+    'rayleigh_mode': 'fixed',            #! P0#4 拟合频段锚定 'fixed'=固定 f1/f2(v1基线) / 'modal'=按 T1 自动锚定(f1=0.8/T1,f2=5/T1 覆盖前三阶)
+    'f1': 1.0,                           # 瑞利阻尼拟合下限频率（Hz，rayleigh_mode='fixed' 时用）
+    'f2': 5.0,                           # 瑞利阻尼拟合上限频率（Hz，rayleigh_mode='fixed' 时用）
     'fc_mpa': 20.1,                      # 轴心抗压强度标准值 fck（MPa，GB50010 表4.1.3-1 C30）
     'ft_mpa': 2.01,                      # 轴心抗拉强度标准值 ftk（MPa，GB50010 表4.1.3-1 C30）
     'dilation_angle': 30.0,              # CDP 膨胀角（度，混凝土常用取值）
@@ -220,6 +226,19 @@ rebar_cfg = {
     },
 }
 
+# 基础形式配置（P1#7/#8：柱脚下条形基础板 + 可选接触升级；默认 'tie' 保持 v1 柱脚点绑定行为）
+foundation_cfg = {
+    'type': 'tie',                       #! P1#7 'tie'=柱脚点绑定土面(v1基线) / 'footing'=柱脚下加实体条形基础板(CPE4)+分布式绑定土面
+    'width': None,                       # 基础板宽(m)；None=按框架宽×1.2 自动(保证≥框架宽，两侧各挑出0.1倍)
+    'thickness': 0.8,                    # 基础板厚(m)——坐在坡顶面上，顶面接柱脚
+    'E': 30.0e9,                         # 基础混凝土弹性模量(Pa，C30)
+    'nu': 0.2,                           # 基础泊松比
+    'density': 2500.0,                   # 基础密度(kg/m³，混凝土；重力步与惯性均计入)
+    'mesh_size': None,                   # 基础板网格尺寸(m)；None=取 thickness/2
+    'contact': False,                    #! P1#8 True=基础底与土面【硬接触+库仑摩擦】(可提离滑移,强震批C专用) / False=Tie绑定(默认)
+    'mu': 0.5,                           # 土-基础库仑摩擦系数(contact=True 时用，μ≈0.4~0.6)
+}
+
 
 # ==========================================================
 #  模块常量与全局状态
@@ -227,6 +246,8 @@ rebar_cfg = {
 
 _DEFAULT_SCRIPT_NAME = 'slope_frame_ssi_full_v2.py'  # __file__ 缺失时的兜底文件名
 DEFAULT_STEP_NAME = 'Step-earthquake'  # 默认分析步名称
+GRAVITY_STEP_NAME = 'Step-gravity'  # 重力静力步名称（P0#1：动力步前施加自重）
+GRAVITY_G = 9.81  # 重力加速度（m/s²，重力两步法与楼层节点力共用）
 BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # 边界节点集名称
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 边界处理顺序(左/右/底)
 
@@ -2328,18 +2349,30 @@ def build_models(acc_info, base_model, part_name, inst_name,
 
         model = mdb.models[new_model_name]
         tail = float((tcfg or {}).get('tail_seconds', 0.0) or 0.0)  # v8：静默尾段时长（与 fd 自由场时窗一致）
-        if tssi_cfg.get('enable') and tssi_cfg.get('nonlinear', True):  # step3：CDP材料非线性用自动增量(可回缩重试)，FIXED遇不收敛会直接中止
+
+        # 先建地震动力步（previous='Initial'）：默认 F-Output-1 锚在此步，U/V/A 场输出合法。
+        # P0#1 重力静力步随后用 previous='Initial' 插到它【前面】（Abaqus 自动把地震步 previous 重排为重力步），
+        # 从而静力步不含 V/A 场输出，避免"静力步非法变量"报错。
+        # P1#10 几何非线性(P-Δ)：tssi_cfg['nlgeom'] 控制，默认 OFF=v1 基线；强震大位移时开 ON。
+        nlgeom_flag = ON if tssi_cfg.get('nlgeom', False) else OFF
+        # ── P1#9 CDP 收敛降级链（不收敛时按序尝试，前三档不改架构，均可由 case_config 注入实现；D1 转 Explicit 需人工决策不默认做）──
+        #   ① 增大 CDP 粘性正则化：注入 frame_material_cfg['viscosity'] 5e-4 → 2e-3（助收敛，量级不显著改本构）；
+        #   ② 减小最小增量：注入 tssi_cfg['cdp_min_inc_factor'] 1e-4 → 1e-5（放宽自动增量下限，允许更细回缩）；
+        #   ③ 自动增量放松：已用 AUTOMATIC（遇不收敛自动回缩重试），无需额外动作；
+        #   ④【决策点 D1，不默认】转 Explicit：架构级改动，斜入射等效节点力施加方式需重核。
+        min_inc_factor = float(tssi_cfg.get('cdp_min_inc_factor', 1.0e-4))
+        if tssi_cfg.get('enable') and tssi_cfg.get('nonlinear', True):  # step3：CDP材料非线性用自动增量(可回缩重试)
             model.ImplicitDynamicsStep(
                 name=step_name, previous='Initial',
                 timePeriod=tp + tail, timeIncrementationMethod=AUTOMATIC,
-                initialInc=inc, minInc=inc * 1.0e-4, maxInc=inc, maxNumInc=1000000,
-                nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 若仍不收敛需按路线图 step3 转 Explicit
+                initialInc=inc, minInc=inc * min_inc_factor, maxInc=inc, maxNumInc=1000000,
+                nlgeom=nlgeom_flag, application=TRANSIENT_FIDELITY)  # 收敛降级见上；仍不收敛按 D1 转 Explicit
         else:  # 纯坡地/弹性框架(已验证行为)：固定增量不变
             model.ImplicitDynamicsStep(
                 name=step_name, previous='Initial',
                 timePeriod=tp + tail, timeIncrementationMethod=FIXED, initialInc=inc,
                 maxNumInc=1000000,
-                nlgeom=OFF, application=TRANSIENT_FIDELITY)  # 关闭几何非线性；TRANSIENT_FIDELITY(α≈-0.05)降数值阻尼，让物理材料阻尼主导
+                nlgeom=nlgeom_flag, application=TRANSIENT_FIDELITY)  # TRANSIENT_FIDELITY(α≈-0.05)降数值阻尼，让物理材料阻尼主导
 
         model.fieldOutputRequests['F-Output-1'].setValues(
             variables=variables, frequency=frequency)  # 指定输出变量和频率
@@ -2350,6 +2383,15 @@ def build_models(acc_info, base_model, part_name, inst_name,
             model.fieldOutputRequests['F-Output-1'].setValues(  # 整体场输出降频（仅留抽检帧）
                 variables=variables, frequency=10000000)  # 设为极大间隔（几乎只输出首末帧）
             log_step(logger, '%s 输出瘦身: TOP_SURFACE 全时程 A/U + 整体场输出降频', new_model_name)  # 记录瘦身日志
+
+        # P0#1 重力两步法：在地震步【前】插 Static 通用步施加结构自重。previous='Initial' → Abaqus
+        # 自动把该静力步插到 Initial 与地震步之间，地震步续接其静平衡状态。'off'(v1基线)则不插。
+        grav_mode = str(tssi_cfg.get('gravity', 'off')) if tssi_cfg.get('enable') else 'off'
+        if grav_mode != 'off':
+            model.StaticStep(name=GRAVITY_STEP_NAME, previous='Initial', timePeriod=1.0,
+                             initialInc=0.1, minInc=1.0e-6, maxInc=1.0, maxNumInc=100,
+                             nlgeom=nlgeom_flag)  # 静力步，载荷 0→满 线性斜坡；nlgeom 与动力步一致(P-Δ 预载)
+            _apply_frame_gravity(model, grav_mode, logger, new_model_name)  # 施加自重（框架GRAV + 楼层节点力）
 
         mdb.save()
         log_step(logger, '%s 分析步已创建, 时长=%.2f(含尾段 %.2f), 增量=%.3f',
@@ -2507,7 +2549,9 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         if isinstance(cfg.get('boundary_cfg'), dict):  # 人工边界吸收缩放覆盖（边界吸收对照实验）
             boundary_cfg.update(cfg['boundary_cfg'])  # 就地更新全局 boundary_cfg(扁平字典，与 eql_cfg 同模式)
             _merged_keys.append('boundary_cfg')
-        for _tssi_key, _tssi_dict in (('tssi_cfg', tssi_cfg), ('frame_cfg', frame_cfg), ('rebar_cfg', rebar_cfg)):  # TSSI三块含嵌套dict(column/beam)需深合并，就地更新(无需global)
+        for _tssi_key, _tssi_dict in (('tssi_cfg', tssi_cfg), ('frame_cfg', frame_cfg),
+                                      ('frame_material_cfg', frame_material_cfg), ('rebar_cfg', rebar_cfg),
+                                      ('foundation_cfg', foundation_cfg)):  # P0#5+P1#7：TSSI各段含嵌套dict(column/beam)需深合并，就地更新(无需global)
             if isinstance(cfg.get(_tssi_key), dict):
                 _merged = _deep_merge(_tssi_dict, cfg[_tssi_key])
                 _tssi_dict.clear(); _tssi_dict.update(_merged)
@@ -3006,6 +3050,18 @@ def rayleigh_coeffs(xi, f1, f2):
     return 2.0 * xi * w1 * w2 / (w1 + w2), 2.0 * xi / (w1 + w2)
 
 
+def _frame_T1_estimate():
+    """框架固定基础基本周期 T1（s）：有注入实测值(tssi_cfg['T_fixed'])则用之，否则按 0.1N 经验估算。
+
+    供 P0#4 瑞利阻尼 modal 锚定与 P0#6 tssi_meta 的 T_fixed 共用，保证两处口径一致。
+    默认 5 层 → 0.1×5=0.5s（与 v1 硬编码 0.5 一致）。
+    """
+    T_inj = tssi_cfg.get('T_fixed')          # 注入的实测/指定周期
+    if T_inj is not None:
+        return float(T_inj)
+    return 0.1 * int(frame_cfg['n_story'])   # 0.1N 经验估算
+
+
 # ==========================================================
 #  step3: 混凝土 CDP 单轴本构曲线（GB50010-2010 附录 C.2 经验公式）
 # ==========================================================
@@ -3115,7 +3171,15 @@ def build_frame_part(model, logger):
     mat = model.Material(name=mc['name'])
     mat.Elastic(table=((mc['E'], mc['nu']),))
     mat.Density(table=((mc['density'],),))
-    a_r, b_r = rayleigh_coeffs(mc['damping_ratio'], mc['f1'], mc['f2'])
+    # P0#4：瑞利阻尼拟合频段。'fixed'=固定 f1/f2(v1基线)；'modal'=按结构基本周期 T1 自动锚定前三阶
+    if str(mc.get('rayleigh_mode', 'fixed')) == 'modal':
+        T1_est = _frame_T1_estimate()          # 0.1N 估算或注入实测值
+        f1_ray = 0.8 / T1_est                  # 下限≈0.8/T1(略低于一阶)
+        f2_ray = 5.0 / T1_est                  # 上限≈5/T1(覆盖前三阶)
+        log_step(logger, u'框架瑞利阻尼(modal): T1≈%.3fs -> f1=%.3fHz, f2=%.3fHz', T1_est, f1_ray, f2_ray)
+    else:
+        f1_ray = mc['f1']; f2_ray = mc['f2']   # 固定频段(v1基线)
+    a_r, b_r = rayleigh_coeffs(mc['damping_ratio'], f1_ray, f2_ray)
     mat.Damping(alpha=a_r, beta=b_r)
     if tssi_cfg.get('nonlinear', True):  # step3：混凝土 CDP 非线性(GB50010 附录C.2 本构) + 钢筋弹塑性材料
         cdp = _gb50010_concrete_cdp_curves(mc['fc_mpa'], mc['ft_mpa'], mc['E'])
@@ -3141,6 +3205,8 @@ def build_frame_part(model, logger):
     beam_mids = [(((xs[j] + xs[j + 1]) / 2.0, ys[k], z),) for k in range(1, ns + 1) for j in range(nb)]
     part.Set(edges=part.edges.findAt(*col_mids), name='COLS')
     part.Set(edges=part.edges.findAt(*beam_mids), name='BEAMS')
+    col_base_mids = [((x, (ys[0] + ys[1]) / 2.0, z),) for x in xs]  # P0#3：底层柱段中点(基底剪力 SF 直取用)
+    part.Set(edges=part.edges.findAt(*col_base_mids), name='COLS_BASE')
     part.SectionAssignment(region=part.sets['COLS'], sectionName='ColSec')
     part.SectionAssignment(region=part.sets['BEAMS'], sectionName='BeamSec')
     part.assignBeamSectionOrientation(region=part.Set(edges=part.edges, name='ALL_E'), method=N1_COSINES, n1=(0.0, 0.0, -1.0))
@@ -3162,48 +3228,206 @@ def build_frame_part(model, logger):
 # ==========================================================
 
 def add_frame_on_crest(model_name, geom, soil_part_name, soil_inst_name, logger):
-    """框架坐坡顶(右缘贴坡肩) + Tie 基底到坡顶土面 + 楼层集中质量。返回 (frame_inst, ns)。"""
+    """框架坐坡顶 + 基础耦合到坡顶土面 + 楼层集中质量。返回 (frame_inst, ns)。
+
+    基础形式(foundation_cfg['type'])：
+      · 'tie'(默认,v1基线)：柱脚顶点直接 Tie 到坡顶土面(tieRotations=OFF 铰接、点绑定)；
+      · 'footing'(P1#7)：柱脚下加实体条形基础板(CPE4R)，柱脚 Tie 基础顶(tieRotations=ON 刚接)，
+        基础底 Tie 土面(分布式,缓解点绑定应力集中)；foundation contact=True 时基础底改硬接触+摩擦(P1#8,per-model)。
+    """
     model = mdb.models[model_name]
     asm = model.rootAssembly
     frame, floor_full, ns = build_frame_part(model, logger)
     frame_inst = 'Frame-1'
     asm.Instance(name=frame_inst, part=frame, dependent=ON)
     fw = int(frame_cfg['n_bay']) * float(frame_cfg['bay_width'])
-    x_off = float(geom.left_flat) - fw        # 右缘贴坡肩 x=left_flat
-    asm.translate(instanceList=(frame_inst,), vector=(x_off, geom.H_upper, 0.0))
+    # P0#2：距坡肩距离 M=crest_offset_B×fw。0=右缘贴坡肩(x=left_flat, v1基线)；>0 时框架整体左移，step4 扫描退让距离
+    crest_off_B = float(tssi_cfg.get('crest_offset_B', 0.0))
+    x_off = float(geom.left_flat) - fw - crest_off_B * fw
+    if x_off < -1.0e-6:  # 框架左缘越出上平台左端，几何非法
+        raise ValueError('crest_offset_B=%.3f 过大：框架左缘 x=%.2f 越出上平台[0,%.2f]，请减小或加大 left_flat'
+                         % (crest_off_B, x_off, geom.left_flat))
+    # P1#7：基础形式。footing 时框架整体上抬一个基础板厚 T（坐在基础顶），基础板占 [H_upper, H_upper+T]
+    use_footing = (str(foundation_cfg.get('type', 'tie')) == 'footing')
+    foot_T = float(foundation_cfg.get('thickness', 0.8)) if use_footing else 0.0
+    asm.translate(instanceList=(frame_inst,), vector=(x_off, geom.H_upper + foot_T, 0.0))
     m_total = float(frame_cfg['floor_mass'])
     for k in range(1, ns + 1):
         nm, cnt = floor_full[k]
         asm.engineeringFeatures.PointMassInertia(
             name='Mass_%d' % k, region=asm.instances[frame_inst].sets[nm], mass=m_total / float(cnt))
-    # 坡顶平台土面 [0,left_flat] 建 Tie 主面
+    # 坡顶平台土面 [0,left_flat] 建 Tie/接触 主面
     soil_part = model.parts[soil_part_name]
     crest_edge = soil_part.edges.findAt(((geom.left_flat * 0.5, geom.H_upper, 0.0),))
     soil_part.Surface(side1Edges=crest_edge, name='CREST_SURF')
-    model.Tie(name='FrameSoil', master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
-              slave=asm.instances[frame_inst].sets['BASE'],
-              positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=OFF, thickness=ON)
+    if use_footing:  # P1#7：实体条形基础板 + 柱脚刚接基础顶 + 基础底耦合土面
+        _build_footing(model, geom, x_off, fw, foot_T, soil_inst_name, logger, model_name)
+    else:  # v1 基线：柱脚顶点直接 Tie 土面（铰接、点绑定）
+        model.Tie(name='FrameSoil', master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
+                  slave=asm.instances[frame_inst].sets['BASE'],
+                  positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=OFF, thickness=ON)
     # 坡顶参考节点(TOP_SURFACE 中 x 最接近 left_flat)——供 SSI 后处理(框架基础运动/TAF)
     top = asm.instances[soil_inst_name].sets['TOP_SURFACE']
     crest_node = min(top.nodes, key=lambda n: abs(n.coordinates[0] - geom.left_flat))
     asm.Set(name='CREST_REF', nodes=asm.instances[soil_inst_name].nodes.sequenceFromLabels([crest_node.label]))
-    log_step(logger, u'[%s] 坡顶框架已挂(x_off=%.1f,y=%.0f)+Tie耦合, 坡顶参考x=%.0f', model_name, x_off, geom.H_upper, crest_node.coordinates[0])
+    log_step(logger, u'[%s] 坡顶框架已挂(x_off=%.1f,y=%.1f,M/B=%.2f,M=%.1fm,基础=%s)+耦合, 坡顶参考x=%.0f',
+             model_name, x_off, geom.H_upper + foot_T, crest_off_B, crest_off_B * fw,
+             ('footing T=%.2fm' % foot_T) if use_footing else 'tie', crest_node.coordinates[0])
     return frame_inst, ns
 
 
+def _build_footing(model, geom, x_off, fw, foot_T, soil_inst_name, logger, model_name):
+    """P1#7：建实体条形基础板(CPE4R)并耦合。基础占 x∈[cx-W/2,cx+W/2], y∈[H_upper,H_upper+T]。
+    · 柱脚 BASE(y=H_upper+T) Tie 基础顶 FOOT_TOP，tieRotations=ON（刚接，传弯矩）；
+    · 基础底 FOOT_BOT(y=H_upper) 与土面 CREST_SURF：contact=False 时 Tie，True 时留给 add_footing_contact 建接触。
+    """
+    asm = model.rootAssembly
+    W = float(foundation_cfg['width']) if foundation_cfg.get('width') else fw * 1.2  # None=框架宽×1.2
+    if W < fw - 1.0e-6:  # 基础须不窄于框架
+        raise ValueError('foundation width=%.2f 小于框架宽 %.2f' % (W, fw))
+    cx = x_off + fw / 2.0                       # 框架(与基础)水平中心
+    x_left = cx - W / 2.0                        # 基础左缘
+    if x_left < -1.0e-6 or (cx + W / 2.0) > geom.left_flat + 1.0e-6:  # 越出上平台
+        raise ValueError('基础板 x∈[%.2f,%.2f] 越出上平台[0,%.2f]，请减小 width/crest_offset 或加大 left_flat'
+                         % (x_left, cx + W / 2.0, geom.left_flat))
+    msize = float(foundation_cfg['mesh_size']) if foundation_cfg.get('mesh_size') else max(foot_T / 2.0, 0.1)
+    # 基础板 Part（局部坐标 x∈[0,W], y∈[0,T]）
+    fs = model.ConstrainedSketch(name='__footing__', sheetSize=max(W, foot_T) * 2.0)
+    fs.rectangle(point1=(0.0, 0.0), point2=(W, foot_T))
+    fpart = model.Part(name='Footing', dimensionality=TWO_D_PLANAR, type=DEFORMABLE_BODY)
+    fpart.BaseShell(sketch=fs)
+    del model.sketches['__footing__']
+    fmat = model.Material(name='Concrete_Footing')
+    fmat.Elastic(table=((float(foundation_cfg['E']), float(foundation_cfg['nu'])),))
+    fmat.Density(table=((float(foundation_cfg['density']),),))
+    model.HomogeneousSolidSection(name='FootSec', material='Concrete_Footing', thickness=1.0)  # 2D 平面应变单位厚
+    fpart.SectionAssignment(region=Region(faces=fpart.faces), sectionName='FootSec')
+    fpart.Set(faces=fpart.faces, name='ALL_F')  # 基础全单元集(重力 GRAV 用)
+    fpart.Surface(side1Edges=fpart.edges.findAt(((W / 2.0, foot_T, 0.0),)), name='FOOT_TOP')  # 基础顶面
+    fpart.Surface(side1Edges=fpart.edges.findAt(((W / 2.0, 0.0, 0.0),)), name='FOOT_BOT')      # 基础底面
+    fpart.seedPart(size=msize, deviationFactor=0.1, minSizeFactor=0.1)
+    fpart.setElementType(regions=(fpart.faces,), elemTypes=(mesh.ElemType(elemCode=CPE4R, elemLibrary=STANDARD),))
+    fpart.generateMesh()
+    asm.Instance(name='Footing-1', part=fpart, dependent=ON)
+    asm.translate(instanceList=('Footing-1',), vector=(x_left, geom.H_upper, 0.0))  # 就位：底=H_upper
+    # 柱脚 Tie 基础顶（刚接）
+    model.Tie(name='FrameFooting', master=asm.instances['Footing-1'].surfaces['FOOT_TOP'],
+              slave=asm.instances['Frame-1'].sets['BASE'],
+              positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=ON, thickness=ON)
+    if not foundation_cfg.get('contact'):  # 基础底 Tie 土面（默认）；contact=True 时改由 add_footing_contact 建接触
+        model.Tie(name='FootingSoil', master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
+                  slave=asm.instances['Footing-1'].surfaces['FOOT_BOT'],
+                  positionToleranceMethod=COMPUTED, adjust=ON, tieRotations=OFF, thickness=ON)
+    log_step(logger, u'[%s] 条形基础板已建: 宽%.2fm×厚%.2fm(CPE4R,%d单元), 柱脚刚接基础顶, 基础底%s土面',
+             model_name, W, foot_T, len(fpart.elements), u'接触(待per-model)' if foundation_cfg.get('contact') else u'Tie')
+
+
+def _apply_frame_gravity(model, grav_mode, logger, model_name):
+    """P0#1 Level A：重力静力步内给坡顶框架施加自重（build_models 建静力步后调用）。
+
+    · 梁柱自重：GRAV 分布力作用于 Frame 单元（默认密度小、量级次要，但物理完整）；
+    · 楼层重力：显式向下节点力 = 每节点分摊质量×g。不依赖"点质量吃 GRAV"
+      （Abaqus 中 GRAV 对 engineeringFeatures 点质量的作用不确定），直接加力可确保
+      柱底轴力锚点 N≈Σ楼层质量·g/柱数（默认 5 层 4 柱 ≈613kN，见 §5 QA）。
+    Level A 不给土体加重力（避免静-动边界切换），土由 VAB 接地弹簧承静载。
+    grav_mode: 'structure'=Level A（本实现）；'full'=Level B 全模型 geostatic（P2 未实现，回退 Level A 并告警）。
+    """
+    asm = model.rootAssembly
+    frame = asm.instances['Frame-1']
+    if grav_mode == 'full':  # Level B 尚未实现
+        log_step(logger, u'[%s] gravity=full(Level B 全模型geostatic)尚未实现，回退 Level A 仅结构自重', model_name)
+    try:  # 梁柱自重(仅框架单元,土体不加)；密度小量级次要，失败不影响楼层力主锚点
+        model.Gravity(name='Grav-frame', createStepName=GRAVITY_STEP_NAME,
+                      comp2=-GRAVITY_G, distributionType=UNIFORM, region=frame.sets['ALL_E'])
+    except Exception as _e:
+        log_step(logger, u'[%s] 框架 GRAV 施加失败(忽略,梁柱自重次要): %s', model_name, str(_e))
+    if 'Footing-1' in asm.instances.keys():  # P1#7：条形基础板自重(实体单元,GRAV 直接生效)
+        try:
+            model.Gravity(name='Grav-footing', createStepName=GRAVITY_STEP_NAME,
+                          comp2=-GRAVITY_G, distributionType=UNIFORM, region=asm.instances['Footing-1'].sets['ALL_F'])
+        except Exception as _e:
+            log_step(logger, u'[%s] 基础板 GRAV 施加失败(忽略): %s', model_name, str(_e))
+    ns = int(frame_cfg['n_story'])
+    n_col = int(frame_cfg['n_bay']) + 1              # 每层节点数=柱数=跨数+1
+    m_node = float(frame_cfg['floor_mass']) / float(n_col)  # 每节点分摊质量(与点质量分摊一致)
+    f_node = m_node * GRAVITY_G                      # 每节点重力(N,向下)
+    for k in range(1, ns + 1):  # 逐层楼板重力作向下节点力
+        model.ConcentratedForce(name='Wt-Floor%d' % k, createStepName=GRAVITY_STEP_NAME,
+                                region=frame.sets['FLOORALL_%d' % k], cf2=-f_node,
+                                distributionType=UNIFORM, field='', localCsys=None)
+    log_step(logger, u'[%s] 重力(Level A)已施加: 框架GRAV + %d层×%d节点(每节点%.1fkN); 预期柱底轴力≈%.0fkN(手算锚点)',
+             model_name, ns, n_col, f_node / 1.0e3,
+             ns * float(frame_cfg['floor_mass']) * GRAVITY_G / float(n_col) / 1.0e3)
+
+
 def add_frame_outputs(model_name, logger):
-    """给已建步的 SSI 模型加坡顶参考(CREST_REF)+框架各层历史输出(U1/A1)。build_models 建步后逐波调用。"""
+    """给已建步的 SSI 模型配 TSSI 历史/场输出。build_models 建步后逐波调用。
+
+    P0#3 输出补全：
+      · 楼层：U1/U2/V1/A1/A2（增 U2/A2 摇摆/竖向）；
+      · 柱脚 BASE：U1/U2（摇摆角 θ=(u2_前柱−u2_后柱)/B，后处理算）；
+      · 底层柱单元 COLS_BASE：SF1/SF2/SM1（基底剪力直取，与 Σm·a 互校）；
+      · nonlinear 时：Frame 单元集损伤场 DAMAGET/DAMAGEC/PEEQ（降频）+ 整体能量 ALLPD/ALLIE/ETOTAL。
+    """
     model = mdb.models[model_name]
     asm = model.rootAssembly
     freq = int(tssi_cfg.get('history_freq', 1))
     ns = int(frame_cfg['n_story'])
+    frame = asm.instances['Frame-1']
+    # 静力合法量(位移U/截面力SF)锚到【首步】：有重力步时=Step-gravity，使其覆盖重力步(verify 读重力末帧柱底轴力)；
+    # 含 V/A(速度/加速度)的量只在地震动力步有意义，锚到 Step-earthquake。
+    first_step = GRAVITY_STEP_NAME if GRAVITY_STEP_NAME in model.steps.keys() else DEFAULT_STEP_NAME
     model.HistoryOutputRequest(name='H-Crest', createStepName=DEFAULT_STEP_NAME,
                                variables=('U1', 'A1'), region=asm.sets['CREST_REF'], frequency=freq)
-    for k in range(1, ns + 1):
+    for k in range(1, ns + 1):  # 楼层：增 U2/A2（摇摆/竖向分量，Q5）；含 A/V 故锚地震步
         model.HistoryOutputRequest(name='H-Floor%d' % k, createStepName=DEFAULT_STEP_NAME,
-                                   variables=('U1', 'V1', 'A1'),
-                                   region=asm.instances['Frame-1'].sets['FLOOR_%d' % k], frequency=freq)
-    log_step(logger, u'[%s] TSSI 框架输出已配: 坡顶参考 + %d 层', model_name, ns)
+                                   variables=('U1', 'U2', 'V1', 'A1', 'A2'),
+                                   region=frame.sets['FLOOR_%d' % k], frequency=freq)
+    # 柱脚位移：U1/U2 供摇摆角 θ 计算（后处理取前/后柱 u2 差 / 框架宽）；静力合法，锚首步覆盖重力步
+    model.HistoryOutputRequest(name='H-Base', createStepName=first_step,
+                               variables=('U1', 'U2'), region=frame.sets['BASE'], frequency=freq)
+    # 底层柱截面力：SF1(轴力)/SF2(剪力)/SM1(弯矩)，基底剪力 V=ΣSF2 直取；静力合法，锚首步以覆盖重力步(轴力锚点)
+    model.HistoryOutputRequest(name='H-ColBase', createStepName=first_step,
+                               variables=('SF1', 'SF2', 'SM1'), region=frame.sets['COLS_BASE'], frequency=freq)
+    if tssi_cfg.get('nonlinear', True):  # 非线性：损伤场 + 能量（弹性时无损伤/塑性耗能，跳过）
+        dmg_freq = max(1, freq) * 10  # 损伤场输出降频（ODB 瘦身，损伤演化慢于响应）
+        model.FieldOutputRequest(name='F-Frame-Damage', createStepName=DEFAULT_STEP_NAME,
+                                 variables=('DAMAGET', 'DAMAGEC', 'PEEQ', 'S', 'E'),
+                                 region=frame.sets['ALL_E'], frequency=dmg_freq)
+        model.HistoryOutputRequest(name='H-Energy', createStepName=DEFAULT_STEP_NAME,
+                                   variables=('ALLPD', 'ALLIE', 'ALLKE', 'ALLSE', 'ETOTAL'), frequency=freq)
+    log_step(logger, u'[%s] TSSI 输出已配: 坡顶参考 + %d 层(U/V/A含2向) + 柱脚U2 + 底柱SF + %s',
+             model_name, ns, u'损伤场/能量' if tssi_cfg.get('nonlinear', True) else u'(弹性,无损伤)')
+
+
+def add_footing_contact(model_name, soil_inst_name, logger):
+    """P1#8：基础板底与坡顶土面建【硬接触 + 库仑摩擦】，允许提离/滑移（替代 FootingSoil Tie）。
+
+    仅 foundation type='footing' 且 contact=True 时生效。接触需在已建分析步上创建，故本函数
+    在 build_models 建步之后逐波调用（与 add_frame_outputs 并列）。接触自首步(有重力步=重力步)起激活，
+    使基础在自重下压紧土面、强震下可提离/滑移，考察摇摆/滑移占比（仅批 C 强震代表工况建议启用）。
+    收敛提示：硬接触+隐式在强震下较难收敛，配合 P1#9 降级链（增大 CDP 粘性、减小最小增量）。
+    """
+    if not (str(foundation_cfg.get('type', 'tie')) == 'footing' and foundation_cfg.get('contact')):
+        return  # 非接触工况：基础底已在 _build_footing 里 Tie，无需处理
+    if str(tssi_cfg.get('gravity', 'off')) == 'off':  # 接触需自重压紧,否则基础悬空可张开
+        log_step(logger, u'[%s] 警告：contact=True 但 gravity=off，基础无自重压紧、可能初始张开，建议同开 gravity=structure', model_name)
+    model = mdb.models[model_name]
+    asm = model.rootAssembly
+    mu = float(foundation_cfg.get('mu', 0.5))
+    prop = model.ContactProperty('FootSoilProp')
+    prop.NormalBehavior(pressureOverclosure=HARD, allowSeparation=ON, constraintEnforcementMethod=DEFAULT)  # 硬接触可提离
+    prop.TangentialBehavior(formulation=PENALTY, directionality=ISOTROPIC, table=((mu,),),  # 库仑摩擦(罚)
+                            maximumElasticSlip=FRACTION, fraction=0.005)
+    first_step = GRAVITY_STEP_NAME if GRAVITY_STEP_NAME in model.steps.keys() else DEFAULT_STEP_NAME  # 自重步起激活
+    model.SurfaceToSurfaceContactStd(
+        name='FootSoilContact', createStepName=first_step,
+        master=asm.instances[soil_inst_name].surfaces['CREST_SURF'],
+        slave=asm.instances['Footing-1'].surfaces['FOOT_BOT'],
+        sliding=FINITE, interactionProperty='FootSoilProp',
+        adjustMethod=OVERCLOSED, initialClearance=OMIT, thickness=ON)  # 初始过闭合自动调整贴合
+    log_step(logger, u'[%s] P1#8 基础-土 硬接触+库仑摩擦(μ=%.2f)已建, 自 %s 起激活(可提离滑移)',
+             model_name, mu, first_step)
 
 
 def _find_beamsection_keyword_index(sie_blocks, elset_tag):
@@ -3267,7 +3491,13 @@ def write_tssi_meta(logger):
     """写 tssi_meta.json：框架参数(供 SSI 后处理 Postprocess_SSI_response 读取)。"""
     meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
             'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
-            'inst_frame': 'Frame-1', 'T_fixed_step1': 0.5,  # T_fixed_step1: step1 固定基础 T1(周期延长基准)
+            'inst_frame': 'Frame-1',
+            'T_fixed_step1': _frame_T1_estimate(),  # P0#6：固定基础 T1(周期延长基准)，注入实测优先否则0.1N，去硬编码0.5
+            'crest_offset_B': float(tssi_cfg.get('crest_offset_B', 0.0)),  # P0#2：距坡肩距离 M/B(step4 扫描)
+            'gravity': str(tssi_cfg.get('gravity', 'off')),  # P0#1：重力级别(off/structure/full)
+            'nlgeom': bool(tssi_cfg.get('nlgeom', False)),  # P1#10：几何非线性(P-Δ)
+            'foundation_type': str(foundation_cfg.get('type', 'tie')),  # P1#7：tie/footing
+            'foundation_contact': bool(foundation_cfg.get('contact', False)),  # P1#8：基础底是否硬接触
             'nonlinear': bool(tssi_cfg.get('nonlinear', True)),  # step3: True=CDP混凝土+钢筋纤维截面
             'concrete_fc_mpa': frame_material_cfg.get('fc_mpa'), 'concrete_ft_mpa': frame_material_cfg.get('ft_mpa'),
             'rebar_ratio_column': rebar_cfg['column']['ratio'], 'rebar_ratio_beam': rebar_cfg['beam']['ratio']}
@@ -3433,6 +3663,7 @@ def main():
         if tssi_cfg.get('enable') and model_names:  # TSSI: 各波 SSI 模型追加框架层历史输出(步已建)
             for _mn in model_names:
                 add_frame_outputs(_mn, logger)
+                add_footing_contact(_mn, inst_name, logger)  # P1#8：footing+contact 时建基础-土硬接触(步已建后)
                 add_frame_rebar(_mn, logger)  # step3：keyword注入梁柱钢筋，须最后调用(其后不再对模型做图形化修改)
 
         log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
