@@ -11,7 +11,6 @@ import math
 import os
 import io
 import json
-import sys
 import time
 import logging
 import traceback
@@ -51,9 +50,9 @@ material_cfg = {
 geometry_cfg = {
     'slope_height': 200.0,              # 坡高 hs = 坡顶与坡脚地表高程差 (m)——唯一绝对尺度
     'slope_angle': 45.0,                # 坡角 (度)
-    'crest_window': 3.0,                # 坡顶观测窗（hs 倍数，计划书 A_max；地形放大 x/h≈3~4 已衰减回 1）
-    'toe_window': 2.0,                  # 坡脚观测窗（hs 倍数，计划书 C_max）
-    'side_clearance': 1.0,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
+    'crest_window': 4.0,                # 坡顶观测窗（hs 倍数，计划书 A_max；地形放大 x/h≈3~4 已衰减回 1）
+    'toe_window': 3.0,                  # 坡脚观测窗（hs 倍数，计划书 C_max）
+    'side_clearance': 0.1,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
     'base_depth': 2.0,                  # 坡脚面以下模型深度（hs 倍数，恒定不随地层变；土层扣完剩余全归基岩）
 }
 
@@ -108,6 +107,7 @@ freefield_cfg = {
     'spectrum_tol': 1e-7,               # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
     'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
     'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
+    'bottom_ymax_mode': 'local',         # 底边界自由场柱高：local=按 x 上方地表/upper=上平台柱/lower=下平台柱
 }
 
 # 运行控制配置
@@ -245,6 +245,7 @@ BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 边界处理顺序(左/右/底)
 MAX_REFLECT_ORDER = 3   # ray 覆盖层多次反射截断阶数(默认3，可由 case_config.json 顶层 max_reflect_order 覆盖)
 _REFL_COEFF_CACHE = {}  # ray 等效反射/转换系数缓存(运行时填充)
 _FD_SOLVER_CACHE = {}  # fd 引擎缓存：键=round(ymax_col,4) 的柱解；另含 '_input' 键缓存输入谱
+_UNICODE_TYPE = type(u'')  # Abaqus Python 2 下为 unicode；避免编辑器把 unicode 名称报未定义
 
 
 # ============================================================
@@ -289,11 +290,6 @@ def _script_path():  # 安全获取当前脚本绝对路径（Abaqus 内核可�
 def _script_name():
     """返回脚本文件名（如 'VAB_oblique_TAF_multilayer_v8.py'），不依赖 __file__。"""
     return os.path.basename(_script_path())
-
-
-def _script_dir():
-    """返回脚本所在目录；__file__ 缺失时退化为当前工作目录。"""
-    return os.path.dirname(_script_path())
 
 
 def log_step(logger=None, message=None, *args):
@@ -356,16 +352,9 @@ def _safe_arcsin(value):
     return math.asin(max(-1.0, min(1.0, value)))  # 将输入截断到合法范围后再求反正弦
 
 
-def _ensure_str(obj):  # 递归将 unicode 转为原生 str（Py2 兼容 Abaqus API）
-    """递归将 json.load 产生的 unicode 转为 Python 2 原生 str（bytes），Py3 保持不变。
-
-    Abaqus Python 2 的 C++ API（如 model.Material(name=...)）只接受 str，拒绝 unicode。
-    而 json.load 在 Py2 下默认返回 unicode，因此加载 case_config.json 后必须转换。
-    """
-    if sys.version_info[0] >= 3:  # Py3：str 即 unicode，Abaqus 2020+ 原生接受
-        return obj  # 无需转换
-    # Py2 分支：json.load 返回 unicode，需递归转为 str
-    if isinstance(obj, unicode):  # 字符串节点
+def _ensure_str(obj):  # 递归将 unicode 转为原生 str（Abaqus Python 2）
+    """递归将 json.load 产生的 unicode 转为 str，避免 Abaqus C++ API 拒收 unicode。"""
+    if isinstance(obj, _UNICODE_TYPE):  # 字符串节点
         return obj.encode('utf-8')  # unicode → str（UTF-8 字节串）
     if isinstance(obj, dict):  # 字典节点
         return {_ensure_str(k): _ensure_str(v) for k, v in obj.items()}
@@ -2052,6 +2041,9 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
     field_data = {}
     geom = ctx.geom
     engine = (ctx.ffcfg or {}).get('engine', 'ray')  # 自由场引擎选择（'fd' 或 'ray'）
+    bottom_ymax_mode = (ctx.ffcfg or {}).get('bottom_ymax_mode', 'local')  # 底边界自由场柱高模式
+    if bottom_ymax_mode not in ('local', 'upper', 'lower'):  # 配置错误直接报出，避免静默跑错工况
+        raise ValueError("freefield_cfg.bottom_ymax_mode 必须为 'local'/'upper'/'lower'，当前为 %s" % bottom_ymax_mode)
     get_vel = None  # 射线法速度延迟缓存（fd 引擎不需要）
     get_dis = None  # 射线法位移延迟缓存（fd 引擎不需要）
     if engine != 'fd':  # 仅射线法路径需要延迟缓存
@@ -2059,8 +2051,8 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
         get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
     if logger:
         _total_nodes = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
-        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
-                 model_name, engine, _total_nodes,  # 引擎与总数
+        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 底边界柱高=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
+                 model_name, engine, bottom_ymax_mode, _total_nodes,  # 引擎/底边界模式与总数
                  len(nodes_by_boundary['l']), len(nodes_by_boundary['r']), len(nodes_by_boundary['b']))  # 各边界节点数
     for boundary in BOUNDARY_SEQUENCE:
         _t_b = time.time()  # 该边界计算起始时间
@@ -2071,7 +2063,12 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
             elif boundary == 'r':  # 右边界
                 ymax_col = ctx.ymax_r  # 右边界柱地表高度
             else:  # 底边界
-                ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)  # 该底节点正上方地表高度
+                if bottom_ymax_mode == 'upper':  # 测试：底边界统一用上平台柱
+                    ymax_col = geom.H_upper
+                elif bottom_ymax_mode == 'lower':  # 测试：底边界统一用下平台柱
+                    ymax_col = geom.H_lower
+                else:  # 默认：按该底节点正上方地表高度取局部柱
+                    ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)
 
             if engine == 'fd':  # v6 默认：频域精确分层自由场
                 ff = _fd_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx)  # fd 引擎自由场时程
@@ -2501,39 +2498,32 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         return (material_cfg, geometry_cfg, damping_cfg, mesh_cfg_out,  # 原样返回默认
                 time_cfg_out, max_reflect_order_out, ff_cfg_out, run_cfg_out)  # 含 v6 新增两项
     try:  # 尝试读取并覆盖
-        import json  # 导入 JSON 模块
         if logger:  # 记录发现注入文件
             log_step(logger, '发现 case_config.json，开始加载并覆盖默认配置: %s', path)
         with io.open(path, 'r', encoding='utf-8') as f:  # 打开配置文件（io.open：Py2 内置 open 不支持 encoding 关键字）
             cfg = _ensure_str(json.load(f))  # 解析并递归转换 unicode→str（Py2 下 Abaqus API 只接受 str）
         _merged_keys = []  # 记录已合并的配置段名（用于日志）
-        if isinstance(cfg.get('material_cfg'), dict):  # 提供了材料覆盖
-            material_cfg = _deep_merge(material_cfg, cfg['material_cfg'])  # 合并材料配置
-            _merged_keys.append('material_cfg')
-        if isinstance(cfg.get('geometry_cfg'), dict):  # 提供了几何覆盖
-            geometry_cfg = _deep_merge(geometry_cfg, cfg['geometry_cfg'])  # 合并几何配置
-            _merged_keys.append('geometry_cfg')
-        if isinstance(cfg.get('damping_cfg'), dict):  # 提供了阻尼覆盖（批量调参/关阻尼）
-            damping_cfg = _deep_merge(damping_cfg, cfg['damping_cfg'])  # 合并阻尼配置
-            _merged_keys.append('damping_cfg')
-        if isinstance(cfg.get('mesh_cfg'), dict):  # 项②：提供了网格配置覆盖（含 size）
-            mesh_cfg_out = _deep_merge(mesh_cfg_out, cfg['mesh_cfg'])  # 合并网格配置
-            _merged_keys.append('mesh_cfg')
+        _cfg_targets = {'material_cfg': material_cfg, 'geometry_cfg': geometry_cfg, 'damping_cfg': damping_cfg,
+                        'mesh_cfg': mesh_cfg_out, 'time_cfg': time_cfg_out,
+                        'freefield_cfg': ff_cfg_out, 'run_cfg': run_cfg_out}  # 普通配置段
+        for _key in ('material_cfg', 'geometry_cfg', 'damping_cfg', 'mesh_cfg',
+                     'time_cfg', 'freefield_cfg', 'run_cfg'):  # 有覆盖则递归深合并
+            if isinstance(cfg.get(_key), dict):
+                _cfg_targets[_key] = _deep_merge(_cfg_targets[_key], cfg[_key])
+                _merged_keys.append(_key)
+        material_cfg = _cfg_targets['material_cfg']  # 取回合并后的材料配置
+        geometry_cfg = _cfg_targets['geometry_cfg']  # 取回合并后的几何配置
+        damping_cfg = _cfg_targets['damping_cfg']  # 取回合并后的阻尼配置
+        mesh_cfg_out = _cfg_targets['mesh_cfg']  # 取回合并后的网格配置
+        time_cfg_out = _cfg_targets['time_cfg']  # 取回合并后的时间配置
+        ff_cfg_out = _cfg_targets['freefield_cfg']  # 取回合并后的自由场配置
+        run_cfg_out = _cfg_targets['run_cfg']  # 取回合并后的运行配置
         if cfg.get('mesh_size') is not None:  # v9.1：兼容旧写法——顶层 mesh_size 映射到 mesh_cfg['size']
             mesh_cfg_out['size'] = cfg['mesh_size']  # 覆盖基准网格尺寸（向后兼容）
             _merged_keys.append('mesh_size(旧写法)')  # 记录兼容映射
-        if isinstance(cfg.get('time_cfg'), dict):  # 项③：提供了时间步校验覆盖
-            time_cfg_out = _deep_merge(time_cfg_out, cfg['time_cfg'])  # 合并时间步校验配置
-            _merged_keys.append('time_cfg')
         if cfg.get('max_reflect_order') is not None:  # 项④：提供了反射阶数覆盖
             max_reflect_order_out = int(cfg['max_reflect_order'])  # 覆盖反射截断阶数
             _merged_keys.append('max_reflect_order')
-        if isinstance(cfg.get('freefield_cfg'), dict):  # v6：提供了自由场引擎覆盖
-            ff_cfg_out = _deep_merge(ff_cfg_out, cfg['freefield_cfg'])  # 合并自由场引擎配置
-            _merged_keys.append('freefield_cfg')
-        if isinstance(cfg.get('run_cfg'), dict):  # v6：提供了运行控制覆盖
-            run_cfg_out = _deep_merge(run_cfg_out, cfg['run_cfg'])  # 合并运行控制配置
-            _merged_keys.append('run_cfg')
         if isinstance(cfg.get('eql_cfg'), dict):  # 土体非线性 EQL 覆盖
             eql_cfg.update(cfg['eql_cfg'])  # 就地更新全局 eql_cfg(扁平字典)
             _merged_keys.append('eql_cfg')
@@ -2687,6 +2677,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
         meta['freefield'] = {  # v6 自由场引擎信息（追溯用）
             'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
             'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
+            'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
         }
         # ── v7：远场一维理论台阶 ff_theory（自动 QA 锚点） ──────────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
@@ -3773,6 +3764,140 @@ def build_fixed_model(logger):
 # ==========================================================
 
 
+def _log_site_summary(logger, site, geometry, n_total_layers, surface_geometry):  # 输出场地摘要
+    """记录场地分层、基岩与基岩顶面信息，便于批跑日志核对。"""
+    log_step(logger, '场地分层构建完成: 总层数(含基岩)=%d, 有限层=%s, 表层几何=%s',
+             n_total_layers, [L.name for L in site.layers], surface_geometry)
+    log_step(logger, '基岩: Vs=%.0f m/s, ν=%.2f, ρ=%.0f kg/m³',
+             site.bedrock.cs, site.bedrock.vv, site.bedrock.density)
+    for layer in site.layers:  # 逐层记录土层波速与厚度
+        vr = site.bedrock.cs / layer.cs if layer.cs > 0 else None  # 相对基岩波速比
+        log_step(logger, '土层[%s]: Vs=%.0f m/s, Vr/Vs=%.2f, ν=%.2f, ρ=%.0f, 厚度=%.1f m',
+                 layer.name, layer.cs, vr, layer.vv, layer.density, layer.thickness)
+    log_step(logger, '基岩顶面高程=%.1f m（坡脚面以下深度 %.1f m 恒定，土层扣完剩余归基岩）',
+             site.bedrock_thickness, geometry['H_lower'])
+
+
+def _estimate_fc_from_first_record(acc_info, logger):  # 估计首条输入主频
+    """从首条加速度记录估计主频；失败返回 None，不中断建模。"""
+    if not acc_info:  # 无输入记录
+        return None
+    try:
+        acc0 = np.loadtxt(acc_info[0][0])
+        fc = _estimate_dominant_freq(acc0[:, 1], acc0[1, 0] - acc0[0, 0])
+        log_step(logger, '阻尼主频自动估计: fc=%.3f Hz（源记录: %s）', fc, acc_info[0][0])
+        return fc
+    except Exception as exc:
+        log_step(logger, '阻尼主频估计失败(将依赖显式 fc 或回退): %s', str(exc))
+        return None
+
+
+def _resolve_material_damping(site, geom, damping_cfg, acc_info, surface_geometry, logger):  # 解析材料阻尼
+    """解析阻尼主频、双控锚点与 perband 锚点，返回完整阻尼配置和主频。"""
+    fc_est = None
+    if damping_cfg.get('enable') and damping_cfg.get('fc') is None:
+        fc_est = _estimate_fc_from_first_record(acc_info, logger)
+    damping = _resolve_damping(damping_cfg, fc_est)
+    fc = damping.get('fc')
+    if damping.get('enable') and damping.get('anchor') == 'dual':
+        f_site = _site_fundamental_freq(site, geom)
+        if f_site:
+            damping['f_site'] = f_site
+            log_step(logger, '阻尼双控锚定: f_site=%.3f Hz（瑞利拟合下限取 min(f1_factor*fc, f_site)）', f_site)
+    _log_perband_anchors(logger, site, geom, surface_geometry, damping, fc)
+    log_step(logger, '材料阻尼: enable=%s, method=%s, anchor=%s, fc=%s',
+             damping.get('enable'), damping.get('method'), damping.get('anchor', 'input'), fc)
+    return damping, fc
+
+
+def _log_perband_anchors(logger, site, geom, surface_geometry, damping, fc):  # 输出逐层阻尼锚定信息
+    """perband 阻尼模式下输出各有限层共振频率与实际拟合上限。"""
+    if not (damping.get('enable') and damping.get('anchor') == 'perband' and fc):
+        return
+    hcover = float(damping.get('harmonics_cover', 3.0))
+    for idx, band in enumerate(_build_stratigraphy(site, geom, ymin=0.0, surface_geometry=surface_geometry)):
+        if idx == 0:  # 基岩带无有限层共振
+            continue
+        fl = _band_resonance_freq(band)
+        if fl:
+            f2_eff = max(damping['f2_factor'] * fc, hcover * fl)
+            log_step(logger, '逐层重锚定: 层 %s f_layer=%.3f Hz -> 拟合上限 f2=%.3f Hz（旧 input 锚定仅 %.3f Hz）',
+                     band['name'], fl, f2_eff, damping['f2_factor'] * fc)
+
+
+def _run_eql_if_enabled(site, geom, acc_info, damping, logger):  # 执行 EQL 预处理
+    """按配置执行等效线性预处理，失败时回退线性并返回 meta。"""
+    eql_meta = {'enable': False}
+    if not (eql_cfg.get('enable') and site.layers and acc_info):
+        return site, eql_meta
+    try:
+        acc_eql = np.loadtxt(acc_info[0][0])
+        dt_eql = float(acc_eql[1, 0] - acc_eql[0, 0])
+        site, xi_by, eql_info = _run_freefield_eql(site, geom, eql_cfg, acc_eql[:, 1], dt_eql, logger)
+        damping['xi_by_layer'] = xi_by
+        eql_meta = {'enable': True, 'mode': eql_cfg.get('mode', '1d'), 'curve': eql_cfg.get('curve'),
+                    'PI': eql_cfg.get('PI'), 'sigma0_kpa': eql_cfg.get('sigma0_kpa'), 'layers': eql_info}
+        log_step(logger, '土体非线性 EQL: 曲线=%s, 非线性层=%s', eql_cfg.get('curve'), list(xi_by.keys()))
+    except Exception as exc:
+        log_step(logger, 'EQL 失败(回退线性): %s', str(exc))
+    return site, eql_meta
+
+
+def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终网格尺寸
+    """根据频率判据收敛 mesh_size，返回实际使用的网格尺寸。"""
+    mesh_used = mesh_size
+    if mesh_cfg.get('auto') and fc:
+        delta_l = _max_element_size(site, fc, mesh_cfg)
+        mesh_used = min(mesh_size, delta_l)
+        if mesh_used < mesh_size:
+            log_step(logger, '网格自适应: Δl_max=%.2fm -> mesh_used=%.2fm (原 mesh_size=%.2fm)',
+                     delta_l, mesh_used, mesh_size)
+        else:
+            log_step(logger, '网格判据: Δl_max=%.2fm >= mesh_size=%.2fm，无需细化', delta_l, mesh_size)
+    else:
+        log_step(logger, '网格尺寸: %.2fm（自适应未启用或 fc 未知）', mesh_used)
+    return mesh_used
+
+
+def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, ffcfg,
+                               surface_geometry, acc_info, selfcheck, eql_meta):  # 写出工况元数据
+    """写出 case_meta.json，并输出远场理论台阶 QA 摘要。"""
+    first_rec = acc_info[0][0] if acc_info else None
+    ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
+                                 damping=damping, ffcfg=ffcfg, sgeom=surface_geometry, acc_path=first_rec,
+                                 selfcheck=selfcheck, eql_info=eql_meta)
+    if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
+        log_step(logger, '远场一维理论台阶: 左(上平台) TAF_h=%.3f TAF_v=%.3f | 右(下平台) TAF_h=%.3f TAF_v=%.3f (FE 远场应与之一致±5%%)',
+                 ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],
+                 ff_theory['right']['taf_h'], ff_theory['right']['taf_v'])
+    return ff_theory
+
+
+def _apply_scene_mode(scene, logger):  # 校验并应用 TSSI 场景开关
+    """校验 scene，并按 freefield/ssi 语义同步 tssi_cfg['enable']。"""
+    if scene not in ('ssi', 'freefield', 'fixed'):
+        raise ValueError("tssi_cfg['scene'] 仅支持 'ssi'/'freefield'/'fixed'，当前: %s" % scene)
+    log_step(logger, '三胞胎场景: scene=%s', scene)
+    if scene == 'freefield':
+        tssi_cfg['enable'] = False
+        log_step(logger, '[freefield] 已强制 tssi_cfg.enable=False（纯坡地模型）')
+    elif scene == 'ssi':
+        tssi_cfg['enable'] = True
+        log_step(logger, '[ssi] 已强制 tssi_cfg.enable=True（全耦合模型）')
+
+
+def _submit_models(model_names, logger):  # 批量提交作业
+    """按全局 job_cfg 提交模型列表。"""
+    log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
+    for model_name in model_names:
+        submit_job(num_cpus=job_cfg['num_cpus'],
+                   memory_percent=job_cfg['memory_percent'],
+                   model_name=model_name,
+                   logger=logger)
+
+# ==========================================================
+#  主函数
+# ==========================================================
 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""
@@ -3798,16 +3923,7 @@ def main():
         sgeom = str(material_cfg.get('surface_geometry', 'horizontal'))  # v7：表层几何模式（可由 case_config.json 注入）
         if sgeom not in ('horizontal', 'terrain'):  # 校验模式合法性
             raise ValueError("surface_geometry 仅支持 'horizontal' 或 'terrain'，当前: %s" % sgeom)  # 抛出配置错误
-        log_step(logger, '场地分层构建完成: 总层数(含基岩)=%d, 有限层=%s, 表层几何=%s',
-                 n_total_layers, [L.name for L in site.layers], sgeom)
-        log_step(logger, '基岩: Vs=%.0f m/s, ν=%.2f, ρ=%.0f kg/m³',
-                 site.bedrock.cs, site.bedrock.vv, site.bedrock.density)
-        for _L in site.layers:  # 逐层记录土层波速与厚度
-            _vr = site.bedrock.cs / _L.cs if _L.cs > 0 else None  # 该层相对基岩波速比
-            log_step(logger, '土层[%s]: Vs=%.0f m/s, Vr/Vs=%.2f, ν=%.2f, ρ=%.0f, 厚度=%.1f m',
-                     _L.name, _L.cs, _vr, _L.vv, _L.density, _L.thickness)
-        log_step(logger, '基岩顶面高程=%.1f m（坡脚面以下深度 %.1f m 恒定，土层扣完剩余归基岩）',
-                 site.bedrock_thickness, geometry_cfg['H_lower'])
+        _log_site_summary(logger, site, geometry_cfg, n_total_layers, sgeom)  # 统一输出场地分层摘要
 
         geom = make_geometry(
             total_L=geometry_cfg['total_L'],  # 模型总长度
@@ -3819,62 +3935,13 @@ def main():
 
         acc_info = find_acc_txt(logger, wave_files=_run_cfg.get('wave_files'))  # 波形来源：注入路径优先，否则扫工况目录
 
-        # 解析材料阻尼：若未显式指定主频 fc，则用首条加速度记录估计（多记录同 fc 是标准用法；不同 fc 时以首条为准）
-        fc_est = None
-        if damping_cfg.get('enable') and damping_cfg.get('fc') is None and acc_info:  # 启用阻尼且需自动估计 fc
-            try:  # 估计失败不应中断建模
-                _acc0 = np.loadtxt(acc_info[0][0])
-                fc_est = _estimate_dominant_freq(_acc0[:, 1], _acc0[1, 0] - _acc0[0, 0])
-                log_step(logger, '阻尼主频自动估计: fc=%.3f Hz（源记录: %s）', fc_est, acc_info[0][0])
-            except Exception as _e:  # 估计异常
-                log_step(logger, '阻尼主频估计失败(将依赖显式 fc 或回退): %s', str(_e))
-        damping = _resolve_damping(damping_cfg, fc_est)  # 解析阻尼配置（补全 fc，供建材与 meta 共用）
-        fc_resolved = damping.get('fc')  # 解析后的主频（网格/时间步校验复用）
-        if damping.get('enable') and damping.get('anchor') == 'dual':  # v8：双控锚定（场地基频+输入主频）
-            _f_site = _site_fundamental_freq(site, geom)  # 估算上平台柱场地基频
-            if _f_site:  # 估算成功
-                damping['f_site'] = _f_site  # 写入解析后配置（建材/fd 自由场/meta 共用同一份，口径一致）
-                log_step(logger, '阻尼双控锚定: f_site=%.3f Hz（瑞利拟合下限取 min(f1_factor*fc, f_site)）', _f_site)
-        if damping.get('enable') and damping.get('anchor') == 'perband' and fc_resolved:  # v9：逐层重锚定（QA 打印各层共振频带）
-            _strat_log = _build_stratigraphy(site, geom, ymin=0.0, surface_geometry=sgeom)  # 与建材同口径分层
-            _hc = float(damping.get('harmonics_cover', 3.0))  # 谐波覆盖次数
-            for _idx, _band in enumerate(_strat_log):  # 逐带打印共振频率与拟合上限
-                if _idx == 0:  # 基岩带跳过（无共振、Q≈999）
-                    continue
-                _fl = _band_resonance_freq(_band)  # 该层共振基频
-                if _fl:  # 有效时记录
-                    _f2_eff = max(damping['f2_factor'] * fc_resolved, _hc * _fl)  # 该层实际拟合上限
-                    log_step(logger, '逐层重锚定: 层 %s f_layer=%.3f Hz -> 拟合上限 f2=%.3f Hz（旧 input 锚定仅 %.3f Hz）',
-                             _band['name'], _fl, _f2_eff, damping['f2_factor'] * fc_resolved)
-        log_step(logger, '材料阻尼: enable=%s, method=%s, anchor=%s, fc=%s',
-                 damping.get('enable'), damping.get('method'), damping.get('anchor', 'input'), fc_resolved)
+        damping, fc_resolved = _resolve_material_damping(site, geom, damping_cfg, acc_info, sgeom, logger)  # 解析材料阻尼
 
         # ── 土体非线性：等效线性(EQL) 在建 FE 前更新 site/damping ──
-        _eql_meta = {'enable': False}  # EQL 结果(写入 case_meta)
-        if eql_cfg.get('enable') and site.layers and acc_info:  # 启用 EQL 且有有限层与输入
-            try:
-                _acc_eql = np.loadtxt(acc_info[0][0])  # 首条输入(代表强度)
-                _dt_eql = float(_acc_eql[1, 0] - _acc_eql[0, 0])
-                site, _xi_by, _eql_info = _run_freefield_eql(site, geom, eql_cfg, _acc_eql[:, 1], _dt_eql, logger)
-                damping['xi_by_layer'] = _xi_by  # 注入逐层 ξ(建材/自由场/meta 同口径)
-                _eql_meta = {'enable': True, 'mode': eql_cfg.get('mode', '1d'), 'curve': eql_cfg.get('curve'),
-                             'PI': eql_cfg.get('PI'), 'sigma0_kpa': eql_cfg.get('sigma0_kpa'), 'layers': _eql_info}
-                log_step(logger, '土体非线性 EQL: 曲线=%s, 非线性层=%s', eql_cfg.get('curve'), list(_xi_by.keys()))
-            except Exception as _e:  # EQL 失败回退线性, 不中断建模
-                log_step(logger, 'EQL 失败(回退线性): %s', str(_e))
+        site, _eql_meta = _run_eql_if_enabled(site, geom, acc_info, damping, logger)  # EQL 失败时自动回退线性
 
         # ── 项②：网格自适应 ─────────────────────────────────────────────────────
-        mesh_used = mesh_size  # 默认使用配置指定尺寸
-        if _mesh_cfg.get('auto') and fc_resolved:  # 启用自适应且已知主频
-            delta_l = _max_element_size(site, fc_resolved, _mesh_cfg)
-            mesh_used = min(mesh_size, delta_l)  # 取较小值（不超过 Kuhlemeyer-Lysmer 限值）
-            if mesh_used < mesh_size:  # 自适应网格比配置值更细
-                log_step(logger, '网格自适应: Δl_max=%.2fm -> mesh_used=%.2fm (原 mesh_size=%.2fm)',
-                         delta_l, mesh_used, mesh_size)
-            else:  # 配置值已满足判据
-                log_step(logger, '网格判据: Δl_max=%.2fm >= mesh_size=%.2fm，无需细化', delta_l, mesh_size)
-        else:  # 未启用自适应或主频未知
-            log_step(logger, '网格尺寸: %.2fm（自适应未启用或 fc 未知）', mesh_used)
+        mesh_used = _resolve_mesh_used(site, mesh_size, fc_resolved, _mesh_cfg, logger)  # 频率判据下的实际网格尺寸
         # ── 网格自适应结束 ──────────────────────────────────────────────────────
 
         log_step(logger, '====== 阶段: fd 引擎建模前自检(解析对拍) ======')
@@ -3882,22 +3949,14 @@ def main():
 
         log_step(logger, '====== 阶段: 写出工况元数据 case_meta.json ======')
 
-        first_rec = acc_info[0][0] if acc_info else None  # v7：首条输入记录（理论台阶计算用）
-        ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,  # 写出统一工况元数据 case_meta.json
-                                     damping=damping, ffcfg=_ff_cfg, sgeom=sgeom, acc_path=first_rec,  # 含 v7 ff_theory/x_crest/x_toe/a0
-                                     selfcheck=selfcheck, eql_info=_eql_meta)  # v8 自检 + v2 EQL 结果写入 meta
-        if ff_theory and ff_theory.get('left') and ff_theory.get('right'):  # v7：打印理论台阶（QA 锚点）
-            log_step(logger, '远场一维理论台阶: 左(上平台) TAF_h=%.3f TAF_v=%.3f | 右(下平台) TAF_h=%.3f TAF_v=%.3f (FE 远场应与之一致±5%%)',
-                     ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],  # 左柱理论值
-                     ff_theory['right']['taf_h'], ff_theory['right']['taf_v'])  # 右柱理论值
+        _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, _ff_cfg,
+                                   sgeom, acc_info, selfcheck, _eql_meta)  # 写 case_meta 并输出理论 QA
 
         log_step(logger, '运行控制: 自由场引擎=%s（已移除平坦对照模型，TAF 分母用解析自由场）', _ff_cfg.get('engine'))
 
         # ── 三胞胎场景调度 ────────────────────────────────────────────────────
         scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'
-        if scene not in ('ssi', 'freefield', 'fixed'):
-            raise ValueError("tssi_cfg['scene'] 仅支持 'ssi'/'freefield'/'fixed'，当前: %s" % scene)
-        log_step(logger, '三胞胎场景: scene=%s', scene)
+        _apply_scene_mode(scene, logger)  # 校验场景并同步 tssi_cfg.enable
 
         # ── scene='fixed'：固定基础框架单体，不建土体 ─────────────────────────
         if scene == 'fixed':
@@ -3905,27 +3964,10 @@ def main():
             write_tssi_meta(logger)  # 写 tssi_meta（含 scene='fixed'）
             model_names = build_fixed_model(logger)  # 建模 + 钢筋注入
 
-            log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
-            for model_name in model_names:
-                submit_job(
-                    num_cpus=job_cfg['num_cpus'],
-                    memory_percent=job_cfg['memory_percent'],
-                    model_name=model_name,
-                    logger=logger
-                )
+            _submit_models(model_names, logger)  # fixed 场景提交固定基础模型
 
             log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
             return  # fixed 场景提前返回，不走坡地建模流程
-
-        # ── scene='freefield' 预处理：强制 enable=False ───────────────────────
-        if scene == 'freefield':
-            tssi_cfg['enable'] = False  # freefield 场景不建框架
-            log_step(logger, '[freefield] 已强制 tssi_cfg.enable=False（纯坡地模型）')
-
-        # ── scene='ssi' 预处理：强制 enable=True ─────────────────────────────
-        if scene == 'ssi':
-            tssi_cfg['enable'] = True  # ssi 场景必须有框架
-            log_step(logger, '[ssi] 已强制 tssi_cfg.enable=True（全耦合模型）')
 
         # ── 坡地建模流程（freefield 和 ssi 共用） ──────────────────────────────
         cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
@@ -3971,14 +4013,7 @@ def main():
             for _mn in model_names:
                 _add_freefield_crest_outputs(_mn, inst_name, logger)
 
-        log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
-        for model_name in model_names:
-            submit_job(
-                num_cpus=job_cfg['num_cpus'],
-                memory_percent=job_cfg['memory_percent'],
-                model_name=model_name,
-                logger=logger
-            )
+        _submit_models(model_names, logger)  # 统一提交所有待运行模型
 
         log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
     except Exception as exc:  # 捕获脚本运行异常

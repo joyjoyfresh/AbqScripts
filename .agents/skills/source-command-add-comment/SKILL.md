@@ -1,8 +1,13 @@
 ---
+name: "source-command-add-comment"
 description: "依据项目编码规范，为选中的 Python 代码自动添加注释。"
-name: "add-comment"
-agent: "agent"
 ---
+
+# source-command-add-comment
+
+Use this skill when the user asks to run the migrated source command `add-comment`.
+
+## Command Template
 
 # 代码注释添加规则
 

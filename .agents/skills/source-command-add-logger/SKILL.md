@@ -1,8 +1,13 @@
 ---
+name: "source-command-add-logger"
 description: "按照项目专属的 log_step 函数规范，为选中的 Python 代码自动插入运行日志。"
-name: "add-log"
-agent: "agent"
 ---
+
+# source-command-add-logger
+
+Use this skill when the user asks to run the migrated source command `add-logger`.
+
+## Command Template
 
 # 添加日志规则
 你是一位严谨且经验丰富的研发工程师。你的任务是为我选中的代码片段添加详尽的运行日志，以便于调试和追踪程序进度。

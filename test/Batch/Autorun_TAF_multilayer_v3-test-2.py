@@ -1,19 +1,4 @@
 # -*- coding: utf-8 -*-  # 声明源码编码为 UTF-8
-"""批量跑【多种变参数工况】的合并版 Autorun（配置注入方式）。
-
-合并了原 Autorun_TAF_multilayer_v1（三层图15 扫描）与 Autorun_TAF_multilayer_verify_v1（双层 i/angle 扫描），
-统一调用合并版建模脚本 Modeling/Multi/VAB_oblique_TAF_multilayer_v5.py。
-
-与旧版"正则替换标量"不同，本版用【配置注入】：每个工况在 PARAMETER_CASES 里给一份 config 覆盖
-（material_cfg/geometry_cfg/mesh_size 的部分或全部），脚本把它写进工况文件夹的 case_config.json，
-建模脚本 v4 运行时读取并覆盖默认配置。于是一个批处理即可任意改：
-  层数(单/双/三层，靠 material_cfg.layers 列表长度)、各层波速比/泊松比/密度/厚度、
-  几何(坡角 i、坡高 H_minus_h、深度比 h_over_H、覆盖层/基岩厚、总长、平台长)、入射角 angle、网格 mesh_size。
-
-每个工况文件夹内执行顺序：建模(v4) → 提取 PGA → 计算 TAF → 每文件夹出图。
-跑完后再用 Postprocess/General/Collect_results_v2.py 汇总各工况 case_meta.json 到 results/index.csv，
-最后用 Postprocess/Multi/Plot_Multi_TAF_v4.py 跨工况出图（论文图8 排版）。
-"""
 
 import os  # 导入操作系统路径与目录模块
 import json  # 导入 JSON 模块用于写出 case_config.json
@@ -35,8 +20,8 @@ STATIC_SOURCE_PATHS = [  # 定义固定源文件完整路径列表
 
 # 每个工况文件夹按顺序执行的脚本（路径已对齐目录整理后的新位置）
 SCRIPT_SEQUENCE = [  # 定义脚本顺序配置列表
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v2.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v2.py",  # PGA 提取
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Multi\VAB_oblique_multilayer_nonlinear_v3.py",  # v5 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Postprocess_PGA_v3.py",  # PGA 提取
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\General\Compute_TAF_v2.py",  # TAF 计算
 ]  # 结束脚本顺序配置定义
 

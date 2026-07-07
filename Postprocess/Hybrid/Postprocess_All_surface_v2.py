@@ -51,19 +51,14 @@ import logging
 import numpy as np
 
 openOdb = None  # 占位
-is_abaqus = False
-try:
-    # 尝试导入 abaqusConstants，若成功说明处于 Abaqus 环境。该导入在普通 Python 下抛出 ImportError 且无自举风险。
-    import abaqusConstants
-    is_abaqus = True
-except ImportError:
-    pass
+is_abaqus = False  # 是否成功加载 Abaqus ODB 接口
 
-if is_abaqus:
-    try:
-        from odbAccess import openOdb  # Abaqus ODB 接口
-    except Exception:
-        pass
+try:
+    import abaqusConstants  # Abaqus 常量模块
+    from odbAccess import openOdb  # Abaqus ODB 接口
+    is_abaqus = True  # 成功导入即按 Abaqus 环境处理
+except Exception:
+    openOdb = None  # 普通 Python 环境下保留降级路径
 
 try:
     if hasattr(sys, 'setdefaultencoding'):  # 仅在 Python 2 下执行
@@ -256,7 +251,7 @@ def farfield_qa(rows, taf_lr):
 def _load_json(path):  # 读 json，缺失返回 None
     if not os.path.isfile(path):
         return None
-    with open(path, 'r') as fh:
+    with io.open(path, 'r', encoding='utf-8') as fh:
         return json.load(fh)
 
 
@@ -602,7 +597,7 @@ def read_response_csv_local(path):  # 无依赖读取地表响应 CSV
     data = []  # 初始化数据列表
     try:  # 尝试读取
         if sys.version_info[0] >= 3:  # Python 3
-            f = open(path, 'r', encoding='utf-8-sig')  # 自动处理带 BOM 的 UTF-8
+            f = io.open(path, 'r', encoding='utf-8-sig')  # 自动处理带 BOM 的 UTF-8
         else:  # Python 2
             f = open(path, 'rb')  # 以二进制打开
         reader = csv.reader(f)  # 创建 reader
@@ -618,7 +613,8 @@ def read_response_csv_local(path):  # 无依赖读取地表响应 CSV
             for idx, h in enumerate(header):  # 遍历表头与对应值
                 val_str = row[idx]  # 值文本
                 try:  # 尝试转换数值
-                    if val_str.lower() in ('nan', 'na', ''):  # 空值/非法数字
+                    val_low = str(val_str).strip().lower()  # 统一大小写并去空格
+                    if val_low in ('nan', 'na', '', '-nan(ind)', 'nan(ind)', '1.#ind', '-1.#ind'):  # 空值/非法数字
                         val = float('nan')  # 置为 NaN
                     else:  # 正常数字
                         val = float(val_str)  # 转浮点数
@@ -836,6 +832,8 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
 # 统一按 s 坐标每 0.01 划分，原固定个数网格 N_A/N_B/N_C 已废弃
 _SEG_EPS = 1e-9  # 拐点归段容差（s=0/1 两侧段共享）
 SGRID_FIELDS = ['PGA_h', 'PGA_v', 'AF_h', 'TAF_h', 'AF_v', 'TAF_v', 'V_over_H']  # 参与重采样的响应字段
+SGRID_CONTINUOUS_FIELDS = set(['PGA_h', 'PGA_v', 'AF_h', 'AF_v', 'V_over_H'])  # 连续物理量跨段整体插值，避免坡脚前端外假平台
+SGRID_MAX_GAPFILL = 0.15  # TAF 等分段量只补很短的内部缺口，避免跨大段无效区造线
 
 
 def _resolve_s_context(meta, case_cfg):  # 解析三段坐标几何上下文
@@ -854,11 +852,10 @@ def _resolve_s_context(meta, case_cfg):  # 解析三段坐标几何上下文
     gcfg = (case_cfg or {}).get('geometry_cfg') or {}  # 无量纲几何设计配置
     crest_win = gcfg.get('crest_window')  # 坡顶观测窗（hs 倍数）
     toe_win = gcfg.get('toe_window')  # 坡脚观测窗（hs 倍数）
-    side_clear = gcfg.get('side_clearance')  # 侧向边界净空（hs 倍数）
-    if crest_win is not None and side_clear is not None:
-        crest_win = float(crest_win) + float(side_clear)  # 加上左段 side_clearance
-    if toe_win is not None and side_clear is not None:
-        toe_win = float(toe_win) + float(side_clear)  # 加上右段 side_clearance
+    if crest_win is not None:
+        crest_win = float(crest_win)  # 仅保留观测窗，不把 side_clearance 的边界净空画入图中
+    if toe_win is not None:
+        toe_win = float(toe_win)  # 仅保留观测窗，不把 side_clearance 的边界净空画入图中
     return float(x_crest), float(x_toe), float(h_slope), crest_win, toe_win  # 上下文元组
 
 
@@ -911,8 +908,44 @@ def resample_curve(s_nodes, y_nodes, s_grid, seg_labels):  # 单条曲线三段�
         if int(np.sum(nm)) < 2:  # 有效点不足
             continue  # 该段保持 NaN
         gm = lab == seg  # 网格段掩码
-        out[gm] = np.interp(grid[gm], s_nodes[nm], y_nodes[nm])  # 段内线性插值（端外取端值）
+        out[gm] = np.interp(grid[gm], s_nodes[nm], y_nodes[nm], left=np.nan, right=np.nan)  # 段内插值，端外不造假
     return out  # 返回对齐后曲线
+
+
+def resample_curve_global(s_nodes, y_nodes, s_grid):  # 单条曲线整体重采样
+    """把连续响应量按真实节点整体线性插值到统一 s 子网格；外侧无真实节点处输出 NaN。"""
+    s_nodes = np.asarray(s_nodes, dtype=float)  # 节点 s 坐标
+    y_nodes = np.asarray(y_nodes, dtype=float)  # 节点值
+    grid = np.asarray(s_grid, dtype=float)  # 网格坐标
+    ok = ~np.isnan(s_nodes) & ~np.isnan(y_nodes)  # 有效节点
+    if int(np.sum(ok)) < 2:  # 有效点不足
+        return np.nan * np.ones(len(grid))  # 返回空列
+    order = np.argsort(s_nodes[ok])  # 保证插值节点升序
+    sx = s_nodes[ok][order]  # 升序 s
+    yy = y_nodes[ok][order]  # 同步排序值
+    return np.interp(grid, sx, yy, left=np.nan, right=np.nan)  # 整体插值，端外不造假
+
+
+def fill_short_internal_gaps(out, s_nodes, y_nodes, s_grid, max_gap=SGRID_MAX_GAPFILL):  # 补短内部缺口
+    """用两侧真实有效节点线性补齐短内部缺口；不补端外，也不跨越过宽缺口。"""
+    out = np.asarray(out, dtype=float).copy()  # 避免原地污染调用者
+    s_nodes = np.asarray(s_nodes, dtype=float)  # 原始节点坐标
+    y_nodes = np.asarray(y_nodes, dtype=float)  # 原始节点值
+    grid = np.asarray(s_grid, dtype=float)  # 目标网格
+    ok = ~np.isnan(s_nodes) & ~np.isnan(y_nodes)  # 有效节点
+    if int(np.sum(ok)) < 2:  # 有效点不足
+        return out  # 无法补
+    order = np.argsort(s_nodes[ok])  # 升序排列
+    sx = s_nodes[ok][order]  # 有效 s
+    yy = y_nodes[ok][order]  # 有效值
+    interp_all = np.interp(grid, sx, yy, left=np.nan, right=np.nan)  # 内部候选补值
+    fill = np.isnan(out) & ~np.isnan(interp_all)  # 只补已有输出中的空洞
+    for i in np.where(fill)[0]:  # 逐空点检查邻近真实点距离
+        left = np.searchsorted(sx, grid[i], side='right') - 1  # 左侧真实点
+        right = left + 1  # 右侧真实点
+        if left >= 0 and right < len(sx) and (sx[right] - sx[left]) <= float(max_gap):  # 缺口足够短
+            out[i] = interp_all[i]  # 接上线性补值
+    return out  # 返回补齐后曲线
 
 
 def resample_H_matrix(H, s_nodes, s_grid, seg_labels):  # H 曲面空间维三段重采样
@@ -928,7 +961,7 @@ def resample_H_matrix(H, s_nodes, s_grid, seg_labels):  # H 曲面空间维三�
             continue  # 跳过该段
         gm = lab == seg  # 网格段掩码
         for j in range(H.shape[1]):  # 逐频点做空间插值
-            out[gm, j] = np.interp(grid[gm], s_nodes[nm], H[nm, j])  # 段内线性插值
+            out[gm, j] = np.interp(grid[gm], s_nodes[nm], H[nm, j], left=np.nan, right=np.nan)  # 段内插值，端外不造假
     return out  # 返回对齐曲面
 
 
@@ -947,7 +980,7 @@ def read_H_csv_local(path):  # 读回 write_H_csv 产物
         return None, None, None  # 返回空
     try:  # 尝试解析
         if sys.version_info[0] >= 3:  # Python 3
-            fh = open(path, 'r', encoding='utf-8-sig')  # 文本读（去 BOM）
+            fh = io.open(path, 'r', encoding='utf-8-sig')  # 文本读（去 BOM）
         else:  # Python 2
             fh = open(path, 'rb')  # 二进制读
         reader = csv.reader(fh)  # 创建 reader
@@ -1042,15 +1075,23 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
         cols = {}  # 重采样结果列
         for f in SGRID_FIELDS:  # 逐字段重采样
             y = np.array([row.get(f, float('nan')) for row in data], dtype=float)  # 原始逐节点列
-            cols[f] = resample_curve(s_nodes, y, s_grid, seg_labels)  # 段内插值对齐
+            if f in SGRID_CONTINUOUS_FIELDS:  # 连续响应量
+                cols[f] = resample_curve_global(s_nodes, y, s_grid)  # 跨真实节点整体插值，消除坡脚前假断层
+            else:  # TAF 等分段分母量
+                cols[f] = fill_short_internal_gaps(resample_curve(s_nodes, y, s_grid, seg_labels),
+                                                   s_nodes, y, s_grid)  # 保留分段口径，并补齐拐点附近短缺口
         x_phys = np.array([s_to_x(float(sv), x_crest, x_toe, h_slope) for sv in s_grid])  # 网格点反算物理坐标
         write_sgrid_response_csv('sgrid_response_%s.csv' % record, s_grid, seg_labels, x_phys, cols)  # 落盘
         taf = np.array([row.get('TAF_h', float('nan')) for row in data], dtype=float)  # 原始 TAF_h（重采样前）
         if np.any(~np.isnan(taf)):  # 有有效值
-            k = int(np.nanargmax(taf))  # 峰值下标（原始节点，精确不挪峰）
+            win = (s_nodes >= -a_max - _SEG_EPS) & (s_nodes <= 1.0 + c_max + _SEG_EPS)  # 仅观测窗内取峰值
+            taf_win = np.where(win, taf, np.nan)  # 窗外点不参与 AR_max
+            k = int(np.nanargmax(taf_win)) if np.any(~np.isnan(taf_win)) else int(np.nanargmax(taf))  # 窗内优先，空窗兜底
             sk = float(s_nodes[k])  # 峰值归一坐标
             seg = 'A' if sk < 0.0 else ('B' if sk <= 1.0 else 'C')  # 峰值所在段（拐点归坡面口径）
-            updates[record] = {'AR_max_s': sk, 'AR_max_seg': seg}  # 暂存回写项
+            updates[record] = {'AR_max': float(taf[k]), 'AR_max_x': float(data[k]['x']),
+                               'AR_max_s': sk, 'AR_max_seg': seg,
+                               'AR_window': [-float(a_max), 1.0 + float(c_max)]}  # 暂存回写项
         n_h = 0  # H 曲面成功计数
         for src_fmt, dst_fmt in (('H_surface_h_%s.csv', 'sgrid_H_surface_h_%s.csv'),
                                  ('H_surface_v_%s.csv', 'sgrid_H_surface_v_%s.csv'),
@@ -1070,7 +1111,7 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
                 json.dump({'schema_version': 1, 'N_A': n_a_actual, 'N_B': n_b_actual, 'N_C': n_c_actual,
                            'A_max': a_max, 'C_max': c_max, 'step': 0.01,
                            'h_slope': h_slope,
-                           'note': u'统一 s 子网格；按归一化坐标 s 每 0.01 划分；含 side_clearance 长度'},
+                           'note': u'统一 s 子网格；按归一化坐标 s 每 0.01 划分；仅含 crest_window/toe_window 观测窗'},
                           fh, indent=2)  # 保存（ensure_ascii 默认开，Py2 安全）
             grid_written = True  # 标记已写
         log_step(logger, '[sgrid] %s: 重采样完成 -> sgrid_response（%d 点/段A %d+段B %d+段C %d） + %d 个 H 曲面',

@@ -22,7 +22,7 @@ import concurrent.futures  # 导入并发模块以实现多工况文件夹并行
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
-DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim"]  # 执行后自动删除的中间文件类型，留空则不删除
+DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl", "com"]  # 执行后自动删除的中间文件类型，留空则不删除
 MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
 

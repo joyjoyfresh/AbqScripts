@@ -22,9 +22,27 @@ import concurrent.futures  # 导入并发模块以实现多工况文件夹并行
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
-DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim"]  # 执行后自动删除的中间文件类型，留空则不删除
-MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
+DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl"]  # 执行后自动删除的中间文件类型，留空则不删除
+SMOKE_MODE = True  # 小样本全流程排查模式；正式 P1 全批前改为 False
+SMOKE_ROOT_DIR = r"C:\Users\12462\Documents\Code\AbqScripts\Run\P1_smoke"  # smoke 输出目录，避免覆盖正式结果
+MAX_WORKERS = 2 if SMOKE_MODE else 2  # smoke 单线程便于排查日志；正式批可并行
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
+
+
+def _find_abaqus_cmd():  # 定位 Abaqus 启动器
+    """定位 Abaqus 启动命令。
+
+    返回值:
+        str: 可用于 subprocess 的 Abaqus 命令路径或命令名。
+    """
+    candidates = [os.environ.get("ABAQUS_CMD"), r"C:\SIMULIA\Commands\abaqus.bat", "abaqus", "abq2021"]  # 常见 Abaqus 命令候选
+    for cmd in candidates:  # 遍历候选命令
+        if cmd and (os.path.isfile(cmd) or shutil.which(cmd)):  # 路径存在或命令可被 PATH 找到
+            return cmd  # 返回可用命令
+    return r"C:\SIMULIA\Commands\abaqus.bat"  # 兜底使用本机常见安装路径
+
+
+ABAQUS_CMD = _find_abaqus_cmd()  # Abaqus 启动命令
 
 SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Hybrid\slope_frame_ssi_full_v2.py",  # 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
@@ -33,30 +51,57 @@ SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路
 
 POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行的全局后处理脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Plot_Hybrid_surface_v1.py",  # 绘图脚本路径 / 绘制汇总对比图表
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Plot_Hybrid_surface_v2.py",  # 绘图脚本路径 / 绘制汇总对比图表
 ]
 
-# ==== P1 均质池 · 坡高 h=50 全套（坡角5 × 入射角4 = 20 几何，每几何 2 宽频脉冲）====
+# ==== P1 均质池 · 全量规划（坡高4 × 坡角5 × 入射角4 = 80 几何，每几何 2 宽频脉冲）====
 _WAVE_BROADBAND = [  # 宽频探针（绝对路径）：4Hz 主 + 2Hz 低频补，合并覆盖 ~0.5–10Hz 提整条 H(f)
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_2Hz.txt",
 ]
-_H = 50.0                        # 坡高 hs（唯一绝对尺度，m）
-_I_LIST = [15, 30, 45, 60, 75]   # 坡角 i：15/30/45/60 共享面 + 75 陡岩
-_THETA_LIST = [0, 10, 20, 30]    # 入射角 θ（SV，material_cfg.angle）
+_H_LIST = [50.0, 100.0, 200.0, 400.0]  # P1 坡高档位：用于张成 eta 滑动窗
+_I_LIST = [15, 30, 45, 60, 75]  # 坡角 i：15/30/45/60 共享面 + 75 陡岩
+_THETA_LIST = [0, 10, 20, 30]  # 入射角 θ（SV，material_cfg.angle）
+SMOKE_CASE_KEYS = set([  # 小样本覆盖关键风险点：垂直入射 NaN、斜入射 TAF_v、缓坡、陡坡
+    (50.0, 15, 0),
+    (50.0, 15, 20),
+    (50.0, 75, 0),
+    (50.0, 75, 20),
+])
+
+
+def _fmt_num(v):  # 格式化数值为紧凑字符串
+    """格式化数值为紧凑字符串。
+
+    参数说明:
+        v (float/int/str): 需要被格式化的变量。
+
+    返回值:
+        str: 去掉无意义小数点或特殊字符的紧凑字符串。
+    """
+    try:  # 尝试将变量转换为浮点数处理
+        f = float(v)  # 转换为浮点型
+        return str(int(f)) if f == int(f) else ('%g' % f)  # 整数则去掉小数点，小数用 %g 紧凑表示
+    except (TypeError, ValueError):  # 若转换失败
+        return str(v)  # 原样返回字符串形式
+
 
 PARAMETER_CASES = []             # 由无量纲设计自动展开
-for _i in _I_LIST:               # 遍历坡角
-    for _th in _THETA_LIST:      # 遍历入射角
-        PARAMETER_CASES.append({
-            "name": "fuke-L1-h50_i{}_t{}".format(_i, _th),          # 命名对齐 §6.3（L1 省略 d/az）
-            "config": {
-                "material_cfg": {"angle": _th, "layers": []},        # 入射角；layers=[] → 全基岩均质
-                "geometry_cfg": {"slope_height": _H, "slope_angle": float(_i)},  # 坡高 + 坡角
-                "time_cfg": {"tail_seconds": 3.0},                   # 尾段静默，H(f) 抗泄漏
-                "run_cfg": {"wave_files": _WAVE_BROADBAND},          # 每几何 2 条宽频脉冲
-            },
-        })
+for _h in _H_LIST:               # 遍历坡高
+    for _i in _I_LIST:           # 遍历坡角
+        for _th in _THETA_LIST:  # 遍历入射角
+            if SMOKE_MODE and (float(_h), int(_i), int(_th)) not in SMOKE_CASE_KEYS:  # smoke 只跑代表点
+                continue  # 跳过非 smoke 工况
+            PARAMETER_CASES.append({
+                "name": "P1-L1-h{}_i{}_t{}".format(_fmt_num(_h), _i, _th),  # P1 均质池正式命名
+                "config": {
+                    "material_cfg": {"angle": _th, "layers": []},  # 入射角；layers=[] → 全基岩均质
+                    "geometry_cfg": {"slope_height": _h, "slope_angle": float(_i),
+                                     "crest_window": 4.0, "toe_window": 3.0, "side_clearance": 0.1},  # 坡高/坡角/观测窗/边界净空
+                    "time_cfg": {"tail_seconds": 3.0},  # 尾段静默，H(f) 抗泄漏
+                    "run_cfg": {"wave_files": _WAVE_BROADBAND},  # 每几何 2 条宽频脉冲
+                },
+            })
 
 def build_source_files(script_sequence):  # 建立脚本文件映射并检测缺失与冲突
     """建立脚本文件映射并检测缺失与冲突。
@@ -114,22 +159,6 @@ def ensure_no_duplicate_targets(duplicate_items):  # 校验并打印重名冲突
     for target_name, current_path, existing_path in duplicate_items:  # 遍历冲突记录
         print("  - {} -> {} (已存在来源: {})".format(target_name, current_path, existing_path))  # 打印冲突细节
     return False  # 校验失败
-
-
-def _fmt_num(v):  # 格式化数值为紧凑字符串
-    """格式化数值为紧凑字符串。
-
-    参数说明:
-        v (float/int/str): 需要被格式化的变量。
-
-    返回值:
-        str: 去掉无意义小数点或特殊字符的紧凑字符串。
-    """
-    try:  # 尝试将变量转换为浮点数处理
-        f = float(v)  # 转换为浮点型
-        return str(int(f)) if f == int(f) else ('%g' % f)  # 整数则去掉小数点，小数用 %g 紧凑表示
-    except (TypeError, ValueError):  # 若转换失败
-        return str(v)  # 原样返回字符串形式
 
 
 def _sanitize(text):  # 清洗字符串为合法的文件目录名
@@ -210,8 +239,8 @@ def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按�
         if not os.path.isfile(script_path):  # 若物理文件不存在
             print("错误：脚本不存在 -> {}".format(script_path))  # 打印不存在的错误提示
             return False  # 返回失败
-        print("开始执行：{}".format(script_path))  # 打印启动执行提示
-        result = subprocess.run([sys.executable, script_name], cwd=folder_path, check=False)  # 用当前解释器在工况目录下执行该脚本
+        print("开始执行(Abaqus cae noGUI)：{}".format(script_path))  # 打印启动执行提示
+        result = subprocess.run([ABAQUS_CMD, "cae", "noGUI=" + script_name], cwd=folder_path, check=False)  # 建模与 ODB 后处理必须用 Abaqus 内核执行
         if result.returncode != 0:  # 若执行退出码不为 0
             print("错误：{} 执行失败，返回码={}".format(script_name, result.returncode))  # 打印执行失败提示
             return False  # 返回失败
@@ -253,9 +282,11 @@ def delete_files_by_type(folder_path, file_types):  # 永久删除指定后缀�
 
 def main():  # 批处理主控制流程
     """批处理主控制流程。"""
-    root_dir = sys.argv[1] if len(sys.argv) >= 2 else ROOT_DIR  # 支持从命令行参数接收保存目录，否则使用默认值
+    default_root = SMOKE_ROOT_DIR if SMOKE_MODE else ROOT_DIR  # smoke 模式使用独立输出目录
+    root_dir = sys.argv[1] if len(sys.argv) >= 2 else default_root  # 支持从命令行参数接收保存目录，否则使用默认值
     types_to_delete = list(DELETE_FILE_TYPES)  # 获取待删除中间文件格式列表的副本
     print("目标根目录：{}".format(root_dir))  # 打印目标根目录
+    print("运行模式：{}".format("SMOKE 小样本排查" if SMOKE_MODE else "FULL P1 全批"))  # 打印运行模式
     print("自动删除文件类型：{}".format(types_to_delete if types_to_delete else "无"))  # 打印待删除类型
     source_files, missing_items, duplicate_items = build_source_files(SCRIPT_SEQUENCE)  # 构建复制文件字典并查错
     run_order = [os.path.basename(p) for p in SCRIPT_SEQUENCE]  # 整理得到工况目录下需顺序执行的文件名列表
@@ -296,10 +327,12 @@ def main():  # 批处理主控制流程
         print("开始处理文件夹：{}".format(folder_path))  # 打印开始处理的工况路径
         create_and_fill_folder(folder_path, source_files, config)  # 建立工况文件夹并注入配置与物理源文件
         ok = run_scripts_in_folder(folder_path, run_order)  # 顺序在目录下启动指定运行脚本
-        if types_to_delete:  # 若设置了需要清理的中间格式文件
+        if ok and types_to_delete:  # 若执行成功且设置了需要清理的中间格式文件
             delete_files_by_type(folder_path, types_to_delete)  # 清理中间大文件
-        else:  # 若不清理
+        elif ok:  # 若执行成功但不清理
             print("已跳过文件删除（没有指定要删除的文件类型）。")  # 打印跳过提示
+        else:  # 若执行失败
+            print("工况失败，已保留中间文件便于排查：{}".format(folder_path))  # 失败时保留 ODB/日志等诊断产物
         return folder_path, ok  # 返回工况绝对路径与执行结果
 
     print("开始并行批处理，最大并发任务数：{}".format(MAX_WORKERS))  # 打印批处理启动信息

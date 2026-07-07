@@ -107,6 +107,7 @@ freefield_cfg = {
     'spectrum_tol': 1e-7,               # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
     'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
     'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
+    'bottom_ymax_mode': 'local',         # 底边界自由场柱高：local=按 x 上方地表/upper=上平台柱/lower=下平台柱
 }
 
 # 运行控制配置
@@ -1905,6 +1906,9 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
     field_data = {}
     geom = ctx.geom
     engine = (ctx.ffcfg or {}).get('engine', 'ray')  # 自由场引擎选择（'fd' 或 'ray'）
+    bottom_ymax_mode = (ctx.ffcfg or {}).get('bottom_ymax_mode', 'local')  # 底边界自由场柱高模式
+    if bottom_ymax_mode not in ('local', 'upper', 'lower'):  # 配置错误直接报出，避免静默跑错工况
+        raise ValueError("freefield_cfg.bottom_ymax_mode 必须为 'local'/'upper'/'lower'，当前为 %s" % bottom_ymax_mode)
     get_vel = None  # 射线法速度延迟缓存（fd 引擎不需要）
     get_dis = None  # 射线法位移延迟缓存（fd 引擎不需要）
     if engine != 'fd':  # 仅射线法路径需要延迟缓存
@@ -1912,8 +1916,8 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
         get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
     if logger:
         _total_nodes = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
-        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
-                 model_name, engine, _total_nodes,  # 引擎与总数
+        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 底边界柱高=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
+                 model_name, engine, bottom_ymax_mode, _total_nodes,  # 引擎/底边界模式与总数
                  len(nodes_by_boundary['l']), len(nodes_by_boundary['r']), len(nodes_by_boundary['b']))  # 各边界节点数
     for boundary in BOUNDARY_SEQUENCE:
         _t_b = time.time()  # 该边界计算起始时间
@@ -1924,7 +1928,12 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
             elif boundary == 'r':  # 右边界
                 ymax_col = ctx.ymax_r  # 右边界柱地表高度
             else:  # 底边界
-                ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)  # 该底节点正上方地表高度
+                if bottom_ymax_mode == 'upper':  # 测试：底边界统一用上平台柱
+                    ymax_col = geom.H_upper
+                elif bottom_ymax_mode == 'lower':  # 测试：底边界统一用下平台柱
+                    ymax_col = geom.H_lower
+                else:  # 默认：按该底节点正上方地表高度取局部柱
+                    ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)
 
             if engine == 'fd':  # v6 默认：频域精确分层自由场
                 ff = _fd_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx)  # fd 引擎自由场时程
@@ -2522,6 +2531,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
         meta['freefield'] = {  # v6 自由场引擎信息（追溯用）
             'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
             'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
+            'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
         }
         # ── v7：远场一维理论台阶 ff_theory（自动 QA 锚点） ──────────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
