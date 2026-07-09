@@ -21,6 +21,22 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PostprocessAllSurfaceTests(unittest.TestCase):
+    def test_surface_metrics_adds_unified_vertical_definitions(self):
+        xs = np.array([0.0, 10.0])
+        a1 = np.array([[2.0, -1.0], [4.0, -2.0]])
+        a2 = np.array([[0.5, -0.25], [1.0, -0.5]])
+        taf_lr = {"left": (1.0, 0.0), "right": (2.0, 0.5)}
+
+        rows = MODULE.surface_metrics(xs, a1, a2, 1.0, 2.0, 0.0, taf_lr, 5.0)
+
+        self.assertTrue(np.isnan(rows[0]["TAF_v"]))
+        self.assertAlmostEqual(rows[0]["VTR"], 0.25)
+        self.assertAlmostEqual(rows[0]["UTAF_v"], 0.25)
+        self.assertAlmostEqual(rows[0]["DUTAF_v"], 0.25)
+        self.assertAlmostEqual(rows[1]["TAF_v"], 1.0)
+        self.assertAlmostEqual(rows[1]["TAF_v_comp"], 1.0)
+        self.assertAlmostEqual(rows[1]["UTAF_R"], 1.0)
+
     def test_raw_response_only_converts_x_to_s(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "surface_response_demo.csv"

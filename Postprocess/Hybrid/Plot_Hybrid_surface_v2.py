@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""跨工况地表响应独立分图（Hybrid 专用 v1）。
+"""跨工况地表响应独立分图（Hybrid 专用 v2）。
 
 读取 Collect_All_results_v2.py 收集的 results/ 内 SGRID_RESPONSE CSV，
-将 Postprocess_All_surface_v2.py 的 3×2 合并图拆为 6 张独立图表分别输出。
+将 Postprocess_All_surface_v2.py 输出的可用响应/归一化指标拆为独立图表分别输出。
 每张图按三段归一化坐标 s 绘制（坡顶平台 A / 坡面 B / 坡脚平台 C），
 样式与原 Postprocess_All_surface_v2 的子图完全一致。
 
@@ -10,7 +10,7 @@
   results/index.csv + results/SGRID_RESPONSE-*.csv（由 Collect_All_results_v2 收集）
 
 运行：
-  python Postprocess/Hybrid/Plot_Hybrid_surface_v1.py <工况根目录或 results 目录>
+  python Postprocess/Hybrid/Plot_Hybrid_surface_v2.py <工况根目录或 results 目录>
   不传参数则取当前目录。
 """
 
@@ -111,15 +111,25 @@ def export_figure(fig, basename, formats=('pdf', 'svg', 'png'), dpi=300):  # 多
 
 
 # ==============================================================================
-#  配置：6 个面板定义（与 Postprocess_All_surface_v2 完全一致）
+#  配置：独立分图字段定义（与 Postprocess_All_surface_v2 的新增指标保持一致）
 # ==============================================================================
 DRAW_SPECS = [  # (字段键, 中文标签, 英文标签, 曲线颜色)
     ('PGA_h', '水平向 PGA (m/s²)', 'Horizontal PGA (m/s²)', CB_PALETTE['blue']),        # (a)
     ('PGA_v', '垂直向 PGA (m/s²)', 'Vertical PGA (m/s²)', CB_PALETTE['vermillion']),     # (b)
+    ('PGA_R', '合成 PGA (m/s²)', 'Resultant PGA (m/s²)', CB_PALETTE['black']),           # 合成峰值
     ('AF_h', '水平向 AF', 'Horizontal AF', CB_PALETTE['blue']),                           # (c)
     ('AF_v', '垂直向 AF', 'Vertical AF', CB_PALETTE['vermillion']),                       # (d)
     ('TAF_h', '水平向 TAF', 'Horizontal TAF', CB_PALETTE['blue']),                        # (e)
     ('TAF_v', '垂直向 TAF', 'Vertical TAF', CB_PALETTE['vermillion']),                    # (f)
+    ('TAF_h_comp', '水平分量 TAF', 'Component TAF-H', CB_PALETTE['skyblue']),             # 传统分量口径别名
+    ('TAF_v_comp', '竖向分量 TAF', 'Component TAF-V', CB_PALETTE['orange']),              # 传统分量口径别名
+    ('VTR', '竖向转换系数 VTR', 'Vertical conversion ratio', CB_PALETTE['purple']),       # 竖向响应/水平自由场
+    ('UTAF_h', '统一水平 UTAF', 'Unified TAF-H', CB_PALETTE['skyblue']),                  # 合成自由场分母
+    ('UTAF_v', '统一竖向 UTAF', 'Unified TAF-V', CB_PALETTE['orange']),                   # 合成自由场分母
+    ('UTAF_R', '统一合成 UTAF', 'Unified resultant TAF', CB_PALETTE['green']),            # 合成响应比
+    ('TAF_R', '合成 TAF_R', 'Resultant TAF', CB_PALETTE['green']),                        # 合成响应比别名
+    ('DUTAF_v', '竖向增量 ΔUTAF_v', 'Vertical increment ΔUTAF-V', CB_PALETTE['vermillion']),  # 竖向地形增量
+    ('V_over_H', '竖横比 V/H', 'Vertical-to-horizontal ratio', CB_PALETTE['black']),      # 同点竖横比
 ]
 PLOT_SMOOTH_WINDOW = 11  # 仅对成图做分段移动平均；CSV 与峰值统计保持原始值
 
@@ -200,7 +210,7 @@ def draw_single_panel(fig, field, color, ylabel, df, s_all, a_max, c_max, w_b,
         order = np.argsort(s_all)  # 按 s 升序连线
         ax.plot(s_all[order], y_view[order], color=color, linestyle='-', linewidth=1.2, zorder=3)  # 一条连续曲线
     else:  # 全 NaN 时明确说明物理原因，避免误判为漏画
-        note = 'θ=0° 时竖向自由场为 0，TAF_v 不适用' if field == 'TAF_v' else '无有效数据'  # 空图说明
+        note = 'θ=0° 时竖向自由场为 0，分量 TAF_v 不适用' if field in ('TAF_v', 'TAF_v_comp') else '无有效数据'  # 空图说明
         ax.text(0.5, 0.5, note, transform=ax.transAxes, ha='center', va='center', fontsize=7)  # 居中标注
 
     # 设置坐标范围
@@ -226,8 +236,8 @@ def draw_single_panel(fig, field, color, ylabel, df, s_all, a_max, c_max, w_b,
     ax.set_xlabel(xlabel, labelpad=6)  # 横轴标签
 
 
-def plot_record(rec, results_dir, out_dir, use_cn):  # 为一条记录输出 6 张独立图
-    """读取一条 SGRID_RESPONSE CSV，输出 6 张三段分轴独立图到 out_dir/<source_folder>__<record>/。"""
+def plot_record(rec, results_dir, out_dir, use_cn):  # 为一条记录输出多张独立图
+    """读取一条 SGRID_RESPONSE CSV，按可用字段输出三段分轴独立图到 out_dir/<source_folder>__<record>/。"""
     df = pd.read_csv(rec['fpath'])  # 读取 CSV
     s_all = df['s'].to_numpy(float)  # 归一坐标 s 数组
 
@@ -250,9 +260,11 @@ def plot_record(rec, results_dir, out_dir, use_cn):  # 为一条记录输出 6 �
     if not os.path.isdir(rec_dir):  # 不存在
         os.makedirs(rec_dir)  # 创建
 
-    for pi, (field, cn_lbl, en_lbl, color) in enumerate(DRAW_SPECS):  # 遍历 6 个面板
+    for pi, (field, cn_lbl, en_lbl, color) in enumerate(DRAW_SPECS):  # 遍历全部可选指标
         if field not in df.columns:  # 字段缺失
             print('    跳过(字段 %s 不在 CSV 中)' % field); continue  # 跳过
+        if field not in ('TAF_v', 'TAF_v_comp') and not np.any(np.isfinite(df[field].to_numpy(float))):  # 新增空列不出空白图
+            print('    跳过(字段 %s 全为 NaN)' % field); continue  # 跳过
         ylabel = cn_lbl if use_cn else en_lbl  # 选择标签语言
 
         fig = plt.figure(figsize=(3.15, 2.8))  # 单栏宽画布
@@ -287,7 +299,7 @@ def main():  # 主入口
     if not records:  # 无记录
         print('错误：index.csv 中没有 SGRID_RESPONSE 类型的记录。')  # 报错
         return  # 退出
-    print('>>> 共 %d 条记录，每条输出 6 张独立三段分轴图。' % len(records))  # 概览
+    print('>>> 共 %d 条记录，每条按可用字段输出独立三段分轴图。' % len(records))  # 概览
 
     out_dir = os.path.join(data_dir, 'Fig_surface_panels')  # 输出根目录
     for rec in records:  # 遍历每条记录

@@ -7,12 +7,15 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
 并把其所在段号与归一坐标回写 surface_summary.json。
 
 遍历当前工况目录所有 job-*.odb，从 TOP_SURFACE 节点集全时程场输出提取地表加速度，逐波输出：
-  1. PGA：每个地表节点水平(A1)/竖向(A2)加速度峰值。
+  1. PGA：每个地表节点水平(A1)/竖向(A2)/合成(R)加速度峰值。
   2. 放大系数（口径与 case_meta 完全一致）：
        AF_h  = PGA_h / (factor_h × PGA_in)      —— 相对基岩入射的总放大（含场地+地形）
        TAF_h = AF_h / taf_h(同侧一维理论台阶)   —— 纯地形放大，远场应趋于 1
        AF_v  = PGA_v / (factor_h × PGA_in)      —— 寄生竖向放大（统一水平分母，B&P2005 口径）
        TAF_v = AF_v / taf_v(同侧)               —— 仅斜入射且 taf_v>TAFV_GUARD 时计算，否则 NaN
+       VTR   = PGA_v / PGA_h_ff(同侧)            —— 竖向地形转换系数，0° 入射仍有意义
+       UTAF_* = PGA_* / PGA_R_ff(同侧)           —— 合成自由场统一分母下的水平/竖向/合成响应
+       DUTAF_v = (PGA_v - PGA_v_ff) / PGA_R_ff   —— 地形额外诱发的竖向响应增量
        V/H   = PGA_v / PGA_h                    —— 同点竖横比
      同侧规则：x ≤ x_toe（坡顶平台+坡面）用 left 柱，x > x_toe（坡脚平台）用 right 柱。
   3. 频域传函（线弹性前提；tssi 非线性/EQL 开启时曲线仅供参考）：
@@ -74,6 +77,7 @@ FMAX_FACTOR = 2.5        # 可靠带上限 = FMAX_FACTOR×fc（网格 K-L 判据
 PAD_FACTOR = 4           # FFT 补零倍数（防卷绕，与建模脚本 fd 引擎同口径）
 QA_TOL = 0.05            # 远场 AF_h 对拍一维理论台阶的相对误差阈值（±5%）
 TAFV_GUARD = 0.05        # taf_v 低于该值视为"竖向自由场≈0"（垂直入射），TAF_v 置 NaN 防除零
+SAFE_DENOM_EPS = 1e-30   # 分母安全阈值：只用于判定无效分母，不用小量强行制造比值
 
 
 _DEFAULT_SCRIPT_NAME = 'Postprocess_All_surface_v2.py'  # __file__ 缺失时的兜底文件名
@@ -203,28 +207,82 @@ def spectral_ratio(a_out_mat, a_ref, dt, fc=None):
     return compute_H(a_out_mat, a_ref, dt, fc=fc)
 
 
-def surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, taf_lr, x_toe):
+def _safe_ratio(num, den):  # 安全除法
+    """只在分母真实有效时计算比值；无效时返回 NaN，避免 epsilon 分母制造假峰值。"""
+    if den is None:  # 分母缺失
+        return float('nan')  # 返回无效
+    try:  # 尝试转浮点
+        den = float(den)  # 分母
+        num = float(num)  # 分子
+    except Exception:  # 非数值
+        return float('nan')  # 返回无效
+    if math.isnan(den) or abs(den) <= SAFE_DENOM_EPS:  # 分母为零或 NaN
+        return float('nan')  # 返回无效
+    return num / den  # 正常比值
+
+
+def _abs_or_none(value):  # 取绝对值或 None
+    """把可选参考系数转成非负峰值系数；缺失时返回 None。"""
+    if value is None:  # 缺失
+        return None  # 返回空
+    try:  # 尝试转换
+        return abs(float(value))  # PGA 参考值使用幅值
+    except Exception:  # 转换失败
+        return None  # 返回空
+
+
+def surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, factor_v, taf_lr, x_toe):
     """由地表加速度矩阵计算逐节点 PGA/AF/TAF/V_H 指标。
 
     xs       : 节点 x 坐标（升序）；a1_mat/a2_mat：节点×时刻 水平/竖向加速度。
     pga_in   : 输入记录峰值；factor_h：斜入射自由面水平放大系数（分母 = factor_h×pga_in）。
+    factor_v : 斜入射自由面竖向系数（仅作缺省竖向自由场参考，PGA 取绝对值）。
     taf_lr   : {'left': (taf_h, taf_v), 'right': (taf_h, taf_v)}，一维理论台阶（可为 None）。
     x_toe    : 坡脚 x（同侧规则分界：x≤x_toe 用 left，x>x_toe 用 right）。
-    返回逐节点 dict 列表（keys: x/PGA_h/PGA_v/AF_h/TAF_h/AF_v/TAF_v/V_over_H/ff_side）。
+    返回逐节点 dict 列表；旧口径列保留，并新增统一分母、竖向转换和调试分母列。
     """
     pga_h = np.max(np.abs(a1_mat), axis=1)  # 逐节点水平峰值
     pga_v = np.max(np.abs(a2_mat), axis=1)  # 逐节点竖向峰值
-    denom = factor_h * pga_in if (factor_h and pga_in) else None  # 统一水平分母
+    pga_r = np.max(np.sqrt(a1_mat * a1_mat + a2_mat * a2_mat), axis=1)  # 逐节点合成峰值
+    denom_h0 = factor_h * pga_in if (factor_h and pga_in) else None  # 基准自由面水平分母
+    fallback_taf_v = None  # 缺少一维理论 taf_v 时的半空间竖向参考
+    if denom_h0 and factor_v is not None and factor_h:  # 可由半空间系数估算
+        fallback_taf_v = abs(float(factor_v)) / abs(float(factor_h))  # 转成相对水平分母的竖向比例
     rows = []
     for k in range(len(xs)):
         side = 'left' if xs[k] <= x_toe else 'right'  # 同侧规则：坡顶平台+坡面归 left，坡脚平台归 right
         taf_h_ref, taf_v_ref = (taf_lr.get(side) or (None, None)) if taf_lr else (None, None)
-        af_h = float(pga_h[k]) / denom if denom else float('nan')  # 相对入射总放大
-        af_v = float(pga_v[k]) / denom if denom else float('nan')  # 寄生竖向放大（水平分母）
-        taf_h = af_h / taf_h_ref if (denom and taf_h_ref) else float('nan')  # 纯地形水平放大
-        taf_v = af_v / taf_v_ref if (denom and taf_v_ref and taf_v_ref > TAFV_GUARD) else float('nan')  # 竖向理论台阶太小(垂直入射)不除
+        taf_h_abs = _abs_or_none(taf_h_ref)  # 同侧水平一维自由场比例
+        taf_v_abs = _abs_or_none(taf_v_ref)  # 同侧竖向一维自由场比例
+        if taf_v_abs is None:  # 元数据缺 taf_v
+            taf_v_abs = fallback_taf_v  # 回退到半空间自由面系数
+        ff_h = denom_h0 * taf_h_abs if (denom_h0 and taf_h_abs is not None) else float('nan')  # 同侧自由场水平 PGA
+        ff_v = denom_h0 * taf_v_abs if (denom_h0 and taf_v_abs is not None) else float('nan')  # 同侧自由场竖向 PGA
+        if not math.isnan(ff_h) and not math.isnan(ff_v):  # 两个分量参考均有效
+            ff_r = math.sqrt(ff_h * ff_h + ff_v * ff_v)  # 同侧自由场合成 PGA 参考
+        elif not math.isnan(ff_h):  # 只有水平参考
+            ff_r = abs(ff_h)  # 垂直入射时退化为水平参考
+        else:  # 无参考
+            ff_r = float('nan')  # 合成参考无效
+        af_h = _safe_ratio(pga_h[k], denom_h0)  # 现有口径：水平响应/基准水平自由面
+        af_v = _safe_ratio(pga_v[k], denom_h0)  # 现有口径：竖向响应/基准水平自由面
+        taf_h = _safe_ratio(pga_h[k], ff_h)  # 传统分量口径：水平响应/同侧水平自由场
+        if taf_v_abs is not None and taf_v_abs > TAFV_GUARD:  # 竖向自由场足够大才可定义传统竖向 TAF
+            taf_v = _safe_ratio(pga_v[k], ff_v)  # 传统分量口径：竖向响应/同侧竖向自由场
+        else:  # 垂直入射或竖向自由场过小
+            taf_v = float('nan')  # 不定义，避免病态分母
+        vtr = _safe_ratio(pga_v[k], ff_h)  # 竖向转换系数：竖向响应/同侧水平自由场
+        utaf_h = _safe_ratio(pga_h[k], ff_r)  # 统一分母水平响应系数
+        utaf_v = _safe_ratio(pga_v[k], ff_r)  # 统一分母竖向响应系数
+        utaf_r = _safe_ratio(pga_r[k], ff_r)  # 统一分母合成响应系数
+        dutaf_v = _safe_ratio(float(pga_v[k]) - ff_v, ff_r) if not math.isnan(ff_v) else float('nan')  # 竖向地形增量系数
         rows.append({'x': float(xs[k]), 'PGA_h': float(pga_h[k]), 'PGA_v': float(pga_v[k]),
-                     'AF_h': af_h, 'TAF_h': taf_h, 'AF_v': af_v, 'TAF_v': taf_v,
+                     'PGA_R': float(pga_r[k]), 'AF_h': af_h, 'TAF_h': taf_h,
+                     'AF_v': af_v, 'TAF_v': taf_v, 'TAF_h_comp': taf_h,
+                     'TAF_v_comp': taf_v, 'VTR': vtr, 'UTAF_h': utaf_h,
+                     'UTAF_v': utaf_v, 'UTAF_R': utaf_r, 'TAF_R': utaf_r,
+                     'DUTAF_v': dutaf_v, 'FF_PGA_h0': denom_h0 if denom_h0 else float('nan'),
+                     'FF_PGA_h': ff_h, 'FF_PGA_v': ff_v, 'FF_PGA_R': ff_r,
                      'V_over_H': float(pga_v[k]) / float(pga_h[k]) if pga_h[k] > 0 else float('nan'),
                      'ff_side': side})
     return rows
@@ -272,9 +330,10 @@ def find_wave_file(record, case_cfg):
 
 
 def meta_pieces(meta):
-    """从 case_meta.json 提取后处理所需字段：(factor_h, taf_lr, x_toe, fc)。"""
+    """从 case_meta.json 提取后处理所需字段：(factor_h, factor_v, taf_lr, x_toe, fc)。"""
     norm = (meta or {}).get('ff_normalization') or {}
     factor_h = norm.get('factor_h')  # 斜入射自由面水平放大系数（0°时=2）
+    factor_v = norm.get('factor_v')  # 斜入射自由面竖向系数（0°时通常为0）
     ff = (meta or {}).get('ff_theory') or {}
     taf_lr = {}
     for side in ('left', 'right'):  # 左(上平台)/右(下平台)一维理论台阶
@@ -283,7 +342,7 @@ def meta_pieces(meta):
     geo = (meta or {}).get('geometry') or {}
     x_toe = geo.get('x_toe')  # 坡脚 x（同侧规则分界）
     fc = ff.get('fc_used') or ((meta or {}).get('damping') or {}).get('fc')  # 主频（可靠带上限用）
-    return factor_h, taf_lr, x_toe, fc
+    return factor_h, factor_v, taf_lr, x_toe, fc
 
 
 # ==========================================================
@@ -341,14 +400,25 @@ def _open_csv(path):  # Py2/Py3 兼容的 csv 写句柄
     return open(path, 'wb')
 
 
+RESPONSE_FIELDS = [  # 地表响应表固定列顺序
+    'x', 'y', 'PGA_h', 'PGA_v', 'PGA_R',
+    'AF_h', 'AF_v', 'TAF_h', 'TAF_v',
+    'TAF_h_comp', 'TAF_v_comp', 'VTR',
+    'UTAF_h', 'UTAF_v', 'UTAF_R', 'TAF_R', 'DUTAF_v',
+    'V_over_H', 'FF_PGA_h0', 'FF_PGA_h', 'FF_PGA_v', 'FF_PGA_R',
+    'ff_side'
+]
+
+
 def write_response_csv(path, ys, rows):
-    """写逐节点指标 csv：x,y,PGA_h,PGA_v,AF_h,TAF_h,AF_v,TAF_v,V_over_H,ff_side。"""
+    """写逐节点指标 csv：包含现有 AF/TAF 与新增统一分母、竖向转换和调试分母列。"""
     fh = _open_csv(path)
     w = csv.writer(fh)
-    w.writerow(['x', 'y', 'PGA_h', 'PGA_v', 'AF_h', 'TAF_h', 'AF_v', 'TAF_v', 'V_over_H', 'ff_side'])
+    w.writerow(RESPONSE_FIELDS)
     for k, r in enumerate(rows):
-        w.writerow([r['x'], float(ys[k]), r['PGA_h'], r['PGA_v'], r['AF_h'], r['TAF_h'],
-                    r['AF_v'], r['TAF_v'], r['V_over_H'], r['ff_side']])
+        out = dict(r)  # 复制一份，补入 y 坐标
+        out['y'] = float(ys[k])  # 当前节点 y 坐标
+        w.writerow([out.get(f, float('nan')) for f in RESPONSE_FIELDS])
     fh.close()
 
 
@@ -371,7 +441,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     """处理单条 odb：提取→指标→传函→写文件，返回汇总 dict。"""
     logger = logger or log_step()
     record = strip_record_name(odb_path)
-    factor_h, taf_lr, x_toe, fc = meta_pieces(meta)
+    factor_h, factor_v, taf_lr, x_toe, fc = meta_pieces(meta)
     wave = find_wave_file(record, case_cfg)  # 定位输入波（PGA_in 与 H 分母）
     if wave is None:
         log_step(logger, '警告: %s 找不到匹配输入波 txt，AF/TAF/H 跳过，仅输出 PGA', record)
@@ -396,7 +466,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         x_toe = float(xs[-1]) + 1.0
         log_step(logger, '警告: case_meta 缺 x_toe，同侧规则退化为全 left')
 
-    rows = surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, taf_lr, x_toe)  # 逐节点指标
+    rows = surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, factor_v, taf_lr, x_toe)  # 逐节点指标
     err_l, err_r, suspect = farfield_qa(rows, taf_lr)  # 远场对拍一维理论
     write_response_csv('surface_response_%s.csv' % record, ys, rows)
 
@@ -422,7 +492,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     taf_arr = np.array([r['TAF_h'] for r in rows], dtype=float)
     ar_idx = int(np.nanargmax(taf_arr)) if np.any(~np.isnan(taf_arr)) else None  # AR_max 在重采样前的原始曲线上取
     summary = {'record': record, 'n_nodes': len(xs), 'dt': dt, 'duration': float(t[-1]),
-               'wave_file': wave, 'pga_in': pga_in, 'factor_h': factor_h, 'fc': fc,
+               'wave_file': wave, 'pga_in': pga_in, 'factor_h': factor_h, 'factor_v': factor_v, 'fc': fc,
                'AR_max': (float(taf_arr[ar_idx]) if ar_idx is not None else None),  # 峰值放大（招牌标量）
                'AR_max_x': (rows[ar_idx]['x'] if ar_idx is not None else None),  # 峰值位置
                'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r, 'suspect': suspect}
@@ -659,6 +729,19 @@ def prepare_plot_data(csv_path, x_crest, x_toe, h_slope, raw=False):  # 准备�
     return record, data, s_all, ('raw_s_' if raw else '')  # 返回绘图所需数据
 
 
+def _field_has_finite_value(data, field):  # 判断字段是否存在有效值
+    """检查字段是否至少包含一个有限值；用于避免旧 CSV 的新增空列生成空白图。"""
+    for r in data:  # 遍历行
+        val = r.get(field)  # 读取字段
+        try:  # 尝试判定有限性
+            fv = float(val)  # 转浮点
+            if val is not None and (not math.isnan(fv)) and (not math.isinf(fv)):  # 有有限值
+                return True  # 可绘制
+        except Exception:  # 非数值
+            pass  # 忽略
+    return False  # 无有效值
+
+
 def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
     """遍历 surface_response_*.csv，按【三段分轴】布局生成 3x2 出版级图表。
 
@@ -705,26 +788,47 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
 
     if use_cn:  # 中文标签集
         labels = {'PGA_h': u'水平向 PGA (m/s²)', 'PGA_v': u'垂直向 PGA (m/s²)',
+                  'PGA_R': u'合成 PGA (m/s²)',
                   'AF_h': u'水平向 AF', 'AF_v': u'垂直向 AF',
-                  'TAF_h': u'水平向 TAF', 'TAF_v': u'垂直向 TAF'}  # 纵轴标签
+                  'TAF_h': u'水平向 TAF', 'TAF_v': u'垂直向 TAF',
+                  'TAF_h_comp': u'水平分量 TAF', 'TAF_v_comp': u'竖向分量 TAF',
+                  'VTR': u'竖向转换系数 VTR',
+                  'UTAF_h': u'统一水平 UTAF', 'UTAF_v': u'统一竖向 UTAF',
+                  'UTAF_R': u'统一合成 UTAF', 'TAF_R': u'合成 TAF_R',
+                  'DUTAF_v': u'竖向增量 ΔUTAF_v',
+                  'V_over_H': u'竖横比 V/H'}  # 纵轴标签
         seg_titles = (u'坡顶平台', u'坡面', u'坡脚平台')  # 三段标题
         xlabel = u'归一化坐标 s'  # 横轴标签
         sup_fmt = u'记录: %s'  # 总标题模板
     else:  # 英文兜底标签集
         labels = {'PGA_h': u'Horizontal PGA (m/s²)', 'PGA_v': u'Vertical PGA (m/s²)',
+                  'PGA_R': u'Resultant PGA (m/s²)',
                   'AF_h': u'Horizontal AF', 'AF_v': u'Vertical AF',
-                  'TAF_h': u'Horizontal TAF', 'TAF_v': u'Vertical TAF'}  # 纵轴标签
+                  'TAF_h': u'Horizontal TAF', 'TAF_v': u'Vertical TAF',
+                  'TAF_h_comp': u'Component TAF-H', 'TAF_v_comp': u'Component TAF-V',
+                  'VTR': u'Vertical conversion ratio',
+                  'UTAF_h': u'Unified TAF-H', 'UTAF_v': u'Unified TAF-V',
+                  'UTAF_R': u'Unified resultant TAF', 'TAF_R': u'Resultant TAF',
+                  'DUTAF_v': u'Vertical increment ΔUTAF-V',
+                  'V_over_H': u'Vertical-to-horizontal ratio'}  # 纵轴标签
         seg_titles = (u'Crest plateau', u'Slope', u'Toe plateau')  # 三段标题
         xlabel = u'Normalized coordinate s'  # 横轴标签
         sup_fmt = u'Record: %s'  # 总标题模板
 
-    draw_specs = [  # 面板布局：(行, 列, 字段, 颜色)
-        (0, 0, 'PGA_h', CB_PALETTE['blue']),  # 水平 PGA
-        (0, 1, 'PGA_v', CB_PALETTE['vermillion']),  # 垂直 PGA
-        (1, 0, 'AF_h', CB_PALETTE['blue']),  # 水平 AF
-        (1, 1, 'AF_v', CB_PALETTE['vermillion']),  # 垂直 AF
-        (2, 0, 'TAF_h', CB_PALETTE['blue']),  # 水平 TAF
-        (2, 1, 'TAF_v', CB_PALETTE['vermillion']),  # 垂直 TAF
+    draw_specs_all = [  # 面板布局：(字段, 颜色)
+        ('PGA_h', CB_PALETTE['blue']),  # 水平 PGA
+        ('PGA_v', CB_PALETTE['vermillion']),  # 垂直 PGA
+        ('PGA_R', CB_PALETTE['black']),  # 合成 PGA
+        ('AF_h', CB_PALETTE['blue']),  # 水平 AF
+        ('AF_v', CB_PALETTE['vermillion']),  # 垂直 AF
+        ('TAF_h', CB_PALETTE['blue']),  # 现有水平 TAF
+        ('TAF_v', CB_PALETTE['vermillion']),  # 现有竖向 TAF
+        ('VTR', CB_PALETTE['purple']),  # 竖向转换系数
+        ('UTAF_h', CB_PALETTE['skyblue']),  # 统一水平系数
+        ('UTAF_v', CB_PALETTE['orange']),  # 统一竖向系数
+        ('UTAF_R', CB_PALETTE['green']),  # 统一合成系数
+        ('DUTAF_v', CB_PALETTE['vermillion']),  # 竖向增量系数
+        ('V_over_H', CB_PALETTE['black']),  # 竖横比
     ]
 
     for csv_path, raw in csvs:  # 遍历原始与重采样记录
@@ -740,15 +844,22 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
             if not (a_win and c_win):  # 未配置观测窗口
                 log_step(logger, '[plot] 提示: geometry_cfg 未配置 crest_window/toe_window，观测范围不截断（净空段一并画出）。')  # 提示
             w_b = max(1.0, 0.3 * (a_max + c_max))  # 段B 显示保底宽度（各段特征长度本不同，显示比例允许不同）
+            draw_specs = [(f, c) for f, c in draw_specs_all
+                          if f in data[0] and (_field_has_finite_value(data, f) or f in ('TAF_v', 'TAF_v_comp'))]  # 仅绘制当前 CSV 有效字段
+            if not draw_specs:  # 无可绘制字段
+                continue  # 跳过
+            n_cols = 2  # 双栏排布
+            n_rows = int(math.ceil(float(len(draw_specs)) / float(n_cols)))  # 根据字段数动态确定行数
 
-            fig = plt.figure(figsize=(6.3, 8.2))  # 双栏宽画布（增高以留足刻度和标签空间）
-            outer = gridspec.GridSpec(3, 2, left=0.10, right=0.985, top=0.93, bottom=0.065,
-                                      hspace=0.42, wspace=0.26)  # 外层 3x2 网格（调细 hspace）
+            fig = plt.figure(figsize=(6.3, max(8.2, 2.55 * n_rows + 0.7)))  # 双栏宽画布，按面板数增高
+            outer = gridspec.GridSpec(n_rows, n_cols, left=0.10, right=0.985, top=0.94, bottom=0.055,
+                                      hspace=0.46, wspace=0.26)  # 外层动态网格
             all_panel_axes = []  # 暂存所有面板的 (ax_a, ax_c) 以便添加横轴标签
 
-            panel_labels = ['(a)', '(b)', '(c)', '(d)', '(e)', '(f)']
-            for panel_idx, (row_idx, col_idx, field, color) in enumerate(draw_specs):  # 遍历面板规格
-                panel_lbl = panel_labels[panel_idx]
+            for panel_idx, (field, color) in enumerate(draw_specs):  # 遍历面板规格
+                row_idx = panel_idx // n_cols  # 当前面板行号
+                col_idx = panel_idx % n_cols  # 当前面板列号
+                panel_lbl = '(%s)' % chr(ord('a') + panel_idx)  # 学术子图编号
                 inner = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[row_idx, col_idx],
                                                          width_ratios=[a_max, w_b, c_max], wspace=0.0)  # 三段子网格
                 ax_a = fig.add_subplot(inner[0])  # 段A 坡顶平台
@@ -848,8 +959,14 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
 # ==========================================================
 # 统一按 s 坐标每 0.01 划分，原固定个数网格 N_A/N_B/N_C 已废弃
 _SEG_EPS = 1e-9  # 拐点归段容差（s=0/1 两侧段共享）
-SGRID_FIELDS = ['PGA_h', 'PGA_v', 'AF_h', 'TAF_h', 'AF_v', 'TAF_v', 'V_over_H']  # 参与重采样的响应字段
-SGRID_CONTINUOUS_FIELDS = set(['PGA_h', 'PGA_v', 'AF_h', 'AF_v', 'V_over_H'])  # 连续物理量跨段整体插值，避免坡脚前端外假平台
+SGRID_FIELDS = [  # 参与重采样的响应字段
+    'PGA_h', 'PGA_v', 'PGA_R',
+    'AF_h', 'AF_v', 'TAF_h', 'TAF_v',
+    'TAF_h_comp', 'TAF_v_comp', 'VTR',
+    'UTAF_h', 'UTAF_v', 'UTAF_R', 'TAF_R', 'DUTAF_v',
+    'V_over_H'
+]
+SGRID_CONTINUOUS_FIELDS = set(['PGA_h', 'PGA_v', 'PGA_R', 'AF_h', 'AF_v', 'V_over_H'])  # 连续物理量跨段整体插值，避免坡脚前端外假平台
 SGRID_MAX_GAPFILL = 0.15  # TAF 等分段量只补很短的内部缺口，避免跨大段无效区造线
 
 
