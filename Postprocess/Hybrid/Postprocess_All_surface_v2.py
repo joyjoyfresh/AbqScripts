@@ -29,6 +29,7 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
       H_topo_h_<record>.csv                                （同上，参考台站谱比）
       surface_summary.json                                 （逐波 QA / AR_max(+段号/归一坐标) / 分母口径汇总）
       figs/surface_response_<record>.{png,pdf,svg}         （三段分轴出版级图，横轴为 §4.0 三段归一坐标 s）
+      figs/surface_response_raw_s_<record>.{png,pdf,svg}   （原始逐节点数据仅做 x→s 换算的对照图）
       sgrid_response_<record>.csv                          （统一 s 子网格对齐响应表，N_A+N_B+N_C 行）
       sgrid_H_surface_h/v_<record>.csv、sgrid_H_topo_h_<record>.csv（列=统一网格点的对齐 H 曲面）
       sgrid_params.json                                    （子网格参数，跨工况一致性校验锚点）
@@ -643,6 +644,21 @@ def _grayscale_preview_local(png_path):  # 生成灰度预览（色盲自检，�
         return None  # 跳过
 
 
+def prepare_plot_data(csv_path, x_crest, x_toe, h_slope, raw=False):  # 准备原始或重采样绘图数据
+    """读取响应表并返回记录名、逐行数据、s 坐标和输出名前缀。"""
+    data = read_response_csv_local(csv_path)  # 读取响应表
+    prefix = 'surface_response_' if raw else 'sgrid_response_'  # 数据源文件名前缀
+    record = os.path.basename(csv_path)[len(prefix):-4]  # 提取记录名
+    if not data:  # 空表
+        return record, data, np.array([], dtype=float), ('raw_s_' if raw else '')  # 返回空数据
+    if raw:  # 原始逐节点表只做 x→s 换算
+        xs = np.array([row['x'] for row in data], dtype=float)  # 原始物理坐标
+        s_all = calc_s_coords(xs, x_crest, x_toe, h_slope)  # 不插值、不补点、不重采样
+    else:  # 统一网格表已有 s 列
+        s_all = np.array([row['s'] for row in data], dtype=float)  # 直接读取归一坐标
+    return record, data, s_all, ('raw_s_' if raw else '')  # 返回绘图所需数据
+
+
 def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
     """遍历 surface_response_*.csv，按【三段分轴】布局生成 3x2 出版级图表。
 
@@ -672,9 +688,10 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
         return  # 退出
     x_crest, x_toe, h_slope, a_win, c_win = ctx  # 解包几何上下文
 
-    csvs = glob.glob('sgrid_response_*.csv')  # 搜索符合的文件
-    if not csvs:  # 无文件
-        log_step(logger, '[plot] 未发现任何已生成的 sgrid_response_*.csv 曲线表，跳过作图。')  # 提示
+    csvs = [(path, True) for path in sorted(glob.glob('surface_response_*.csv'))]  # 原始逐节点数据
+    csvs += [(path, False) for path in sorted(glob.glob('sgrid_response_*.csv'))]  # 统一网格数据
+    if not csvs:  # 两类文件均不存在
+        log_step(logger, '[plot] 未发现 surface_response_*.csv 或 sgrid_response_*.csv，跳过作图。')  # 提示
         return  # 退出
 
     cjk = None  # 选用中文字体名
@@ -710,14 +727,14 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
         (2, 1, 'TAF_v', CB_PALETTE['vermillion']),  # 垂直 TAF
     ]
 
-    for csv_path in csvs:  # 遍历处理各记录
-        record = csv_path[len('sgrid_response_'):-4]  # 提取记录名
+    for csv_path, raw in csvs:  # 遍历原始与重采样记录
+        record = os.path.basename(csv_path)  # 异常日志的默认记录名
         try:  # 尝试画图
-            data = read_response_csv_local(csv_path)  # 读取指标数据
+            record, data, s_all, output_prefix = prepare_plot_data(
+                csv_path, x_crest, x_toe, h_slope, raw=raw)  # 读取并统一为 s 坐标
             if not data:  # 无数据
                 continue  # 跳过
 
-            s_all = np.array([row['s'] for row in data], dtype=float)  # 直接提取无量纲 s 坐标
             a_max = float(a_win) if (a_win and float(a_win) > 0) else max(float(-s_all.min()), 0.5)  # 段A 显示跨度
             c_max = float(c_win) if (c_win and float(c_win) > 0) else max(float(s_all.max()) - 1.0, 0.5)  # 段C 显示跨度
             if not (a_win and c_win):  # 未配置观测窗口
@@ -810,7 +827,7 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
             if not os.path.exists(out_dir):  # 目录不存在
                 os.makedirs(out_dir)  # 创建
 
-            fig_path = os.path.join(out_dir, 'surface_response_%s' % record)  # 文件基路径
+            fig_path = os.path.join(out_dir, 'surface_response_%s%s' % (output_prefix, record))  # 原始对照图带 raw_s 前缀
             for fmt in ('png', 'pdf', 'svg'):  # 多格式导出（矢量+栅格，与 Plot_Fig15_compare_v3 口径）
                 try:  # 逐格式保存
                     old_err = np.seterr(all='ignore')

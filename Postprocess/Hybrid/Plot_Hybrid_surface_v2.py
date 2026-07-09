@@ -121,6 +121,25 @@ DRAW_SPECS = [  # (字段键, 中文标签, 英文标签, 曲线颜色)
     ('TAF_h', '水平向 TAF', 'Horizontal TAF', CB_PALETTE['blue']),                        # (e)
     ('TAF_v', '垂直向 TAF', 'Vertical TAF', CB_PALETTE['vermillion']),                    # (f)
 ]
+PLOT_SMOOTH_WINDOW = 11  # 仅对成图做分段移动平均；CSV 与峰值统计保持原始值
+
+
+def smooth_curve(values, window=PLOT_SMOOTH_WINDOW):  # 平滑单段空间曲线
+    """用忽略 NaN 的居中移动平均削弱节点 PGA 包络锯齿，不填补原有缺失值。"""
+    arr = np.asarray(values, dtype=float)  # 转为浮点数组
+    if len(arr) < 3 or int(window) < 3 or not np.any(np.isfinite(arr)):  # 无需或无法平滑
+        return arr.copy()  # 保持原值
+    width = min(int(window) | 1, len(arr) if len(arr) % 2 else len(arr) - 1)  # 使用不超过数据长度的奇数窗
+    if width < 3:  # 有效窗口不足
+        return arr.copy()  # 保持原值
+    pad = width // 2  # 居中窗口两侧补点数
+    valid = np.isfinite(arr)  # 有效值掩码
+    data = np.where(valid, arr, 0.0)  # NaN 不参与求和
+    sums = np.convolve(np.pad(data, pad, mode='edge'), np.ones(width), mode='valid')  # 窗内值之和
+    counts = np.convolve(np.pad(valid.astype(float), pad, mode='edge'), np.ones(width), mode='valid')  # 窗内有效数
+    out = np.divide(sums, counts, out=np.full(len(arr), np.nan), where=counts > 0)  # 计算移动平均
+    out[~valid] = np.nan  # 不填补原曲线缺口
+    return out  # 返回平滑结果
 
 
 # ==============================================================================
@@ -169,26 +188,24 @@ def draw_single_panel(fig, field, color, ylabel, df, s_all, a_max, c_max, w_b,
     style_axes(ax)  # 网格和边框美化
 
     # 收集连续曲线数据
-    vals = df[field].to_numpy(float)  # 该字段数组
-    x_plot, y_plot = [], []  # 绘图点
-    for i in range(len(s_all)):  # 遍历每个点
-        v = vals[i]  # 值
-        if np.isnan(v):  # NaN 跳过
-            continue
-        sk = float(s_all[i])  # s 坐标
-        if sk < -a_max - 1e-9 or sk > 1.0 + c_max + 1e-9:  # 超出显示范围
-            continue
-        x_plot.append(sk); y_plot.append(v)  # 追加有效点
-
-    if x_plot:  # 有有效曲线
-        order = np.argsort(np.asarray(x_plot, dtype=float))  # 按 s 升序连线
-        x_arr = np.asarray(x_plot, dtype=float)[order]  # 排序后 x
-        y_arr = np.asarray(y_plot, dtype=float)[order]  # 排序后 y
-        ax.plot(x_arr, y_arr, color=color, linestyle='-', linewidth=1.2, zorder=3)  # 一条连续曲线
+    vals = df[field].to_numpy(float).copy()  # 复制字段数组，避免 pandas 返回只读视图
+    segs = df['seg'].astype(str).to_numpy()  # 三段标签用于防止平滑跨越坡顶和坡脚
+    for seg in ('A', 'B', 'C'):  # 各段独立平滑，保留棱角处真实突变
+        mask = segs == seg  # 当前段掩码
+        vals[mask] = smooth_curve(vals[mask])  # 仅改变显示曲线
+    shown = (s_all >= -a_max - 1e-9) & (s_all <= 1.0 + c_max + 1e-9)  # 显示窗掩码
+    y_view = np.where(shown, vals, np.nan)  # 窗外不绘制
+    finite = np.isfinite(y_view)  # 有效绘图点
+    if np.any(finite):  # 有有效曲线
+        order = np.argsort(s_all)  # 按 s 升序连线
+        ax.plot(s_all[order], y_view[order], color=color, linestyle='-', linewidth=1.2, zorder=3)  # 一条连续曲线
+    else:  # 全 NaN 时明确说明物理原因，避免误判为漏画
+        note = 'θ=0° 时竖向自由场为 0，TAF_v 不适用' if field == 'TAF_v' else '无有效数据'  # 空图说明
+        ax.text(0.5, 0.5, note, transform=ax.transAxes, ha='center', va='center', fontsize=7)  # 居中标注
 
     # 设置坐标范围
     ax.set_xlim(-a_max, 1.0 + c_max)  # 连续横轴范围
-    lo, hi = (min(y_plot), max(y_plot)) if y_plot else (0.0, 1.0)  # 数据极值
+    lo, hi = (float(np.nanmin(y_view)), float(np.nanmax(y_view))) if np.any(finite) else (0.0, 1.0)  # 数据极值
     pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))  # 上下留白
     ax.set_ylim(lo - pad, hi + pad)  # 设定范围
 

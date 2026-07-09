@@ -24,8 +24,8 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型�
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl"]  # 执行后自动删除的中间文件类型，留空则不删除
 SMOKE_MODE = True  # 小样本全流程排查模式；正式 P1 全批前改为 False
-SMOKE_ROOT_DIR = r"C:\Users\12462\Documents\Code\AbqScripts\Run\P1_smoke"  # smoke 输出目录，避免覆盖正式结果
-MAX_WORKERS = 2 if SMOKE_MODE else 2  # smoke 单线程便于排查日志；正式批可并行
+SMOKE_ROOT_DIR = r"C:\Users\12462\Documents\Code\AbqScripts\Run\P1_smoke-2"  # smoke 输出目录，避免覆盖正式结果
+MAX_WORKERS = 4 if SMOKE_MODE else 2  # smoke 单线程便于排查日志；正式批可并行
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
 
 

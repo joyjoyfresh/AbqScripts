@@ -261,6 +261,7 @@ def setup_style(
     lang: str = "en",
     use_sciplots: bool = True,
     serif_for_zh: bool = False,
+    constrained_layout: bool = True,
 ) -> dict:
     """
     应用出版级样式预设。
@@ -270,8 +271,11 @@ def setup_style(
         lang: 'en' | 'zh' — 中文模式自动配置中文字体并修正负号
         use_sciplots: 优先尝试 SciencePlots；不可用则回退到内置预设
         serif_for_zh: 中文模式下使用宋体类衬线字体（中文期刊常约定）
+        constrained_layout: 默认 True——全局开启 constrained_layout 自适应排版，
+            从源头减少标题/轴标签被裁、图例压数据、子图互相重叠。需要手动
+            subplots_adjust 或某些 colorbar 写法时可传 False 关闭。
     Returns:
-        dict 包含 keys: journal / lang / sciplots_used / cjk_font
+        dict 包含 keys: journal / lang / sciplots_used / cjk_font / constrained_layout
     """
     if journal not in JOURNAL_PRESETS:
         raise ValueError(f"Unknown journal preset: {journal}. "
@@ -284,6 +288,13 @@ def setup_style(
     # 内置预设始终在 SciencePlots 之上覆盖一遍，确保关键参数（fonttype、字号）落实
     plt.rcParams.update(JOURNAL_PRESETS[journal])
 
+    # 默认开启自适应排版：从源头减少文字遮盖 / 裁切 / 子图重叠
+    plt.rcParams["figure.constrained_layout.use"] = constrained_layout
+
+    # 全模式默认修正负号：避免所选字体缺 U+2212 时负号渲染成方框（一种乱码）。
+    # 用 ASCII hyphen-minus 代替真减号，几乎所有字体都含，最稳妥。
+    plt.rcParams["axes.unicode_minus"] = False
+
     cjk_font = None
     if lang == "zh":
         cjk_font = configure_chinese_fonts(serif_for_zh=serif_for_zh)
@@ -295,6 +306,7 @@ def setup_style(
         "lang": lang,
         "sciplots_used": sciplots_used,
         "cjk_font": cjk_font,
+        "constrained_layout": constrained_layout,
     }
 
 

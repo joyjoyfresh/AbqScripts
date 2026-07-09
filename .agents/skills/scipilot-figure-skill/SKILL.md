@@ -10,7 +10,9 @@ description: >-
  图 / KDE）、相关性矩阵 / 散点矩阵、多面板组合。技术栈 matplotlib + seaborn +
  SciencePlots（静态）+ plotly（交互）。中英文双语，中文模式自动配置 Noto Sans
  CJK / Source Han Sans / SimHei 并修复负号方框，支持中文期刊"宋体正文 +
- Times New Roman 数字"混排。默认色盲安全配色 + 冗余编码 + 灰度预览。
+ Times New Roman 数字"混排。默认色盲安全配色 + 冗余编码 + 灰度预览。出图后做
+ "视觉自检闭环"：渲染 PNG 预览→程序自检缺字/文字裁切/刻度重叠→AI 读图复核遮盖
+ 与子图对齐→回改重渲，直到通过。
  当用户的任务涉及以下任何情况时主动触发：论文配图、科研画图、数据可视化、
  不知道用什么图、怎么展示数据、用什么图好、期刊投稿图、figure、出版级图表、
  matplotlib、seaborn、plotly、误差棒、显著性标注、色盲安全配色、矢量图导出、
@@ -108,14 +110,20 @@ setup_style(journal='general', lang='zh', serif_for_zh=True)   # 中文宋体混
 - 用 `seaborn.color_palette('colorblind')` 或 Okabe-Ito + 冗余编码（不同线型/marker）
 - 误差棒 / 阴影要在图注交代是 SD / SEM / 95% CI + n
 
-### 第 6 步：自检
+### 第 6 步：自检闭环（机器 + AI 读图）
 
-**两份清单都要过**：
+**三层都要过，缺一层都可能带病投稿**：
 
-1. **`references/viz_pitfalls.md`**：15 条科研画图禁忌——语义层面是否踩坑
-2. **`references/publication_checklist.md`**：形式合规（尺寸、DPI、字号、误差交代）
+1. **语义层**：`references/viz_pitfalls.md` 18 条科研画图禁忌——图型/配色/误差是否踩坑
+2. **形式层**：`references/publication_checklist.md` 形式合规（尺寸、DPI、字号、误差交代）
+3. **视觉层（v2.1 新增）**：出图后**渲染 PNG → 程序自检 → AI 读图复核 → 回改**的闭环：
+   - `visual_qa.render_preview(fig, 'figs/_preview.png')` 渲一张预览
+   - `visual_qa.audit_layout(fig)` 程序抓**缺字乱码 / 文字裁切 / 刻度重叠**（确定性问题）
+   - **用 `Read` 工具读这张 PNG**，对照 `references/visual_review.md` 的 8 项清单核对
+     **图例压数据 / 子图标签对齐 / 配色灰度可分**（程序难判的感知问题）
+   - 发现问题 → 按 `visual_review.md` 回改表改 → 重渲 → 再读，直到通过
 
-任何一条不通过就回去改图。
+任何一层不通过就回去改图。**矢量图的导出放在闭环通过之后**，把问题挡在投稿之前。
 
 ### 第 7 步：导出
 
@@ -226,20 +234,23 @@ export_figure(
 | `profile_data.py` | EDA：列类型 / 样本量 / 分布 / 异常 / 相关 / 初步图型建议 | `profile_data(source, group_cols)` |
 | `setup_style.py` | 期刊预设 + CJK 字体配置 + SciencePlots 包装 | `setup_style(journal, lang, use_sciplots, serif_for_zh)` |
 | `export_figure.py` | 多格式 + 按最终尺寸 + 灰度预览 | `export_figure(fig, basename, formats, dpi, size_inches, grayscale_preview)` |
-| `check_figure.py` | 合规自检（格式 / DPI / 字体嵌入） | `check_figure(path, min_dpi, target_inches)` |
+| `check_figure.py` | 文件合规自检（格式 / DPI / 字体嵌入） | `check_figure(path, min_dpi, target_inches)` |
+| `layout_tools.py` | 子图标签对齐 + constrained/tight 兜底理版 | `add_panel_labels(fig, style)` / `finalize_figure(fig)` |
+| `visual_qa.py` | 渲染 PNG 预览 + 程序自检（缺字 / 裁切 / 刻度重叠） | `render_preview(fig, out)` / `audit_layout(fig)` |
 
 ## 参考文档
 
-`references/` 下六份文档——**按需 view，不要一次全读**：
+`references/` 下七份文档——**按需 view，不要一次全读**：
 
 | 文档 | 何时读 |
 |---|---|
 | `chart_selection.md` | **每次选图必读**——决策框架、不同论点→不同图 |
 | `data_profiling.md` | 读不懂 `profile_data.py` 输出 |
-| `viz_pitfalls.md` | 自检前必读——15 条避坑清单 |
+| `viz_pitfalls.md` | 自检前必读——18 条避坑清单（含 P16-18 排版/渲染坑） |
 | `journal_specs.md` | 不确定目标期刊的栏宽/字号/DPI/字体 |
 | `plot_recipes.md` | 9 类图各自的完整配方 + 适用场景 |
 | `publication_checklist.md` | 投稿前最后过形式合规清单 |
+| `visual_review.md` | 出图后视觉自检——AI 读图 8 项清单 + 回改循环协议 |
 
 每份开头都有目录——先查目录定位，再 view 对应小节。
 
@@ -280,9 +291,9 @@ export_figure(
 流程：
 1. 确认目标期刊（决定整张图 7.2 in 还是 7.16 in；Nature `a/b/c` vs IEEE `(a)(b)(c)`）
 2. 各 panel 独立画，**保证字号、配色、坐标尺度统一**（同一变量在 4 个 panel 里同色）
-3. 用 `plt.subplots(2, 2, figsize=(7.2, 5.4), constrained_layout=True)` 组合
-4. 子图标签 `ax.text(-0.20, 1.05, 'a', transform=ax.transAxes, fontsize=9, fontweight='bold')`
-5. 导出 + 灰度检查 + audit
+3. 用 `plt.subplots(2, 2, figsize=(7.2, 5.4))` 组合（`setup_style` 已默认开 constrained_layout）
+4. `layout_tools.finalize_figure(fig)` 理顺版面，再 `add_panel_labels(fig, style='nature')` 打 a/b/c/d——**统一 figure 坐标自动横竖对齐**，不要手摆 `ax.text`（易错位，见 viz_pitfalls P18；IEEE 用 `style='ieee'` → (a)(b)(c)）
+5. **视觉自检闭环**：`render_preview` 渲 PNG → `audit_layout` 程序自检 → `Read` 读图核对子图对齐/遮盖 → 回改 → 通过后再导出 + 灰度检查
 
 详细配方见 `plot_recipes.md` 第 9 节。
 

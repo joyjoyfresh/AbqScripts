@@ -19,6 +19,11 @@
 - [P13. 红绿对比、不做色盲检查](#p13-红绿对比不做色盲检查)
 - [P14. rainbow / jet 色图](#p14-rainbow--jet-色图)
 - [P15. 显著性符号滥用](#p15-显著性符号滥用)
+- [P16. 缺字乱码：中文 / 负号 / 特殊符号变方框](#p16-缺字乱码中文--负号--特殊符号变方框)
+- [P17. 文字裁切与图例遮盖](#p17-文字裁切与图例遮盖)
+- [P18. 多面板子图编号不对齐](#p18-多面板子图编号不对齐)
+
+> P16–P18 是 v2.1 新增的「排版/渲染」类坑——和前 15 条不同，它们往往**画的时候看不出来、导出后才暴露**。配套的兜底手段：`setup_style`（字体+constrained_layout）、`layout_tools.py`（对齐+理版）、`visual_qa.py`（程序自检）、`visual_review.md`（AI 读图自检闭环）。
 
 ---
 
@@ -272,6 +277,85 @@ sns.stripplot(data=df, x='group', y='value', color='black',
 1. 只标**与论点有关**的少数几个对比，不全标
 2. 图注必须写：检验类型 + 校正方法 + 符号定义
 3. n<10 的"显著"要谨慎；考虑展示效应量（Cohen's d）而非只看 p
+
+---
+
+## P16. 缺字乱码：中文 / 负号 / 特殊符号变方框
+
+**错误**：成图里中文显示成 `□□□` 方框 / 豆腐块；负号变方框；`±` `×` `μ` `Δ`、希腊字母、上下标缺字。
+
+**为什么会这样（根因）**：
+- matplotlib 默认字体（DejaVu Sans 等）**不含 CJK 字符表**——写中文必然方框。
+- 某些字体不含 Unicode 真减号 `U+2212`，`axes.unicode_minus=True`（默认）时负号就渲染成方框。
+- 最坑的是：matplotlib 遇到缺字**只发一条 warning、照样把图画出来**，不报错——所以**画的时候不一定注意到，导出投稿才暴露**。
+
+**正确做法**：
+1. **中文图先配字体**：`setup_style(lang='zh')` 自动按优先级查 `Noto Sans CJK SC > Source Han Sans > SimHei > Microsoft YaHei`；中文期刊宋体混排传 `serif_for_zh=True`。
+2. **负号方框**：v2.1 的 `setup_style` 已**全模式默认** `axes.unicode_minus=False`（用 ASCII 减号，几乎所有字体都含）——不用再手动设。
+3. **导出前用程序自检兜底**：`visual_qa.audit_layout(fig)` 会同时拦截 matplotlib 的 warning 与 logging 两条通道，**任何缺字直接判 FAIL**，把方框挡在导出之前。
+4. 不确定系统有哪些中文字体：`python scripts/setup_style.py --list-fonts`。
+
+```python
+from setup_style import setup_style
+from visual_qa import audit_layout, print_report
+
+setup_style(journal='general', lang='zh')   # 配 CJK + 关负号方框
+# ... 画图 ...
+print_report(audit_layout(fig))             # 有缺字 → FAIL，立刻可见
+```
+
+---
+
+## P17. 文字裁切与图例遮盖
+
+**错误**：
+- 标题 / x 轴 / y 轴标签被画布边缘切掉一截。
+- 图例（legend）压在数据点、曲线或柱子上面。
+- 旋转后的长刻度标签底部出界。
+
+**审稿人视角**：
+- 被裁的标签 = 信息缺失，图自身不自洽，审稿人无法判断坐标含义。
+- 图例压数据 = 关键数据点看不见，等于在藏数据。
+
+**正确做法**：
+1. **从源头**：v2.1 `setup_style` 默认开 `constrained_layout`，自动给标题/标签留位。
+2. **兜底**：出图后跑 `layout_tools.finalize_figure(fig)`；导出时 `export_figure(..., tight=True)`（默认 `bbox_inches='tight'`）。
+3. **图例移出数据区**：
+
+```python
+ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1.0), frameon=False)
+# 或类别多时直接在曲线末端标注，彻底不要图例
+```
+
+4. **长刻度标签**：`ax.tick_params(axis='x', rotation=30)` + `ha='right'`；或缩短标签。
+5. **终检**：`visual_qa.audit_layout(fig)` 检测文字越界（WARN），再 AI 读图确认图例是否压住数据（程序难判的感知问题，见 `visual_review.md`）。
+
+---
+
+## P18. 多面板子图编号不对齐
+
+**错误**：组图里 a/b/c/d 用各子图自己的坐标手动摆放，导致**横竖不成线**——常见写法：
+
+```python
+# ✗ 反例：用 axes 比例坐标，各子图 y 轴刻度宽度不同时标签会错位
+for ax, lab in zip(axes.flat, 'abcd'):
+    ax.text(-0.20, 1.05, lab, transform=ax.transAxes, fontweight='bold')
+```
+
+**审稿人视角**：
+- 子图标签错位、字号/风格不统一（`a` 和 `(a)` 混用）= 排版不专业，组图显得草率。
+- 标签是读者理解"先看哪个 panel"的路标，乱放会打断阅读顺序。
+
+**正确做法**：用 `layout_tools.add_panel_labels()` —— 它把标签锚在每个子图的 `axes fraction (0,1)`（左上角）再施加**统一的 points 偏移**。因为同列子图左边缘 figure-x 相同、同行子图上边缘 figure-y 相同，统一偏移后**所有标签横看一条线、竖看一条线**，且不受各子图 y 轴刻度宽度影响：
+
+```python
+# ✓ 正解：一行搞定，自动对齐 + 风格统一
+from layout_tools import finalize_figure, add_panel_labels
+finalize_figure(fig)                       # 先把版面定下来
+add_panel_labels(fig, style='nature')      # a b c d（IEEE 用 style='ieee' → (a)(b)(c)）
+```
+
+字号默认取 `axes.labelsize` 并加粗，风格由 `style` 统一控制——不会再出现 `a` 和 `(a)` 混排。
 
 ---
 
