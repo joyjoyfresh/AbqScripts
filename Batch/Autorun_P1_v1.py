@@ -57,7 +57,6 @@ POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行�
 # ==== P1 均质池 · 全量规划（坡高4 × 坡角5 × 入射角4 = 80 几何，每几何 2 宽频脉冲）====
 _WAVE_BROADBAND = [  # 宽频探针（绝对路径）：4Hz 主 + 2Hz 低频补，合并覆盖 ~0.5–10Hz 提整条 H(f)
     r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_4Hz.txt",
-    r"C:\Users\12462\Documents\Code\AbqScripts\Wave\Impulse\Acceleration\ricker_wavelet_2Hz.txt",
 ]
 _H_LIST = [50.0, 100.0, 200.0, 400.0]  # P1 坡高档位：用于张成 eta 滑动窗
 _I_LIST = [15, 30, 45, 60, 75]  # 坡角 i：15/30/45/60 共享面 + 75 陡岩
