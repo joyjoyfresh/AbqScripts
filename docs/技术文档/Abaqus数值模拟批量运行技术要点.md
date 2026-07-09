@@ -1,10 +1,10 @@
-# Abaqus 批处理运行踩坑记录_v1
+# Abaqus 批处理运行踩坑记录
 
 ## 1. 背景
 
 在执行 P1 左右观测窗外扩诊断时，曾临时创建 `Batch/Autorun_P1_window_test_v1.py` 并尝试通过后台 `Start-Process` 与 Codex `shell_command` 启动 Abaqus 批处理。该过程暴露出两个流程问题：
 
-1. 诊断/验证性质的 Abaqus 批处理脚本不应放在 `Batch/`，应放在 `test/Batch/`；
+1. 诊断/验证性质 of Abaqus 批处理脚本不应放在 `Batch/`，应放在 `test/Batch/`；
 2. Abaqus 长时批处理不适合用短生命周期后台进程随手启动，否则容易只生成半截模型目录，未真正完成求解和后处理。
 
 ## 2. 脚本放置规则
@@ -115,4 +115,3 @@ Run/P1_window_test_full/
 3. 正式批处理脚本才放入 `Batch/`；
 4. 长时间 Abaqus 求解尽量由用户终端前台运行，Codex 负责准备脚本、检查日志和分析结果；
 5. 判断完成必须以 ODB、后处理 CSV 和日志完成标志为准。
-

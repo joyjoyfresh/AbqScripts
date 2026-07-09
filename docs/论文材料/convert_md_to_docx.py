@@ -189,9 +189,11 @@ def create_table_from_markdown(doc, table_lines):
     p_space.paragraph_format.space_before = Pt(3)
     p_space.paragraph_format.space_after = Pt(3)
 
-def convert_md_to_docx():
-    md_path = r"c:\Users\12462\Documents\Code\AbqScripts\ML\research_plan_simple_v2.md"
-    docx_path = r"c:\Users\12462\Documents\Code\AbqScripts\ML\research_plan_simple_v2.docx"
+def convert_md_to_docx(md_path=None, docx_path=None):
+    if md_path is None:
+        md_path = r"c:\Users\12462\Documents\Code\AbqScripts\docs\论文材料\论文章节_模型尺寸设计_v1.md"
+    if docx_path is None:
+        docx_path = r"c:\Users\12462\Documents\Code\AbqScripts\docs\论文材料\边坡地震响应数值模拟尺寸设计.docx"
     
     if not os.path.exists(md_path):
         print(f"Error: Source Markdown file not found: {md_path}")
@@ -314,7 +316,36 @@ def convert_md_to_docx():
             i += 1
             continue
             
-        # 7. 普通段落与空行
+        # 7. 图片处理
+        match_image = re.match(r'^!\[(.*?)\]\((.*?)\)$', line_strip)
+        if match_image:
+            caption = match_image.group(1)
+            img_path = match_image.group(2)
+            img_path = img_path.replace("%20", " ")
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            full_img_path = os.path.join(base_dir, img_path)
+            
+            if os.path.exists(full_img_path):
+                try:
+                    p_img = doc.add_paragraph()
+                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run_img = p_img.add_run()
+                    run_img.add_picture(full_img_path, width=docx.shared.Cm(14.0))
+                    
+                    p_cap = doc.add_paragraph()
+                    p_cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_cap.paragraph_format.space_before = Pt(2)
+                    p_cap.paragraph_format.space_after = Pt(6)
+                    run_cap = p_cap.add_run(caption)
+                    set_run_font(run_cap, size_pt=9.0, italic=True, color_rgb=RGBColor(80, 80, 80))
+                except Exception as e:
+                    print(f"Warning: Failed to insert image {full_img_path}: {e}")
+            else:
+                print(f"Warning: Image file not found: {full_img_path}")
+            i += 1
+            continue
+            
+        # 8. 普通段落与空行
         if not line_strip:
             # 空行略过
             i += 1
