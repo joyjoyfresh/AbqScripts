@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """跨工况地表响应独立分图（Hybrid 专用 v2）。
 
-读取 Collect_All_results_v2.py 收集的 results/ 内 SGRID_RESPONSE CSV，
+读取 Collect_All_results_v2.py 收集的 results/ 内 SURFACE_RESULTS NPZ，
 将 Postprocess_All_surface_v2.py 输出的可用响应/归一化指标拆为独立图表分别输出。
 每张图按三段归一化坐标 s 绘制（坡顶平台 A / 坡面 B / 坡脚平台 C），
 样式与原 Postprocess_All_surface_v2 的子图完全一致。
 
 数据来源：
-  results/index.csv + results/SGRID_RESPONSE-*.csv（由 Collect_All_results_v2 收集）
+  results/index.csv + results/SURFACE_RESULTS-*.npz（由 Collect_All_results_v2 收集）
 
 运行：
   python Postprocess/Hybrid/Plot_Hybrid_surface_v2.py <工况根目录或 results 目录>
@@ -17,6 +17,7 @@
 import os  # 导入系统接口模块
 import sys  # 导入系统参数模块
 import math  # 导入数学模块
+import json  # 导入 NPZ 表清单解析模块
 import numpy as np  # 导入数值计算库
 import pandas as pd  # 导入数据分析库
 import matplotlib  # 导入绘图框架
@@ -166,12 +167,12 @@ def resolve_results_dir(arg):  # 定位 results/ 目录
 
 
 def collect_records(results_dir):  # 从 index.csv 收集 SGRID_RESPONSE 记录
-    """读取 index.csv 并收集全部 SGRID_RESPONSE 条目。
+    """读取 index.csv 并收集全部 NPZ 工况内的 s 网格响应记录。
 
     返回列表，每项为 dict：source_folder, record, fpath（CSV 绝对路径）。
     """
     idx = pd.read_csv(os.path.join(results_dir, 'index.csv'))  # 读取清单
-    rows = idx[idx['type'].astype(str).str.upper() == 'SGRID_RESPONSE']  # 仅保留 SGRID_RESPONSE
+    rows = idx[idx['type'].astype(str).str.upper() == 'SURFACE_RESULTS_NPZ']  # 仅保留单工况 NPZ 包
     records = []  # 记录列表
     for _, r in rows.iterrows():  # 遍历
         fname = str(r['collected_file'])  # 收集后文件名
@@ -181,10 +182,41 @@ def collect_records(results_dir):  # 从 index.csv 收集 SGRID_RESPONSE 记录
         records.append({  # 追加记录
             'source_folder': str(r.get('source_folder', '')),  # 来源工况目录
             'record': str(r.get('record', '')),  # 输入波记录名
-            'fpath': fpath,  # CSV 文件路径
+            'fpath': fpath,  # NPZ 文件路径
         })
         print('  收录: %s' % fname)  # 提示
     return records  # 返回列表
+
+
+def _npz_text(value):  # 解析 NPZ 内的 UTF-8 标量文本
+    """兼容 Py2/Py3 的 NPZ UTF-8 标量解码。"""
+    if hasattr(value, 'item'):
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    return str(value)
+
+
+def read_sgrid_response_npz(path, record):  # 从单工况 NPZ 读取指定记录的 s 网格响应表
+    """按 manifest_json 定位 sgrid_response_<record>.csv 并返回 DataFrame。"""
+    package = np.load(path)  # NPZ 只含数值与 UTF-8 文本数组，不使用 pickle
+    try:
+        manifest = json.loads(_npz_text(package['manifest_json']))
+        target = 'sgrid_response_%s.csv' % record
+        for item in manifest:
+            if item.get('name') != target:
+                continue
+            key = item['key']
+            header = [_npz_text(v) for v in package[key + '_header']]
+            values = [[_npz_text(v) for v in row] for row in package[key + '_data']]
+            frame = pd.DataFrame(values, columns=header)  # 先保留 seg 文本列
+            for column in header:
+                if column != 'seg':  # 其余字段均为坐标或数值响应
+                    frame[column] = pd.to_numeric(frame[column], errors='coerce')
+            return frame
+    finally:
+        package.close()
+    raise KeyError('NPZ 中未找到 %s' % target)
 
 
 # ==============================================================================
@@ -237,8 +269,8 @@ def draw_single_panel(fig, field, color, ylabel, df, s_all, a_max, c_max, w_b,
 
 
 def plot_record(rec, results_dir, out_dir, use_cn):  # 为一条记录输出多张独立图
-    """读取一条 SGRID_RESPONSE CSV，按可用字段输出三段分轴独立图到 out_dir/<source_folder>__<record>/。"""
-    df = pd.read_csv(rec['fpath'])  # 读取 CSV
+    """读取一条 NPZ 内的 SGRID_RESPONSE 表，按可用字段输出独立三段分轴图。"""
+    df = read_sgrid_response_npz(rec['fpath'], rec['record'])  # 从 NPZ 读取 s 网格响应表
     s_all = df['s'].to_numpy(float)  # 归一坐标 s 数组
 
     # 计算三段显示参数
@@ -294,10 +326,10 @@ def main():  # 主入口
         print('错误：未找到 index.csv。请先运行 Collect_All_results_v2.py 生成 results/。')  # 报错
         return  # 退出
 
-    print('>>> 读取 %s 内的 index.csv 与 SGRID_RESPONSE-*.csv' % data_dir)  # 提示
+    print('>>> 读取 %s 内的 index.csv 与 SURFACE_RESULTS-*.npz' % data_dir)  # 提示
     records = collect_records(data_dir)  # 收集记录
     if not records:  # 无记录
-        print('错误：index.csv 中没有 SGRID_RESPONSE 类型的记录。')  # 报错
+        print('错误：index.csv 中没有 SURFACE_RESULTS_NPZ 类型的记录。')  # 报错
         return  # 退出
     print('>>> 共 %d 条记录，每条按可用字段输出独立三段分轴图。' % len(records))  # 概览
 

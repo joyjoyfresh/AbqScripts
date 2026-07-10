@@ -27,17 +27,11 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
 
 输入：job-*.odb + case_meta.json + 输入波 txt（路径优先取 case_config.json 的 run_cfg.wave_files，
       按文件名主干与记录名匹配；缺省回退工况目录下同名 .txt）。
-输出：surface_response_<record>.csv                        （逐节点一行）
-      H_surface_h_<record>.csv / H_surface_v_<record>.csv  （首列 f，其后每节点一列，列头=x 坐标）
-      H_topo_h_<record>.csv                                （同上，参考台站谱比）
-      surface_summary.json                                 （逐波 QA / AR_max(+段号/归一坐标) / 分母口径汇总）
+输出：surface_results.npz                                  （单工况唯一数值包：逐节点响应、传函、s 网格、元数据与汇总）
       figs/surface_response_<record>.{png,pdf,svg}         （三段分轴出版级图，横轴为 §4.0 三段归一坐标 s）
       figs/surface_response_raw_s_<record>.{png,pdf,svg}   （原始逐节点数据仅做 x→s 换算的对照图）
-      sgrid_response_<record>.csv                          （统一 s 子网格对齐响应表，N_A+N_B+N_C 行）
-      sgrid_H_surface_h/v_<record>.csv、sgrid_H_topo_h_<record>.csv（列=统一网格点的对齐 H 曲面）
-      sgrid_params.json                                    （子网格参数，跨工况一致性校验锚点）
-运行：abaqus python Postprocess_All_surface_v2.py   （在含 job-*.odb 与 case_meta.json 的工况目录内；
-      普通 Python 下运行则跳过 ODB 提取，对已有 CSV 重做重采样与绘图）
+      （CSV/JSON 仅在运行期间作为重采样和绘图临时文件，打包完成后自动删除）
+运行：abaqus python Postprocess_All_surface_v2.py   （在含 job-*.odb 与 case_meta.json 的工况目录内）
 约定：Abaqus 自带 Python 2.7 + numpy；纯数值函数不依赖 odbAccess，可在普通 Python 下单测。
 """
 
@@ -53,6 +47,8 @@ import io
 import time
 import logging
 import traceback
+import zipfile
+from xml.sax.saxutils import escape as xml_escape
 import numpy as np
 
 openOdb = None  # 占位
@@ -435,6 +431,156 @@ def write_H_csv(path, freqs, xs, H):
     fh.close()
 
 
+NPZ_FILENAME = 'surface_results.npz'  # 单工况唯一数值输出文件名
+XLSX_FILENAME = 'surface_results.xlsx'  # 供研究者查阅的 Excel 工作簿文件名
+_NPZ_TEMP_PATTERNS = (  # 打包后删除的运行期临时数值文件
+    'surface_response_*.csv', 'H_surface_h_*.csv', 'H_surface_v_*.csv', 'H_topo_h_*.csv',
+    'sgrid_response_*.csv', 'sgrid_H_surface_h_*.csv', 'sgrid_H_surface_v_*.csv', 'sgrid_H_topo_h_*.csv',
+)
+
+
+def _npz_bytes(value):  # 把文本统一编码为 UTF-8 字节数组，兼容 Py2/Py3 且不依赖 pickle
+    """返回适合 np.savez 的 UTF-8 字节标量。"""
+    if not isinstance(value, bytes):
+        value = value.encode('utf-8')
+    return np.asarray(value)
+
+
+def _read_csv_table_for_npz(path):  # 读取临时 CSV 为表头和文本矩阵
+    """将任意临时 CSV 转为 UTF-8 文本数组，保留数值精度与字符串列。"""
+    if sys.version_info[0] >= 3:
+        fh = io.open(path, 'r', encoding='utf-8-sig', newline='')
+    else:
+        fh = open(path, 'rb')
+    try:
+        rows = list(csv.reader(fh))
+    finally:
+        fh.close()
+    if not rows:
+        return [], []
+    return rows[0], rows[1:]
+
+
+def write_surface_npz(meta, case_cfg):  # 打包全部数值产物并删除临时 CSV/JSON
+    """写单工况 NPZ 数值包；表结构由 manifest_json 描述，禁止 pickle 以保障跨环境读取。"""
+    paths = []
+    for pattern in _NPZ_TEMP_PATTERNS:
+        paths.extend(glob.glob(pattern))
+    paths = sorted(set(paths))
+    payload = {
+        'schema_version': np.asarray(1),
+        'case_meta_json': _npz_bytes(json.dumps(meta or {}, ensure_ascii=True, sort_keys=True)),
+        'case_config_json': _npz_bytes(json.dumps(case_cfg or {}, ensure_ascii=True, sort_keys=True)),
+    }
+    for name in ('surface_summary.json', 'sgrid_params.json'):
+        if os.path.isfile(name):
+            with open(name, 'rb') as fh:
+                payload[name.replace('.', '_')] = np.asarray(fh.read())
+    manifest = []
+    for index, path in enumerate(paths):
+        header, rows = _read_csv_table_for_npz(path)
+        key = 'table_%03d' % index
+        payload[key + '_header'] = np.asarray([str(v).encode('utf-8') for v in header])
+        payload[key + '_data'] = np.asarray([[str(v).encode('utf-8') for v in row] for row in rows])
+        manifest.append({'key': key, 'name': os.path.basename(path)})
+    payload['manifest_json'] = _npz_bytes(json.dumps(manifest, ensure_ascii=True, sort_keys=True))
+    np.savez_compressed(NPZ_FILENAME, **payload)
+    for path in paths + [name for name in ('surface_summary.json', 'sgrid_params.json') if os.path.isfile(name)]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return len(manifest)
+
+
+def _xlsx_col(index):  # Excel 列序号转字母
+    """把从 1 开始的列序号转换为 Excel 列名。"""
+    out = ''
+    while index:
+        index, rem = divmod(index - 1, 26)
+        out = chr(65 + rem) + out
+    return out
+
+
+def _npz_text(value):  # NPZ UTF-8 文本解码
+    """兼容 Py2/Py3 的 NPZ 字节标量或数组元素。"""
+    if hasattr(value, 'item'):
+        value = value.item()
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    return str(value)
+
+
+def _xlsx_cell(row, col, value, style=0):  # 写单个 OpenXML 单元格
+    """将数值写为 Excel 数字，其余内容写为 inlineStr，避免共享字符串表。"""
+    ref = '%s%d' % (_xlsx_col(col), row)
+    text = _npz_text(value)
+    try:
+        number = float(text)
+        if not math.isnan(number) and not math.isinf(number):  # Py2/Py3 兼容的有限数判定
+            return '<c r="%s" s="%d"><v>%.15g</v></c>' % (ref, style, number)
+    except Exception:
+        pass
+    return '<c r="%s" s="%d" t="inlineStr"><is><t>%s</t></is></c>' % (ref, style, xml_escape(text))
+
+
+def _xlsx_sheet_xml(rows):  # 将二维表写为简单工作表 XML
+    """首行应用表头样式，数据行保持原始数值类型。"""
+    body = []
+    for r_idx, row in enumerate(rows, 1):
+        cells = [_xlsx_cell(r_idx, c_idx, value, 1 if r_idx == 1 else 0)
+                 for c_idx, value in enumerate(row, 1)]
+        body.append('<row r="%d">%s</row>' % (r_idx, ''.join(cells)))
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" '
+            'activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+            '<sheetFormatPr defaultRowHeight="15"/><sheetData>%s</sheetData></worksheet>') % ''.join(body)
+
+
+def write_surface_xlsx_from_npz():  # 由 NPZ 生成研究者查阅用 Excel 工作簿
+    """以标准库导出 XLSX：概览页 + NPZ 内每张数值表一页，不依赖 Abaqus 外部库。"""
+    package = np.load(NPZ_FILENAME)
+    try:
+        manifest = json.loads(_npz_text(package['manifest_json']))
+        overview = [['项目', '内容'], ['schema_version', _npz_text(package['schema_version'])],
+                    ['case_meta_json', _npz_text(package['case_meta_json'])],
+                    ['case_config_json', _npz_text(package['case_config_json'])],
+                    ['surface_summary_json', _npz_text(package['surface_summary_json'])]]
+        if 'sgrid_params_json' in package:
+            overview.append(['sgrid_params_json', _npz_text(package['sgrid_params_json'])])
+        sheets = [('Overview', overview)]  # Abaqus Python 2 XML 拼接使用 ASCII 工作表名以避免编码错误
+        used_names = set(['Overview'])
+        for index, item in enumerate(manifest, 1):
+            base = item['name'].replace('.csv', '')
+            name = base[:28]
+            while name in used_names:
+                name = (base[:24] + '_%02d' % index)[:31]
+            used_names.add(name)
+            key = item['key']
+            header = [_npz_text(v) for v in package[key + '_header']]
+            values = [[_npz_text(v) for v in row] for row in package[key + '_data']]
+            sheets.append((name, [header] + values))
+    finally:
+        package.close()
+    content_overrides = ['<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+                         '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>']
+    workbook_sheets = []
+    workbook_rels = []
+    with zipfile.ZipFile(XLSX_FILENAME, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for index, (name, rows) in enumerate(sheets, 1):
+            content_overrides.append('<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' % index)
+            workbook_sheets.append('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (xml_escape(name), index, index))
+            workbook_rels.append('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (index, index))
+            archive.writestr('xl/worksheets/sheet%d.xml' % index, _xlsx_sheet_xml(rows).encode('utf-8'))
+        archive.writestr('[Content_Types].xml', ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>%s</Types>' % ''.join(content_overrides)).encode('utf-8'))
+        archive.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        archive.writestr('xl/workbook.xml', ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>%s</sheets></workbook>' % ''.join(workbook_sheets)).encode('utf-8'))
+        archive.writestr('xl/_rels/workbook.xml.rels', ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">%s<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' % (''.join(workbook_rels), len(sheets) + 1)).encode('utf-8'))
+        archive.writestr('xl/styles.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="10"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1F4E78"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" fontId="1" fillId="1" applyFont="1" applyFill="1"/></cellXfs></styleSheet>')
+    return len(sheets)
+
+
 # ==========================================================
 #  主流程
 # ==========================================================
@@ -748,6 +894,27 @@ def _field_has_finite_value(data, field):  # 判断字段是否存在有效值
     return False  # 无有效值
 
 
+PLOT_SMOOTH_WINDOW = 11  # 仅用于成图的分段移动平均窗口，原始数值与 NPZ 不改变
+
+
+def smooth_curve_local(values, window=PLOT_SMOOTH_WINDOW):  # 分段平滑空间响应曲线
+    """使用忽略 NaN 的居中移动平均削弱节点锯齿，不填补原始缺口。"""
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 3 or int(window) < 3 or not np.any(np.isfinite(arr)):
+        return arr
+    width = min(int(window), len(arr) if len(arr) % 2 else len(arr) - 1)
+    if width < 3:
+        return arr
+    pad = width // 2
+    valid = np.isfinite(arr)
+    data = np.where(valid, arr, 0.0)
+    sums = np.convolve(np.pad(data, pad, mode='edge'), np.ones(width), mode='valid')
+    counts = np.convolve(np.pad(valid.astype(float), pad, mode='edge'), np.ones(width), mode='valid')
+    out = np.divide(sums, counts, out=np.nan * np.ones(len(arr)), where=counts > 0)
+    out[~valid] = np.nan
+    return out
+
+
 def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
     """遍历 surface_response_*.csv，按【三段分轴】布局生成 3x2 出版级图表。
 
@@ -821,20 +988,15 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
         xlabel = u'Normalized coordinate s'  # 横轴标签
         sup_fmt = u'Record: %s'  # 总标题模板
 
-    draw_specs_all = [  # 面板布局：(字段, 颜色)
-        ('PGA_h', CB_PALETTE['blue']),  # 水平 PGA
-        ('PGA_v', CB_PALETTE['vermillion']),  # 垂直 PGA
-        ('PGA_R', CB_PALETTE['black']),  # 合成 PGA
-        ('AF_h', CB_PALETTE['blue']),  # 水平 AF
-        ('AF_v', CB_PALETTE['vermillion']),  # 垂直 AF
-        ('TAF_h', CB_PALETTE['blue']),  # 现有水平 TAF
-        ('TAF_v', CB_PALETTE['vermillion']),  # 现有竖向 TAF
-        ('VTR', CB_PALETTE['purple']),  # 竖向转换系数
-        ('UTAF_h', CB_PALETTE['skyblue']),  # 统一水平系数
-        ('UTAF_v', CB_PALETTE['orange']),  # 统一竖向系数
-        ('UTAF_R', CB_PALETTE['green']),  # 统一合成系数
-        ('DUTAF_v', CB_PALETTE['vermillion']),  # 竖向增量系数
-        ('V_over_H', CB_PALETTE['black']),  # 竖横比
+    draw_specs_all = [  # 与 Plot_Hybrid_surface_v2.py 的独立分图字段和配色严格一致
+        ('PGA_h', CB_PALETTE['blue']), ('PGA_v', CB_PALETTE['vermillion']),
+        ('PGA_R', CB_PALETTE['black']), ('AF_h', CB_PALETTE['blue']),
+        ('AF_v', CB_PALETTE['vermillion']), ('TAF_h', CB_PALETTE['blue']),
+        ('TAF_v', CB_PALETTE['vermillion']), ('TAF_h_comp', CB_PALETTE['skyblue']),
+        ('TAF_v_comp', CB_PALETTE['orange']), ('VTR', CB_PALETTE['purple']),
+        ('UTAF_h', CB_PALETTE['skyblue']), ('UTAF_v', CB_PALETTE['orange']),
+        ('UTAF_R', CB_PALETTE['green']), ('TAF_R', CB_PALETTE['green']),
+        ('DUTAF_v', CB_PALETTE['vermillion']), ('V_over_H', CB_PALETTE['black']),
     ]
 
     for csv_path, raw in csvs:  # 遍历原始与重采样记录
@@ -849,7 +1011,6 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
             c_max = float(c_win) if (c_win and float(c_win) > 0) else max(float(s_all.max()) - 1.0, 0.5)  # 段C 显示跨度
             if not (a_win and c_win):  # 未配置观测窗口
                 log_step(logger, '[plot] 提示: geometry_cfg 未配置 crest_window/toe_window，观测范围不截断（净空段一并画出）。')  # 提示
-            w_b = max(1.0, 0.3 * (a_max + c_max))  # 段B 显示保底宽度（各段特征长度本不同，显示比例允许不同）
             draw_specs = [(f, c) for f, c in draw_specs_all
                           if f in data[0] and (_field_has_finite_value(data, f) or f in ('TAF_v', 'TAF_v_comp'))]  # 仅绘制当前 CSV 有效字段
             if not draw_specs:  # 无可绘制字段
@@ -859,84 +1020,42 @@ def plot_results(meta, case_cfg, logger=None):  # 画图主控制函数
 
             fig = plt.figure(figsize=(6.3, max(8.2, 2.55 * n_rows + 0.7)))  # 双栏宽画布，按面板数增高
             outer = gridspec.GridSpec(n_rows, n_cols, left=0.10, right=0.985, top=0.94, bottom=0.055,
-                                      hspace=0.46, wspace=0.26)  # 外层动态网格
-            all_panel_axes = []  # 暂存所有面板的 (ax_a, ax_c) 以便添加横轴标签
+                                      hspace=0.52, wspace=0.26)  # 外层动态网格
 
             for panel_idx, (field, color) in enumerate(draw_specs):  # 遍历面板规格
                 row_idx = panel_idx // n_cols  # 当前面板行号
                 col_idx = panel_idx % n_cols  # 当前面板列号
                 panel_lbl = '(%s)' % chr(ord('a') + panel_idx)  # 学术子图编号
-                inner = gridspec.GridSpecFromSubplotSpec(1, 3, subplot_spec=outer[row_idx, col_idx],
-                                                         width_ratios=[a_max, w_b, c_max], wspace=0.0)  # 三段子网格
-                ax_a = fig.add_subplot(inner[0])  # 段A 坡顶平台
-                ax_b = fig.add_subplot(inner[1], sharey=ax_a)  # 段B 坡面（共 y 轴）
-                ax_c = fig.add_subplot(inner[2], sharey=ax_a)  # 段C 坡脚平台（共 y 轴）
-                for ax in (ax_a, ax_b, ax_c):  # 统一外观
-                    style_axes_local(ax)  # 网格和边框美化
-
-                seg_s = {'A': [], 'B': [], 'C': []}  # 各段 s 坐标
-                seg_y = {'A': [], 'B': [], 'C': []}  # 各段 y 值
-                y_all = []  # 全部有效值（统一 ylim 用）
-                for idx, r in enumerate(data):  # 迭代每一行
-                    val = r.get(field)  # 获取值
-                    if val is None or (isinstance(val, float) and math.isnan(val)):  # 过滤非法 NaN
-                        continue  # 跳过
-                    sk = float(s_all[idx])  # 该点 s 坐标
-                    if sk < -a_max - 1e-9 or sk > 1.0 + c_max + 1e-9:  # 截断到观测范围
-                        continue  # 跳过
-                    y_all.append(float(val))  # 记录有效值
-                    if sk <= 1e-9:  # 段A（含坡顶棱）
-                        seg_s['A'].append(sk); seg_y['A'].append(float(val))
-                    if -1e-9 <= sk <= 1.0 + 1e-9:  # 段B（两端拐点都收，保证曲线触缝）
-                        seg_s['B'].append(sk); seg_y['B'].append(float(val))
-                    if sk >= 1.0 - 1e-9:  # 段C（含坡脚棱）
-                        seg_s['C'].append(sk); seg_y['C'].append(float(val))
-
-                for seg, ax in (('A', ax_a), ('B', ax_b), ('C', ax_c)):  # 逐段画曲线
-                    if seg_s[seg]:  # 该段有数据
-                        ax.plot(seg_s[seg], seg_y[seg], color=color, linestyle='-', linewidth=1.2)  # 绘图
-
-                ax_a.set_xlim(-a_max, 0.0)  # 段A 范围
-                ax_b.set_xlim(0.0, 1.0)  # 段B 范围
-                ax_c.set_xlim(1.0, 1.0 + c_max)  # 段C 范围
-                # 统一三段 ylim（sharey 自动同步）
-                # 若无有效值（如全为 NaN），则使用 [0.0, 1.0] 范围以防止 AutoMinorLocator 崩溃
-                lo, hi = (min(y_all), max(y_all)) if y_all else (0.0, 1.0)
-                pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))  # 上下留白
-                ax_a.set_ylim(lo - pad, hi + pad)  # 设定范围
-
-                step_a = max(1, int(math.ceil(a_max / 4.0)))  # 段A 刻度步长（约 4 个主刻度）
-                ax_a.set_xticks([-float(t) for t in range(0, int(math.floor(a_max)) + 1, step_a)])  # 段A 整数刻度
-                ax_b.set_xticks([0.5])  # 段B 只标中点（0/1 在轴缝上）
-                step_c = max(1, int(math.ceil(c_max / 4.0)))  # 段C 刻度步长
-                ax_c.set_xticks([1.0 + float(t) for t in range(0, int(math.floor(c_max)) + 1, step_c)])  # 段C 整数刻度
-
-                ax_a.spines['right'].set_visible(False)  # 隐藏段A 右边框（让位给缝上虚线）
-                ax_c.spines['left'].set_visible(False)  # 隐藏段C 左边框
-                for sd in ('left', 'right'):  # 段B 两侧边框改虚线 = 坡顶/坡脚棱标记线
-                    ax_b.spines[sd].set_linestyle('--')  # 虚线
-                    ax_b.spines[sd].set_linewidth(0.9)  # 线宽 0.9（与 v3 竖虚线一致）
-                plt.setp(ax_b.get_yticklabels(), visible=False)  # 段B 隐藏 y 刻度文本
-                plt.setp(ax_c.get_yticklabels(), visible=False)  # 段C 隐藏 y 刻度文本
-
-                # 为每张小图上方都加上“坡顶平台”、“坡面”、“坡脚平台”标注
-                ax_a.set_title(seg_titles[0], fontsize=7, pad=2)  # 段A 标题
-                ax_b.set_title(seg_titles[1], fontsize=7, pad=2)  # 段B 标题
-                ax_c.set_title(seg_titles[2], fontsize=7, pad=2)  # 段C 标题
-
-                # 记录每一个面板对应的左右子轴及标号以绘制横坐标标签，所有子面板均显示刻度文本
-                all_panel_axes.append((ax_a, ax_c, panel_lbl))
-                ax_a.set_ylabel(labels[field])  # 设置纵轴标签
-
-            for ax_a, ax_c, panel_lbl in all_panel_axes:  # 每一张小图都各放一个居中横轴标签
-                p_a = ax_a.get_position()  # 左子轴位置
-                p_c = ax_c.get_position()  # 右子轴位置
-                # 1. 绘制横坐标标签（保持固定标准间距 0.030，与 Y 轴等距对称）
-                fig.text((p_a.x0 + p_c.x1) / 2.0, p_a.y0 - 0.030, xlabel,
-                         ha='center', va='top', fontsize=8)
-                # 2. 独立绘制学术子图编号标签（下移至 0.055 处，强指加粗 Times New Roman 以对齐 SciPilot 期刊规范）
-                fig.text((p_a.x0 + p_c.x1) / 2.0, p_a.y0 - 0.055, panel_lbl,
-                         ha='center', va='top', fontsize=8, fontname='Times New Roman', fontweight='bold')
+                ax = fig.add_subplot(outer[row_idx, col_idx])  # 与独立分图脚本一致：每个面板使用单一连续坐标轴
+                style_axes_local(ax)  # 网格、刻度和边框与独立分图统一
+                values = np.array([r.get(field, float('nan')) for r in data], dtype=float)
+                segments = np.where(s_all <= 0.0, 'A', np.where(s_all < 1.0, 'B', 'C'))
+                for seg in ('A', 'B', 'C'):  # 各段独立平滑，坡肩/坡脚不跨段抹平
+                    mask = segments == seg
+                    values[mask] = smooth_curve_local(values[mask])
+                shown = (s_all >= -a_max - 1e-9) & (s_all <= 1.0 + c_max + 1e-9)
+                y_view = np.where(shown, values, np.nan)
+                finite = np.isfinite(y_view)
+                if np.any(finite):
+                    order = np.argsort(s_all)
+                    ax.plot(s_all[order], y_view[order], color=color, linestyle='-', linewidth=1.2, zorder=3)
+                else:
+                    note = u'θ=0° 时竖向自由场为 0，分量 TAF_v 不适用' if field in ('TAF_v', 'TAF_v_comp') else u'无有效数据'
+                    ax.text(0.5, 0.5, note, transform=ax.transAxes, ha='center', va='center', fontsize=7)
+                ax.set_xlim(-a_max, 1.0 + c_max)  # 连续横轴严格采用观测窗实际范围
+                lo, hi = (float(np.nanmin(y_view)), float(np.nanmax(y_view))) if np.any(finite) else (0.0, 1.0)
+                pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))
+                ax.set_ylim(lo - pad, hi + pad)
+                tick_start, tick_end = int(math.ceil(-a_max)), int(math.floor(1.0 + c_max))
+                ax.set_xticks([float(t) for t in range(tick_start, tick_end + 1)])
+                ax.axvline(0.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
+                ax.axvline(1.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
+                for xc, title in zip(((-a_max) / 2.0, 0.5, 1.0 + c_max / 2.0), seg_titles):
+                    ax.text(xc, 1.035, title, transform=ax.get_xaxis_transform(), ha='center', va='bottom', fontsize=7, clip_on=False)
+                ax.set_ylabel(labels[field])
+                ax.set_xlabel(xlabel, labelpad=6)
+                ax.text(-0.16, 1.10, panel_lbl, transform=ax.transAxes, ha='left', va='bottom',
+                        fontsize=8, fontname='Times New Roman', fontweight='bold', clip_on=False)
 
             fig.suptitle(sup_fmt % record, fontsize=9, fontweight='bold', y=0.97)  # 总标题
 
@@ -1267,9 +1386,9 @@ def main():  # 主入口函数
     case_cfg = _load_json('case_config.json')  # 读取配置
 
     if openOdb is None:  # 无 Abaqus 环境
-        existing_csv = glob.glob('surface_response_*.csv') + glob.glob('sgrid_response_*.csv')  # 检查是否已有可重处理数据
-        if not existing_csv:  # 普通 Python 无法读取 ODB，且没有历史 CSV 可供重绘
-            log_step(logger, '错误: 未检测到 odbAccess，且当前目录没有已有响应 CSV；无法从 ODB 提取数据。请用 "abaqus cae noGUI=Postprocess_All_surface_v2.py" 运行。')  # 明确失败原因
+        existing_csv = glob.glob('surface_response_*.csv') + glob.glob('sgrid_response_*.csv')  # 检查运行期临时数据
+        if not existing_csv:  # NPZ 是最终包，统一绘图脚本负责从中读取
+            log_step(logger, '错误: 未检测到 odbAccess，且当前目录没有运行期 CSV；NPZ 最终包请用 Plot_Hybrid_surface_v2.py 重绘。')  # 明确失败原因
             sys.exit(2)  # 非零退出，防止批处理把无产出误判为成功
         log_step(logger, '提示: 未检测到 odbAccess (非 Abaqus 环境)，跳过 ODB 提取，直接重采样并重绘已有 CSV。')  # 提示
         resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（可对已有 CSV 反复重跑）
@@ -1302,6 +1421,10 @@ def main():  # 主入口函数
 
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
+    n_tables = write_surface_npz(meta, case_cfg)  # 所有数值临时文件收敛为单一 NPZ 包
+    n_sheets = write_surface_xlsx_from_npz()  # 再由 NPZ 导出研究者查阅用 Excel 工作簿
+    log_step(logger, '完成: 已写入 %s（%d 张数值表）与 %s（%d 个工作表）；运行期 CSV/JSON 已清理。',
+             NPZ_FILENAME, n_tables, XLSX_FILENAME, n_sheets)
 
 
 if __name__ == '__main__':  # 程序入口

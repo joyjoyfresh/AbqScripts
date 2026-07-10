@@ -43,7 +43,7 @@ Start-Process -FilePath python -ArgumentList ... -RedirectStandardOutput ... -Re
 - `case_config.json`、`case_meta.json`、`.cae`、`.jnl`、`.rec` 等文件生成；
 - 建模日志只推进到“等效节点力计算完成”附近；
 - 没有进入“提交作业”或“所有作业已完成”阶段；
-- 没有生成 `job-*.odb`、`surface_response_*.csv` 或 `sgrid_response_*.csv`。
+- 没有生成 `job-*.odb` 或 `surface_results.npz`。
 
 这说明后台进程在 Codex 工具调用结束或超时后被截断，导致 Abaqus 只执行了前半段建模流程。
 
@@ -91,7 +91,7 @@ slope_frame_ssi_full_v2.log 中出现 “提交作业” 或 “所有作业已�
 job-*.odb 是否存在
 Postprocess_All_surface_v2.log 是否存在
 surface_response_*.csv 是否存在
-sgrid_response_*.csv 是否存在
+surface_results.npz 是否存在
 results/index.csv 是否被汇总生成
 ```
 

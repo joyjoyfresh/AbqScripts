@@ -1,5 +1,6 @@
 import csv
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import types
@@ -74,6 +75,44 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
         """防止重采样后的时间轴被误用于尚未重采样的另一分量。"""
         with self.assertRaisesRegex(ValueError, "时程列数"):
             MODULE.to_uniform(np.array([0.0, 0.1, 0.2]), np.array([[0.0, 1.0]]))
+
+    def test_plot_window_uses_configured_observation_limits(self):
+        """观测窗已配置时，绘图范围必须直接采用其实际 s 跨度。"""
+        ctx = MODULE._resolve_s_context(
+            {"geometry": {"x_crest": 0.0, "x_toe": 20.0, "H_minus_h": 10.0}},
+            {"geometry_cfg": {"crest_window": 1.5, "toe_window": 2.5}},
+        )
+
+        self.assertEqual(ctx[3:], (1.5, 2.5))
+
+    def test_npz_package_contains_tables_and_removes_temporary_outputs(self):
+        """单工况数值产物应收敛为一个无 pickle 的 NPZ 包。"""
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                os.chdir(folder)
+                for name in ("surface_response_demo.csv", "sgrid_response_demo.csv"):
+                    with open(name, "w", newline="", encoding="utf-8") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(["s", "PGA_h"])
+                        writer.writerow(["0.0", "1.25"])
+                Path("surface_summary.json").write_text(json.dumps({"records": [{"record": "demo"}]}), encoding="utf-8")
+                Path("sgrid_params.json").write_text(json.dumps({"N_A": 1}), encoding="utf-8")
+
+                self.assertEqual(MODULE.write_surface_npz({"case": "demo"}, {"cfg": 1}), 2)
+
+                package = np.load("surface_results.npz")
+                try:
+                    manifest = json.loads(MODULE._npz_bytes(package["manifest_json"].item()).item().decode("utf-8"))
+                    self.assertEqual([item["name"] for item in manifest], ["sgrid_response_demo.csv", "surface_response_demo.csv"])
+                finally:
+                    package.close()
+                self.assertFalse(Path("surface_response_demo.csv").exists())
+                self.assertFalse(Path("sgrid_response_demo.csv").exists())
+                self.assertFalse(Path("surface_summary.json").exists())
+                os.chdir(old_cwd)  # Windows 不允许删除仍作为当前目录的临时文件夹
+        finally:
+            os.chdir(old_cwd)
 
     def test_main_fails_loudly_when_odb_extraction_fails(self):
         """任一 ODB 提取失败必须返回非零，避免批处理误清理唯一的诊断 ODB。"""
