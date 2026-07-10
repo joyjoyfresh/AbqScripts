@@ -66,7 +66,7 @@ def main():  # 主入口
     base.SMOKE_MODE = True  # 使用 smoke 模式
     base.SMOKE_ROOT_DIR = os.path.join(WORKSPACE_DIR, "test", "Abaqus", "P1_window_test")  # 默认输出到 test/Abaqus
     base.MAX_WORKERS = 4  # 四个代表工况并行
-    base.DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl"]  # 成功后清理中间大文件
+    base.DELETE_FILE_TYPES = [".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl"]  # 成功后清理中间大文件，除了".odb", 
     base.PARAMETER_CASES = build_window_cases()  # 替换工况列表
     base.main()  # 调用主批处理流程
 

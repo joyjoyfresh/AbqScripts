@@ -52,6 +52,7 @@ import math
 import io
 import time
 import logging
+import traceback
 import numpy as np
 
 openOdb = None  # 占位
@@ -167,6 +168,8 @@ def to_uniform(t, sig_mat):
     """
     t = np.asarray(t, dtype=float)
     sig_mat = np.atleast_2d(np.asarray(sig_mat, dtype=float))
+    if sig_mat.shape[1] != t.size:  # 时程列数必须与原始帧时间轴一致
+        raise ValueError('时程列数(%d)与帧时间轴长度(%d)不一致，无法重采样' % (sig_mat.shape[1], t.size))
     dts = np.diff(t)
     dt = float(np.median(dts))
     if dt <= 0:
@@ -450,8 +453,11 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         xs, ys, t, a1_mat, a2_mat = extract_surface_acc(odb)
     finally:
         odb.close()
-    t, a1_mat, dt = to_uniform(t, a1_mat)  # 均匀化时间轴（FIXED 下原样返回）
-    _, a2_mat, _ = to_uniform(t, a2_mat)
+    t_raw = t  # 保留 ODB 原始帧时间轴，两个分量必须据此同步重采样
+    t, a1_mat, dt = to_uniform(t_raw, a1_mat)  # 水平分量均匀化（FIXED 下原样返回）
+    t_v, a2_mat, _ = to_uniform(t_raw, a2_mat)  # 竖向分量必须使用同一原始帧时间轴
+    if t_v.shape != t.shape or not np.allclose(t_v, t):  # 极端浮点差异时强制对齐到水平时间轴
+        a2_mat = np.vstack([np.interp(t, t_v, a2_mat[k]) for k in range(a2_mat.shape[0])])
 
     pga_in = None
     a_in = None
@@ -1261,7 +1267,11 @@ def main():  # 主入口函数
     case_cfg = _load_json('case_config.json')  # 读取配置
 
     if openOdb is None:  # 无 Abaqus 环境
-        log_step(logger, '提示: 未检测到 odbAccess (非 Abaqus 环境)，跳过 ODB 提取，直接重采样并重绘图表。')  # 提示
+        existing_csv = glob.glob('surface_response_*.csv') + glob.glob('sgrid_response_*.csv')  # 检查是否已有可重处理数据
+        if not existing_csv:  # 普通 Python 无法读取 ODB，且没有历史 CSV 可供重绘
+            log_step(logger, '错误: 未检测到 odbAccess，且当前目录没有已有响应 CSV；无法从 ODB 提取数据。请用 "abaqus cae noGUI=Postprocess_All_surface_v2.py" 运行。')  # 明确失败原因
+            sys.exit(2)  # 非零退出，防止批处理把无产出误判为成功
+        log_step(logger, '提示: 未检测到 odbAccess (非 Abaqus 环境)，跳过 ODB 提取，直接重采样并重绘已有 CSV。')  # 提示
         resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（可对已有 CSV 反复重跑）
         plot_results(meta, case_cfg, logger=logger)  # 运行绘图
         return  # 正常退出
@@ -1272,16 +1282,23 @@ def main():  # 主入口函数
         sys.exit(1)  # 退出
 
     summaries = []  # 摘要列表
+    failed_odbs = []  # 提取失败的 ODB，后续以非零状态返回给批处理
     for p in odbs:  # 遍历
         try:  # 尝试提取
             summaries.append(process_one_odb(p, meta, case_cfg, logger=logger))  # 处理单条 ODB
         except Exception as e:  # 异常
             log_step(logger, '错误: %s 处理失败: %s', p, str(e))  # 打印错误
+            log_step(logger, '错误堆栈:\n%s', traceback.format_exc())  # 记录完整堆栈，便于定位具体字段或 ODB 问题
             summaries.append({'record': strip_record_name(p), 'error': str(e)})  # 记录错误
+            failed_odbs.append(p)  # 记录失败项
 
     with open('surface_summary.json', 'w') as fh:  # 写摘要
         json.dump({'schema_version': 1, 'records': summaries}, fh, indent=2)  # 保存 json
     log_step(logger, '完成: %d 条 odb，汇总见 surface_summary.json', len(odbs))  # 提示完成
+
+    if failed_odbs:  # 任一 ODB 失败时必须显式失败，避免批处理继续清理 ODB 并掩盖根因
+        log_step(logger, '错误: %d/%d 条 ODB 后处理失败；已保留 ODB 和错误堆栈，停止重采样/绘图。', len(failed_odbs), len(odbs))  # 汇总提示
+        sys.exit(1)  # 让 Autorun 正确标记本工况失败，不执行清理
 
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
