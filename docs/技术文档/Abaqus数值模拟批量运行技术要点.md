@@ -4,12 +4,12 @@
 
 在执行 P1 左右观测窗外扩诊断时，曾临时创建 `Batch/Autorun_P1_window_test_v1.py` 并尝试通过后台 `Start-Process` 与 Codex `shell_command` 启动 Abaqus 批处理。该过程暴露出两个流程问题：
 
-1. 诊断/验证性质 of Abaqus 批处理脚本不应放在 `Batch/`，应放在 `test/Batch/`；
+1. 临时诊断性质的 Abaqus 批处理脚本不应放在 `Batch/`，应放在 `test/Batch/`；论文正文研究单元的 Autorun 属于正式研究脚本，统一放在 `Batch/`；
 2. Abaqus 长时批处理不适合用短生命周期后台进程随手启动，否则容易只生成半截模型目录，未真正完成求解和后处理。
 
 ## 2. 脚本放置规则
 
-以后凡是用于排查、验证、收敛性试验、窗口敏感性试验的 Abaqus 运行脚本，统一放在：
+以后凡是仅用于临时排查、且其结果不进入论文正文的 Abaqus 运行脚本，统一放在：
 
 ```text
 test/Batch/
@@ -21,7 +21,7 @@ test/Batch/
 test/Abaqus/<测试名称>/
 ```
 
-若需要输出到 `Run/` 下，应通过命令行参数显式指定，例如：
+与论文正文相关的正式研究 Autorun 统一放在 `Batch/`，其 Abaqus 工况与结果统一放在 `Run/<研究单元>/run-###/`；脚本默认自动递增运行编号，避免覆盖既有证据。临时诊断脚本若需输出到 `Run/` 下，应通过命令行参数显式指定，例如：
 
 ```text
 python C:\Users\12462\Documents\Code\AbqScripts\test\Batch\Autorun_P1_window_test_v1.py C:\Users\12462\Documents\Code\AbqScripts\Run\P1_window_test

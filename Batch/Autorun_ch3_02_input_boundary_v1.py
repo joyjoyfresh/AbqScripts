@@ -17,7 +17,7 @@ import numpy as np  # 导入 NPZ 验收模块
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 定位仓库根目录
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'  # Abaqus 启动器
 DEFAULT_ROOT = os.path.join(REPO_ROOT, 'Run', 'ch3_02_input_boundary')  # 默认 U2 论文运行根目录
-CASE_NAME = 'case-oblique-homogeneous'  # U2 唯一工况名
+CASE_NAME = 'case-oblique-homogeneous-negative'  # U2 反向斜入射诊断工况名
 MAX_STEP_SECONDS = 3600  # 单步最大运行时长
 
 MODEL_SOURCE = os.path.join(REPO_ROOT, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py')  # 建模入口
@@ -25,7 +25,7 @@ POST_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Postprocess_All_
 COLLECT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Collect_All_results_v2.py')  # NPZ 收集入口
 PLOT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Plot_Hybrid_surface_v2.py')  # 绘图入口
 WAVE_SOURCE = os.path.join(REPO_ROOT, 'Wave', 'Impulse', 'Acceleration', 'ricker_wavelet_4Hz.txt')  # 输入波
-INCIDENT_ANGLE = 15.0  # U2 验证的 SV 入射角
+INCIDENT_ANGLE = -15.0  # U2 单因素回归：反转 SV 入射方向，判别方向效应与固定侧边界误差
 
 CASE_CONFIG = {
     'material_cfg': {'angle': INCIDENT_ANGLE, 'layers': [], 'surface_geometry': 'horizontal'},  # 均质介质便于隔离输入与边界因素
@@ -105,7 +105,7 @@ def validate(root_dir, case_dir):  # 验收输入和边界一致性
         raise RuntimeError('U2 FD 自检未通过：%r' % selfcheck)  # 报告输入引擎问题
     with open(os.path.join(case_dir, 'slope_frame_ssi_full_v2.log'), 'r', encoding='utf-8') as handle:  # 读取建模日志
         log_text = handle.read()  # 读取全部日志
-    for token in ('自由场引擎=fd', '入射角=15.0000°', '边界[l]弹簧-阻尼器已创建', '边界[r]弹簧-阻尼器已创建', '边界[b]弹簧-阻尼器已创建'):  # 三侧边界与斜入射日志锚点
+    for token in ('自由场引擎=fd', '入射角=%.4f°' % INCIDENT_ANGLE, '边界[l]弹簧-阻尼器已创建', '边界[r]弹簧-阻尼器已创建', '边界[b]弹簧-阻尼器已创建'):  # 三侧边界与斜入射日志锚点
         if token not in log_text:  # 任一锚点缺失
             raise RuntimeError('U2 建模日志缺少：%s' % token)  # 报告边界实现错误
     package = np.load(npz_path)  # 打开最终包
@@ -119,7 +119,11 @@ def validate(root_dir, case_dir):  # 验收输入和边界一致性
     record = records[0]  # 获取唯一记录
     if bool(record.get('suspect')):  # 远场对拍必须通过
         raise RuntimeError('U2 远场 QA 失败：%r' % record)  # 提醒先做域与边界诊断
-    for key in ('qa_farfield_err_left', 'qa_farfield_err_right'):  # 检查左右端误差
+    qa_basis = str(record.get('qa_farfield_basis') or 'both_ends')  # 读取后处理采用的方向性判据
+    qa_keys = {'upstream_left': ('qa_farfield_err_left',),
+               'upstream_right': ('qa_farfield_err_right',),
+               'both_ends': ('qa_farfield_err_left', 'qa_farfield_err_right')}[qa_basis]  # 斜入射只检验传播上游端
+    for key in qa_keys:  # 检查判据要求的远场误差
         if float(record.get(key, 1.0)) > 0.05:  # 5% 门槛
             raise RuntimeError('U2 %s 超过5%%：%r' % (key, record.get(key)))  # 报告误差
     with open(index_path, 'r', encoding='utf-8-sig', newline='') as handle:  # 读取集中索引
@@ -128,6 +132,7 @@ def validate(root_dir, case_dir):  # 验收输入和边界一致性
         raise RuntimeError('U2 结果索引未保留通过的质量标记')  # 报告收集错误
     return {'status': 'passed', 'incident_angle': INCIDENT_ANGLE, 'fd_selfcheck': selfcheck,
             'farfield_err_left': record['qa_farfield_err_left'], 'farfield_err_right': record['qa_farfield_err_right'],
+            'qa_farfield_basis': qa_basis,
             'AR_max': record['AR_max']}  # 返回可审计摘要
 
 
@@ -141,9 +146,15 @@ def finalize(root_dir, case_dir):  # 执行后处理、收集、绘图与验收
              os.path.join(root_dir, 'autorun_03_collect.log'))  # 收集 NPZ
     run_step([sys.executable, os.path.basename(PLOT_SOURCE), root_dir], root_dir,
              os.path.join(root_dir, 'autorun_04_plot.log'))  # 输出图件
-    report = validate(root_dir, case_dir)  # 执行质量验收
+    try:
+        report = validate(root_dir, case_dir)  # 执行质量验收
+    except Exception as exc:
+        report = {'status': 'failed', 'error': str(exc),
+                  'finished_at': datetime.datetime.now().isoformat()}  # 失败也保留可审计报告
+        write_json(os.path.join(root_dir, 'u2_validation_report.json'), report)  # 写出失败报告
+        raise  # 保持非零退出码，禁止把失败工况误报为通过
     report['finished_at'] = datetime.datetime.now().isoformat()  # 记录结束时间
-    write_json(os.path.join(root_dir, 'u2_validation_report.json'), report)  # 写出报告
+    write_json(os.path.join(root_dir, 'u2_validation_report.json'), report)  # 写出通过报告
     print('U2 通过：%s' % json.dumps(report, ensure_ascii=False, sort_keys=True))  # 输出通过摘要
 
 

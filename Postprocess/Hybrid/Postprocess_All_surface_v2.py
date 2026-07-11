@@ -23,7 +23,7 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
        H_v(x,f)     = |FFT(a2_surf)| / |FFT(a_in)|            —— 竖向传函（同一水平输入分母）
        Htopo_h(x,f) = |FFT(a1_surf)| / |FFT(a1_同侧远场参考)|  —— 参考台站谱比，纯地形放大谱
      输入谱幅 < SPEC_MASK_RATIO×峰值的频点直接剔除（0/0 噪声），频带再截 [F_LO, FMAX_FACTOR×fc]。
-  4. QA：模型两端远场节点 AF_h 对拍 case_meta.ff_theory ±QA_TOL，超差该波标记 suspect。
+  4. QA：垂直入射检查两端；斜入射检查传播上游端，避免把下游坡体散射误判为边界输入误差。
 
 输入：job-*.odb + case_meta.json + 输入波 txt（路径优先取 case_config.json 的 run_cfg.wave_files，
       按文件名主干与记录名匹配；缺省回退工况目录下同名 .txt）。
@@ -287,8 +287,8 @@ def surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, factor_v, taf_lr, x_to
     return rows
 
 
-def farfield_qa(rows, taf_lr):
-    """远场 QA：两端节点 AF_h 对拍一维理论台阶，返回 (err_left, err_right, suspect)。"""
+def farfield_qa(rows, taf_lr, incident_angle=0.0):
+    """远场 QA：垂直入射查两端，斜入射查传播上游端，返回误差、标记与判据侧。"""
     err_l = err_r = None
     if rows and taf_lr:
         tl = (taf_lr.get('left') or (None, None))[0]  # 左柱理论台阶
@@ -297,8 +297,17 @@ def farfield_qa(rows, taf_lr):
             err_l = abs(rows[0]['AF_h'] / tl - 1.0)  # 最左端节点相对误差
         if tr and not math.isnan(rows[-1]['AF_h']):
             err_r = abs(rows[-1]['AF_h'] / tr - 1.0)  # 最右端节点相对误差
-    suspect = bool((err_l is not None and err_l > QA_TOL) or (err_r is not None and err_r > QA_TOL))
-    return err_l, err_r, suspect
+    angle = float(incident_angle or 0.0)  # 入射角符号决定水平传播方向
+    if angle > 1.0e-9:  # 波沿 +x 传播，上游为左端；右端包含坡体散射，不作为输入边界对拍点
+        basis = 'upstream_left'
+        suspect = bool(err_l is not None and err_l > QA_TOL)
+    elif angle < -1.0e-9:  # 波沿 -x 传播，上游为右端
+        basis = 'upstream_right'
+        suspect = bool(err_r is not None and err_r > QA_TOL)
+    else:  # 垂直入射没有水平上下游之分，两端均须通过
+        basis = 'both_ends'
+        suspect = bool((err_l is not None and err_l > QA_TOL) or (err_r is not None and err_r > QA_TOL))
+    return err_l, err_r, suspect, basis
 
 
 # ==========================================================
@@ -619,7 +628,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         log_step(logger, '警告: case_meta 缺 x_toe，同侧规则退化为全 left')
 
     rows = surface_metrics(xs, a1_mat, a2_mat, pga_in, factor_h, factor_v, taf_lr, x_toe)  # 逐节点指标
-    err_l, err_r, suspect = farfield_qa(rows, taf_lr)  # 远场对拍一维理论
+    incident_angle = float((meta or {}).get('incident_angle') or 0.0)  # 读取斜入射传播方向
+    err_l, err_r, suspect, qa_basis = farfield_qa(rows, taf_lr, incident_angle)  # 按传播上游端对拍一维理论
     write_response_csv('surface_response_%s.csv' % record, ys, rows)
 
     if a_in is not None:
@@ -647,12 +657,14 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
                'wave_file': wave, 'pga_in': pga_in, 'factor_h': factor_h, 'factor_v': factor_v, 'fc': fc,
                'AR_max': (float(taf_arr[ar_idx]) if ar_idx is not None else None),  # 峰值放大（招牌标量）
                'AR_max_x': (rows[ar_idx]['x'] if ar_idx is not None else None),  # 峰值位置
-               'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r, 'suspect': suspect}
-    log_step(logger, '%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s%s',
+               'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r,
+               'qa_farfield_basis': qa_basis, 'incident_angle': incident_angle, 'suspect': suspect}
+    log_step(logger, '%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s 判据=%s%s',
              record, len(xs), str(pga_in),
              str(summary['AR_max']), str(summary['AR_max_x']),
              ('%.1f%%' % (err_l * 100) if err_l is not None else 'NA'),
              ('%.1f%%' % (err_r * 100) if err_r is not None else 'NA'),
+             qa_basis,
              ' [SUSPECT]' if suspect else '')
     return summary
 
