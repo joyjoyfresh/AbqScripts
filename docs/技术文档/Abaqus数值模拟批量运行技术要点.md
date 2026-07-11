@@ -108,6 +108,9 @@ Run/P1_window_test_full/
 
 这些目录可能只包含建模中间文件，不能直接用于结果判断。若后续要重新运行，建议使用新的输出目录，或在确认无用后由用户手动清理。
 
+**更新状态（2026-07-11）**：
+已将原误放在 `Batch/` 下的 `Autorun_P1_window_test_v1.py` 移回到 `test/Batch/`，并修复了其在深层目录下的相对路径解析缺陷（将 `WORKSPACE_DIR` 退三级解析，修改默认输出目录为 `test/Abaqus/P1_window_test`）。导入与编译校验均已通过，可正常从 `test/Batch/` 启动。
+
 ## 7. 后续约定
 
 1. 测试性质脚本一律放入 `test/Batch/`；

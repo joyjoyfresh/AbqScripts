@@ -122,6 +122,7 @@ boundary_cfg = {
     'dashpot_scale': 1.0,               # 阻尼器(吸收)cn,ct 缩放：1.0=全吸收(Liu)/0<k<1=弱吸收/0=纯弹簧全反射
     'spring_scale': 1.0,                # 弹簧(恢复)kn,kt 缩放：1.0=现行(α0.5/0.25)/2.0=标准Liu/0=纯黏性(弹簧关)
     'sponge_enable': False,             # 边界内侧阻尼海绵层开关(opt-in)：L/R/B 内侧加渐变阻尼带吸收残余反射
+    'sponge_sides': ('left', 'right', 'bottom'),  # 海绵作用边界：left/right/bottom，可由工况配置覆盖
     'sponge_width': 0.0,                # 海绵带宽 m：0=自动 max(10×基准网格,8%域宽)；graded 网格远场粗须用域宽项
     'sponge_grades': 5,                 # 海绵分级数：阻尼从内缘 0 渐增到贴边界，级越多越平滑
     'sponge_xi_max': 0.3,               # 贴边界处附加阻尼比(占主频 fc)：海绵最外层 ξ 附加量，0.3≈强吸收
@@ -1562,7 +1563,7 @@ def _assign_sections_by_band(part, band_sections, surface_y_fn=None):
 
 
 def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name):
-    """边界内侧阻尼海绵层(opt-in)：对距 L/R/B 人工边界 sponge_width 内的单元，按到边界归一距离分级，
+    """边界内侧阻尼海绵层(opt-in)：对距 sponge_sides 指定人工边界 sponge_width 内的单元，按到边界归一距离分级，
     在该带原材料上叠加渐增的刚度比例瑞利阻尼 β，吸收漏过 VAB 的残余外行波。
 
     默认关闭(boundary_cfg['sponge_enable']=False)→直接返回，不改变既有行为。分级 0(海绵内缘,无附加)
@@ -1580,6 +1581,19 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
     xi_max = float(boundary_cfg.get('sponge_xi_max', 0.3))      # 贴边界处附加阻尼比(占主频)
     xs = [n.coordinates[0] for n in part.nodes]; ys_all = [n.coordinates[1] for n in part.nodes]  # 域包围盒
     xmin, xmax, ymin = min(xs), max(xs), min(ys_all)
+    raw_sides = boundary_cfg.get('sponge_sides', ('left', 'right', 'bottom'))  # 读取海绵作用边界
+    if isinstance(raw_sides, basestring):  # 兼容 JSON 字符串形式，如 "left,right"
+        raw_sides = raw_sides.split(',')
+    side_alias = {'l': 'left', 'r': 'right', 'b': 'bottom'}  # 支持简写，内部统一为完整名称
+    sides = []  # 规范化后的去重边界列表
+    for side in raw_sides if isinstance(raw_sides, (list, tuple)) else []:
+        key = side_alias.get(str(side).strip().lower(), str(side).strip().lower())
+        if key in ('left', 'right', 'bottom') and key not in sides:
+            sides.append(key)
+    if not sides:  # 空或非法配置不能静默把海绵扩展到所有边界
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：sponge_sides=%s 无有效边界，未生效', model_name, str(raw_sides))
+        return
     sw = float(boundary_cfg.get('sponge_width', 0.0))           # 海绵带宽 m
     if sw <= 0.0:  # 0=自动：max(10×基准网格, 8%域宽)——graded 网格远场单元粗，纯 10×网格常过小、捕不到单元
         sw = max(10.0 * float(mesh_size), 0.08 * (xmax - xmin))
@@ -1589,7 +1603,14 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
         coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
         xc = sum([p[0] for p in coords]) / len(coords)  # 质心 x（用列表避免通配 sum 拒收生成器）
         yc = sum([p[1] for p in coords]) / len(coords)  # 质心 y
-        d = min(xc - xmin, xmax - xc, yc - ymin)  # 到 L/R/B 最近距离(顶部自由面不计)
+        distances = []  # 仅计入显式指定的人工边界，顶部自由面始终不计
+        if 'left' in sides:
+            distances.append(xc - xmin)
+        if 'right' in sides:
+            distances.append(xmax - xc)
+        if 'bottom' in sides:
+            distances.append(yc - ymin)
+        d = min(distances)  # 到指定边界的最近距离
         if d >= sw:  # 海绵带外→保持原材料
             continue
         g = min(ngrade - 1, int((1.0 - d / sw) * ngrade))  # 归一深度 0(内缘)→1(边界) 映射到级
@@ -1627,8 +1648,8 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
                                offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
         n_assigned += len(labs)
     if logger:
-        log_step(logger, '%s 阻尼海绵层已施加：带宽=%.1fm, %d级, 贴边界附加ξ=%.0f%%, 覆盖 %d 单元/%d 组',
-                 model_name, sw, ngrade, 100 * xi_max, n_assigned, len(groups))
+        log_step(logger, '%s 阻尼海绵层已施加：边界=%s, 带宽=%.1fm, %d级, 贴边界附加ξ=%.0f%%, 覆盖 %d 单元/%d 组',
+                 model_name, '/'.join(sides), sw, ngrade, 100 * xi_max, n_assigned, len(groups))
 
 
 def _band_graded_sizes(strat, mesh_used, mcfg, fc=None):  # 各带目标单元尺寸（波速比缩放 + 软层谐波/穿层加密）

@@ -1299,6 +1299,107 @@ def _update_summary_ar(updates, logger=None):  # 回写 AR_max 段号/归一坐�
         log_step(logger, '[sgrid] 回写 surface_summary.json 失败: %s', str(e))  # 提示
 
 
+def _load_sgrid_rows_from_npz(npz_path, record):  # 从参考结果包读取指定记录的统一 s 网格
+    """读取参考 NPZ 中 `sgrid_response_<record>.csv` 的行字典，用于观测窗收敛 QA。"""
+    package = np.load(npz_path)  # 打开已收敛的参考数值包
+    try:
+        manifest = json.loads(_npz_text(package['manifest_json']))  # 读取表清单
+        target = 'sgrid_response_%s.csv' % record  # 当前记录对应的统一网格表名
+        key = None  # 数值包内表键初始化
+        for entry in manifest:  # 遍历清单定位目标表
+            if entry.get('name') == target:
+                key = entry.get('key')
+                break
+        if key is None:  # 缺参考记录不能静默通过
+            raise ValueError('参考 NPZ 缺少 %s' % target)
+        header = [_npz_text(v) for v in package[key + '_header']]  # 读取列名
+        rows = []  # 行字典列表
+        for raw_row in package[key + '_data']:
+            row = {}  # 单行数据
+            for idx, name in enumerate(header):
+                text = _npz_text(raw_row[idx])
+                try:
+                    row[name] = float(text)  # 数值列恢复为浮点数
+                except Exception:
+                    row[name] = text  # 分段标签等文本列原样保留
+            rows.append(row)
+        return rows  # 返回参考统一网格
+    finally:
+        if hasattr(package, 'close'):
+            package.close()  # 及时释放 NPZ 文件句柄
+
+
+def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同净空算例判定观测窗收敛
+    """可选 QA：仅在 case_config.qa_cfg.mode='window_convergence' 时启用。
+
+    端点仍保留一维自由场误差作为诊断量；若同一观测窗相对显式参考 NPZ 已收敛，
+    则以窗口收敛替代端点一维对拍作为最终 suspect 门槛，避免把散射尾波误判为边界反射。
+    """
+    logger = logger or log_step()
+    qa_cfg = (case_cfg or {}).get('qa_cfg') or {}  # 读取可选 QA 配置
+    if str(qa_cfg.get('mode', '')).lower() != 'window_convergence':  # 未显式声明则保持原严格端点 QA
+        return
+    ref_path = qa_cfg.get('reference_npz')  # 参考结果包路径
+    if not ref_path:
+        log_step(logger, '[qa] 窗口收敛 QA 未执行：缺 qa_cfg.reference_npz')
+        return
+    if not os.path.isabs(ref_path):  # 相对路径按当前工况目录解析
+        ref_path = os.path.abspath(ref_path)
+    if not os.path.isfile(ref_path):  # 缺参考结果不能放行
+        log_step(logger, '[qa] 窗口收敛 QA 未执行：参考 NPZ 不存在 -> %s', ref_path)
+        return
+    field = str(qa_cfg.get('field', 'TAF_h_comp'))  # 默认比较统一水平 TAF
+    tol = float(qa_cfg.get('tol', QA_TOL))  # 默认沿用 5% 门槛
+    min_points = max(1, int(qa_cfg.get('min_points', 10)))  # 最少有效同点数
+    summary_path = 'surface_summary.json'  # 当前汇总文件
+    summary_data = _load_json(summary_path) or {}  # 读取已回写 AR 坐标的汇总
+    records = summary_data.get('records') or []  # 逐波记录列表
+    changed = False  # 是否需写回汇总文件
+    for rec in records:  # 每条输入波独立验证
+        record = rec.get('record')
+        current_path = 'sgrid_response_%s.csv' % record  # 当前统一网格表
+        if not record or not os.path.isfile(current_path):  # 无当前表时保留原 QA 状态
+            continue
+        try:
+            current_rows = read_response_csv_local(current_path)  # 读取当前统一网格
+            reference_rows = _load_sgrid_rows_from_npz(ref_path, record)  # 读取参考统一网格
+            cur_by_s = {round(float(row['s']), 6): row for row in current_rows if 's' in row}  # 当前按 s 索引
+            ref_by_s = {round(float(row['s']), 6): row for row in reference_rows if 's' in row}  # 参考按 s 索引
+            diffs = []  # 有效同点的相对差异列表
+            for s_val in sorted(set(cur_by_s.keys()) & set(ref_by_s.keys())):  # 只比较公共网格点
+                cur_val = cur_by_s[s_val].get(field)
+                ref_val = ref_by_s[s_val].get(field)
+                if not isinstance(cur_val, (int, float)) or not isinstance(ref_val, (int, float)):
+                    continue
+                if not np.isfinite(cur_val) or not np.isfinite(ref_val) or abs(ref_val) <= SAFE_DENOM_EPS:
+                    continue
+                diffs.append((abs(float(cur_val) / float(ref_val) - 1.0), float(s_val)))  # 保存误差及位置
+            if len(diffs) < min_points:  # 同点不足不能用较弱 QA 覆盖原端点 QA
+                raise ValueError('有效同点仅 %d，低于 min_points=%d' % (len(diffs), min_points))
+            max_diff, max_s = max(diffs)  # 以最大同点偏差作为收敛门槛
+            passed = bool(max_diff <= tol)  # 所有观测窗同点均需通过
+            endpoint_suspect = bool(rec.get('suspect', False))  # 保留原端点诊断结论
+            rec['qa_farfield_endpoint_suspect'] = endpoint_suspect  # 明确端点状态未被删除
+            rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field,
+                                            'n_points': len(diffs), 'max_rel_diff': float(max_diff),
+                                            'max_rel_diff_s': float(max_s), 'tol': float(tol), 'passed': passed}  # 写可审计证据
+            rec['suspect'] = not passed  # 显式窗口收敛时以其作为最终质量门槛
+            rec['qa_status'] = 'pass_window_convergence' if passed else 'fail_window_convergence'  # 机器可读状态
+            changed = True  # 标记需写回
+            log_step(logger, '[qa] %s: 窗口收敛 %d 点，最大差异=%.3f%%@s=%.3f，阈值=%.1f%% -> %s；端点诊断=%s',
+                     record, len(diffs), 100.0 * max_diff, max_s, 100.0 * tol,
+                     '通过' if passed else '失败', 'SUSPECT' if endpoint_suspect else 'PASS')
+        except Exception as e:  # 配置或参考包异常必须保留原严格判定
+            rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field, 'passed': False, 'error': str(e)}
+            rec['qa_status'] = 'fail_window_convergence'
+            rec['suspect'] = True
+            changed = True
+            log_step(logger, '[qa] %s: 窗口收敛 QA 失败，保留 suspect=True：%s', str(record), str(e))
+    if changed:  # 仅在明确执行后写回
+        with open(summary_path, 'w') as fh:
+            json.dump(summary_data, fh, indent=2)  # 写回最终 QA 状态与审计证据
+
+
 def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
     """研究计划 §4.0 第②步：把逐节点曲线与 H(f,s) 曲面插值到统一三段 s 子网格并落盘。
 
@@ -1420,6 +1521,7 @@ def main():  # 主入口函数
         sys.exit(1)  # 让 Autorun 正确标记本工况失败，不执行清理
 
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
+    apply_window_convergence_qa(case_cfg, logger=logger)  # 可选：用不同净空参考验证研究窗口收敛
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
     n_tables = write_surface_npz(meta, case_cfg)  # 所有数值临时文件收敛为单一 NPZ 包
     n_sheets = write_surface_xlsx_from_npz()  # 再由 NPZ 导出研究者查阅用 Excel 工作簿
