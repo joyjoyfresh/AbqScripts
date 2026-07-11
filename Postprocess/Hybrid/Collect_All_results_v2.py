@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""跨工况结果收集器 v1（Hybrid 专用版）。
+"""跨工况结果收集器 v2（Hybrid 专用版）。
 
-本脚本负责遍历指定根目录下的各个工况文件夹，收集其中的地震反应与谱比 CSV 文件，
-并提取 case_meta.json 元数据及 surface_summary.json 中的关键标量指标（AR_max、suspect），
-集中整理到 results 文件夹中，并生成统一规范的 index.csv 数据库清单，供后续作图或分析。
+本脚本负责遍历指定根目录下的各个工况文件夹，收集 v2 后处理输出的 surface_results.npz，
+并按其 manifest_json 中的逐记录 s 网格响应表展开 index.csv。保留对旧版临时 CSV 的兼容，
+使集中目录可直接被 Plot_Hybrid_surface_v2.py 读取，不依赖已被打包清理的临时文件。
 """
 
 import os  # 导入系统接口模块
@@ -14,6 +14,7 @@ import shutil  # 导入文件复制模块
 import csv  # 导入 CSV 写入模块
 import io  # 导入 io 模块
 import json  # 导入 JSON 模块
+import numpy as np  # 导入 NumPy 模块用于读取 NPZ 清单
 try:
     if hasattr(sys, 'setdefaultencoding'):  # 仅在 Python 2 下执行
         eval("reload(sys)")  # 用 eval 动态执行，避开 Python 3 静态分析对未定义 reload 的报错
@@ -27,6 +28,8 @@ except Exception:
 #  配置
 # ==============================================================================
 COLLECT_PREFIXES = ('sgrid_response', 'sgrid_H_surface_h', 'sgrid_H_surface_v', 'sgrid_H_topo_h')  # 收集前缀 / 仅收集 v2 统一 s 子网格对齐产物
+SURFACE_NPZ_NAME = 'surface_results.npz'  # v2 后处理的单工况最终数值包名称
+SURFACE_NPZ_TYPE = 'SURFACE_RESULTS_NPZ'  # 供统一绘图脚本识别的最终数值包类型
 KNOWN_PREFIXES = [  # 已知前缀转换映射表 / 长度从长到短排列防截断错误
     ('sgrid_H_surface_h_', 'SGRID_H_SURFACE_H'),  # 对齐水平传函（v2 重采样）
     ('sgrid_H_surface_v_', 'SGRID_H_SURFACE_V'),  # 对齐竖向传函（v2 重采样）
@@ -190,10 +193,66 @@ def split_csv_name(stem):  # 剥离前缀并解析场景与记录名
     return matched_type, record, scene  # 返回拆解结果
 
 
+def _npz_text(value):  # 兼容 Python 2/3 解析 NPZ 内 UTF-8 文本标量
+    """将 NPZ 内的字节标量或 0 维数组转换为文本。"""
+    if hasattr(value, 'item'):  # NumPy 标量或 0 维数组
+        value = value.item()  # 取出实际标量
+    if isinstance(value, bytes):  # Python 3 字节串
+        return value.decode('utf-8')  # 按 UTF-8 解码
+    try:
+        if isinstance(value, unicode):  # Python 2 unicode
+            return value  # 直接返回
+    except NameError:  # Python 3 无 unicode 名称
+        pass
+    return str(value)  # 其他类型统一转文本
+
+
+def _records_from_surface_npz(path):  # 从最终数值包中恢复记录名与场景
+    """读取 manifest_json，返回包含 sgrid 响应表的 (record, scene) 列表。"""
+    package = np.load(path)  # NPZ 由同链路后处理脚本生成，不使用 pickle
+    try:
+        manifest = json.loads(_npz_text(package['manifest_json']))  # 读取内部表清单
+        records = []  # 初始化记录列表
+        seen = set()  # 避免同一记录重复写入索引
+        for item in manifest:  # 遍历打包的临时表名
+            name = str(item.get('name', ''))  # 获取表文件名
+            if not (name.startswith('sgrid_response_') and name.lower().endswith('.csv')):  # 仅保留统一 s 网格响应表
+                continue  # 忽略传函等同记录附属表
+            _, record, scene = split_csv_name(os.path.splitext(name)[0])  # 复用既有命名解析规则
+            key = (record, scene)  # 构造去重键
+            if record and key not in seen:  # 记录有效且未处理
+                seen.add(key)  # 标记已处理
+                records.append(key)  # 保存记录名与场景
+        return records  # 返回展开后的记录列表
+    finally:
+        package.close()  # 及时关闭压缩包文件句柄
+
+
+def _summary_from_surface_npz(path):  # 从最终数值包中恢复质量摘要
+    """读取 surface_summary_json，返回按 record 索引的 AR_max 与 suspect 映射。"""
+    package = np.load(path)  # 打开同工况最终数值包
+    try:
+        if 'surface_summary_json' not in package.files:  # 兼容尚未写入摘要的旧包
+            return {}  # 无摘要时交由旧版 JSON 回退
+        summary = json.loads(_npz_text(package['surface_summary_json']))  # 解析打包前的质量摘要
+        mapping = {}  # 初始化按输入记录索引的摘要映射
+        for item in summary.get('records', []):  # 遍历逐记录质量结果
+            raw_record = item.get('record')  # 获取后处理摘要中的原始记录名
+            _, record, _ = split_csv_name('sgrid_response_' + str(raw_record or ''))  # 与 NPZ 表名使用同一场景后缀规范化规则
+            if record:  # 仅保存具名记录
+                mapping[record] = {
+                    'AR_max': item.get('AR_max'),  # 原始节点曲线上的最大水平放大
+                    'suspect': item.get('suspect'),  # 最终远场或窗口收敛质量标记
+                }
+        return mapping  # 返回可直接合并到索引的摘要
+    finally:
+        package.close()  # 及时关闭压缩包文件句柄
+
+
 def main():  # 主入口逻辑
     """收集脚本的主控制流程。
 
-    遍历文件夹，对各工况目标 CSV 整理归档，并输出清单 index.csv。
+    遍历文件夹，对各工况最终 NPZ（及兼容 CSV）整理归档，并输出清单 index.csv。
     """
     root = sys.argv[1] if len(sys.argv) >= 2 else os.getcwd()  # 收集根目录路径
     root = os.path.abspath(root)  # 转换为绝对路径
@@ -216,7 +275,7 @@ def main():  # 主入口逻辑
         if not os.path.isdir(folder) or entry in SKIP_DIR_NAMES or entry.startswith('.'):  # 过滤非工况目标
             continue  # 跳过
 
-        # 遍历目标前缀，进行多格式的 CSV 文件搜寻
+        # 遍历目标前缀，进行旧版临时 CSV 文件搜寻
         csvs = []  # 工况下匹配的 CSV 列表
         for prefix in COLLECT_PREFIXES:  # 遍历支持前缀
             csvs += glob.glob(os.path.join(folder, '%s-*.csv' % prefix))  # 匹配中划线模式
@@ -224,7 +283,9 @@ def main():  # 主入口逻辑
 
         # 去重并滤掉归一化时的临时输出
         csvs = [f for f in sorted(set(csvs)) if '-normalized' not in os.path.basename(f).lower()]  # 过滤后目标文件列表
-        if not csvs:  # 当前文件夹无任何目标数据
+        npz_path = os.path.join(folder, SURFACE_NPZ_NAME)  # 定位 v2 后处理最终数值包
+        has_npz = os.path.isfile(npz_path)  # 判断最终数值包是否存在
+        if not csvs and not has_npz:  # 当前文件夹无任何目标数据
             continue  # 跳过
 
         meta = _read_meta(folder)  # 读取 case_meta.json 元数据
@@ -274,8 +335,37 @@ def main():  # 主入口逻辑
             manifest.append(row)  # 追加至清单列表
             print('    %s  ->  %s' % (os.path.basename(src), new_name))  # 打印归档日志
 
+        if has_npz:  # v2 正常链路：收集单工况最终 NPZ 并按内部记录展开索引
+            try:
+                npz_records = _records_from_surface_npz(npz_path)  # 从 manifest_json 恢复记录名
+                summary_map.update(_summary_from_surface_npz(npz_path))  # 从打包摘要恢复 AR_max 与质量标记
+            except Exception as exc:
+                print('    警告：无法读取 %s 的 manifest_json：%s' % (SURFACE_NPZ_NAME, str(exc)))  # 保留工况并提示包损坏根因
+                npz_records = []  # 不生成无法供绘图使用的错误索引行
+            if not npz_records:  # 数值包无可绘制记录
+                print('    警告：%s 中未发现 sgrid_response_<record>.csv，跳过绘图索引。' % SURFACE_NPZ_NAME)  # 提示后处理产物不完整
+            else:
+                npz_name = '%s-%s.npz' % (SURFACE_NPZ_TYPE, entry)  # 每个工况保留一个唯一最终数值包
+                npz_dst = os.path.join(out_dir, npz_name)  # 构造集中归档路径
+                shutil.copy2(npz_path, npz_dst)  # 复制压缩数值包并保留时间戳
+                n_files += 1  # 最终数值包计入已归档文件数
+                for record, scene in npz_records:  # 每条记录写一行，供绘图脚本逐记录检索
+                    rec_summary = summary_map.get(record, {})  # 尝试保留兼容摘要指标
+                    row = {
+                        'collected_file': npz_name,  # 集中目录中的 NPZ 文件名
+                        'source_folder': entry,  # 原始工况目录
+                        'type': SURFACE_NPZ_TYPE,  # 最终数值包类型
+                        'record': record,  # NPZ 内对应的输入记录名
+                        'scene': scene,  # 坡地或平地场景标记
+                        'AR_max': rec_summary.get('AR_max'),  # 兼容旧摘要中的峰值放大
+                        'suspect': rec_summary.get('suspect'),  # 兼容旧摘要中的可疑标记
+                    }
+                    row.update(meta_flat)  # 合并工况结构元数据
+                    manifest.append(row)  # 写入按记录展开的索引行
+                    print('    %s[%s]  ->  %s' % (SURFACE_NPZ_NAME, record, npz_name))  # 打印归档日志
+
     if not manifest:  # 清单为空则无处理
-        print('未发现任何含有符合前缀 CSV 文件的工况文件夹。')  # 提示用户
+        print('未发现任何含有最终 NPZ 或兼容 CSV 文件的工况文件夹。')  # 提示用户
         return  # 退出
 
     # 将清单写出至 index.csv 文件中
@@ -296,7 +386,7 @@ def main():  # 主入口逻辑
     finally:
         f.close()  # 确保关闭文件句柄
 
-    print('\n>>> 完成：从 %d 个工况文件夹收集 %d 个 CSV 到 %s' % (n_folders, n_files, out_dir))  # 结束提示
+    print('\n>>> 完成：从 %d 个工况文件夹收集 %d 个数据文件到 %s' % (n_folders, n_files, out_dir))  # 结束提示
     if n_missing_meta:  # 提示缺失元数据状况
         print('>>> 注意：%d 个文件夹缺 case_meta.json（元数据列留空）。请用已配置 case_meta 的建模脚本重跑。' % n_missing_meta)  # 元数据警告
     print('>>> 清单：%s' % index_path)  # 清单路径提示
