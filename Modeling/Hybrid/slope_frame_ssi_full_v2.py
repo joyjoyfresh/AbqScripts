@@ -115,6 +115,8 @@ run_cfg = {
     'surface_only': True,               # True=仅 TOP_SURFACE 输出 A/U 全时程+整体场输出降频（ODB 瘦身，频域框架用）
     'critical_angle_check': False,      # True=入射角达到/超过 SV→P 临界角时拒绝建模(硬性拦截)；False=仅输出警告不中断(探索超临界工况)
     'wave_files': None,                 #! 地震波文件路径：None=扫工况目录全部.txt(旧行为)/字符串或列表=指定文件(绝对路径或相对工况目录)
+    'validation_geometry': 'slope',     # 验证几何模式：slope=生产坡地(默认) / flat=显式平场验证(仅freefield)
+    'submit_jobs': True,                # 是否提交 Abaqus 作业：False=只建模并写几何审计（F0 基础设施检查）
 }
 
 # 人工边界配置
@@ -734,6 +736,17 @@ def make_geometry(total_L, H_minus_h, i, left_flat, toe_surface_y, soil_thicknes
                     h_over_H=h_over_H, bedrock_thickness=bedrock_thickness,
                     H=H, h=h, H_upper=H_upper, H_lower=H_lower, H_flat=H_flat, w_slope=w_slope,
                     layer_interfaces=layer_interfaces)
+
+
+def make_flat_validation_geometry(geom):
+    """由坡地几何派生真正平坦的验证几何，保留坡高等归一化参考量。
+
+    平场模型的上下平台地表高程统一为坡顶高程，坡面宽度仅保留正数占位，
+    供既有自由场边界函数计算局部地表时退化为常值；实际外形由矩形建模函数生成。
+    """
+    if geom.H_upper <= 0.0:
+        raise ValueError('平坦验证几何的 H_upper 必须>0，当前: %r' % geom.H_upper)  # 模型高度非法
+    return geom._replace(H_lower=geom.H_upper, w_slope=1.0e-3)  # 平坦地表与坡高归一化参考解耦
 
 
 def _build_model_name_from_record(acc_file, scene_tag):
@@ -1935,6 +1948,100 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
     return model_name, part_name, inst_name
 
 
+def create_flat_validation_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None,
+                                 surface_geometry='horizontal', elem_name='CPE4', mesh_cfg=None, fc=None):
+    """创建显式平场验证模型：矩形外形、同源材料带、三侧人工边界和顶面节点集。
+
+    该函数只用于 ``run_cfg['validation_geometry']='flat'``，不参与默认坡地生产分支。
+    ``geom`` 已由 make_flat_validation_geometry 派生，坡高等字段仍保留用于归一化和元数据追溯。
+    """
+    logger = logger or log_step()  # 在未传入日志器时使用默认日志器
+    model_name = 'Model-1'  # 平场验证模式只建立一个基础模型
+    total_L = float(geom.total_L)  # 读取模型总长度
+    H_flat = float(geom.H_upper)  # 平坦地表统一取坡顶高程
+    if total_L <= 0.0 or H_flat <= 0.0:  # 平场矩形必须具有正长宽
+        raise ValueError('平场验证几何必须满足 total_L>0 且 H_flat>0: %.3f/%.3f' % (total_L, H_flat))
+    if abs(float(geom.H_lower) - H_flat) > 1.0e-6:  # 防止误把坡地几何传入
+        raise ValueError('平场验证模型要求 H_lower=H_upper，当前 %.6f/%.6f' % (geom.H_lower, H_flat))
+
+    if cae_name:  # 仅在调用方指定时保存 CAE 工程文件
+        mdb.saveAs(pathName=cae_name)
+        log_step(logger, '工程文件保存为 %s', cae_name)
+    model = mdb.Model(name=model_name)  # 创建平场基础模型
+    log_step(logger, '%s 基础模型开始创建（显式平场验证）', model_name)
+
+    part_name = _next_available_name('Part', model.parts)  # 生成零件名称
+    sketch = model.ConstrainedSketch(name='__flat_validation_profile__', sheetSize=max(total_L, H_flat) * 2.0)
+    sketch.Line(point1=(0.0, 0.0), point2=(total_L, 0.0))  # 绘制底边
+    sketch.Line(point1=(total_L, 0.0), point2=(total_L, H_flat))  # 绘制右边界
+    sketch.Line(point1=(total_L, H_flat), point2=(0.0, H_flat))  # 绘制平坦地表
+    sketch.Line(point1=(0.0, H_flat), point2=(0.0, 0.0))  # 绘制左边界
+    part = model.Part(name=part_name, dimensionality=TWO_D_PLANAR, type=DEFORMABLE_BODY)
+    part.BaseShell(sketch=sketch)
+    del model.sketches['__flat_validation_profile__']
+
+    strat = _build_stratigraphy(site, geom, surface_geometry=surface_geometry)  # 与坡地同源的材料带
+    band_sections = _create_band_materials_sections(model, strat, damping)
+    log_step(logger, '%s 已创建 %d 个材料带的材料与截面', model_name, len(strat))
+
+    assembly = model.rootAssembly  # 装配矩形零件
+    assembly.DatumCsysByDefault(CARTESIAN)
+    inst_name = _next_available_name(part_name, assembly.instances)
+    assembly.Instance(name=inst_name, part=part, dependent=ON)
+
+    interfaces, depth_ifaces = _interface_partitions(strat)  # 层界面统一退化为水平线
+    flat_interfaces = sorted(set(interfaces + [H_flat - d for d in depth_ifaces]))
+    _partition_horizontal(model, part, geom, flat_interfaces, 'flat_validation_hpartition')
+    log_step(logger, '%s 平场层界面切分完成: 界面数=%d', model_name, len(flat_interfaces))
+
+    mesh_cfg = mesh_cfg or {}  # 缺省配置采用均匀网格
+    picked_regions = part.faces
+    surf_fn = lambda _xc: H_flat  # 平坦地表函数，供分层赋材和海绵层共用
+    graded = bool(mesh_cfg.get('graded', False)) and len(strat) > 1
+    if graded:  # 分层非均匀网格
+        ginfo = _seed_graded_mesh(part, strat, surf_fn, mesh_size, mesh_cfg, elem_name, logger, model_name, fc)
+        log_step(logger, '%s 平场分层网格完成: %s', model_name,
+                 ', '.join('%s=%.2fm(%d面)' % (n, s, c) for n, s, c in ginfo))
+    else:  # 均匀结构化四边形网格
+        part.setMeshControls(regions=picked_regions, elemShape=QUAD, technique=STRUCTURED)
+        part.seedPart(size=mesh_size, deviationFactor=0.1, minSizeFactor=0.1)
+        elem_code, tri_code, _is_quad = _elem_codes(elem_name)
+        elem_type1 = mesh.ElemType(elemCode=elem_code, elemLibrary=STANDARD)
+        elem_type2 = mesh.ElemType(elemCode=tri_code, elemLibrary=STANDARD)
+        part.setElementType(regions=(picked_regions,), elemTypes=(elem_type1, elem_type2))
+        part.generateMesh()
+        log_step(logger, '%s 平场均匀网格完成: %s, 尺寸=%.3f', model_name, str(elem_name).upper(), mesh_size)
+
+    counts = _assign_sections_by_band(part, band_sections, surf_fn)  # 按平坦地表高程分配截面
+    log_step(logger, '%s 平场截面属性分配完成: %s', model_name,
+             ', '.join('%s=%d' % (n, c) for n, c in counts))
+    _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name)
+    assembly.regenerate()
+
+    x_list = [node.coordinates[0] for node in part.nodes]
+    y_list = [node.coordinates[1] for node in part.nodes]
+    xmin, xmax = min(x_list), max(x_list)
+    ymin, ymax = min(y_list), max(y_list)
+    tol = max(1.0e-6, mesh_size * 1.0e-3)
+    l_labels = tuple(node.label for node in part.nodes if abs(node.coordinates[0] - xmin) <= tol)
+    r_labels = tuple(node.label for node in part.nodes if abs(node.coordinates[0] - xmax) <= tol)
+    b_labels = tuple(node.label for node in part.nodes if abs(node.coordinates[1] - ymin) <= tol)
+    t_labels = tuple(node.label for node in part.nodes if abs(node.coordinates[1] - ymax) <= tol)
+    if not (l_labels and r_labels and b_labels and t_labels):  # 四类集合缺失时立即失败
+        raise ValueError('平场验证边界集合不完整: 左=%d 右=%d 底=%d 顶=%d' %
+                         (len(l_labels), len(r_labels), len(b_labels), len(t_labels)))
+    part.SetFromNodeLabels(nodeLabels=l_labels, name='Left_boundary')
+    part.SetFromNodeLabels(nodeLabels=r_labels, name='Right_boundary')
+    part.SetFromNodeLabels(nodeLabels=b_labels, name='Bottom_boundary')
+    part.SetFromNodeLabels(nodeLabels=t_labels, name='TOP_SURFACE')
+    log_step(logger, '%s 平场边界/地表集合完成: 左=%d 右=%d 底=%d 顶=%d', model_name,
+             len(l_labels), len(r_labels), len(b_labels), len(t_labels))
+
+    mdb.save()
+    log_step(logger, '%s 显式平场验证基础模型完成并已保存 (part=%s, inst=%s)', model_name, part_name, inst_name)
+    return model_name, part_name, inst_name
+
+
 # ==========================================================
 #  人工边界 VAB（弹簧-阻尼器 + 等效节点力）
 # ==========================================================
@@ -2617,7 +2724,8 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
 
 
 def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None, ffcfg=None,
-                     sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None):  # 写出统一工况元数据（v7 理论台阶 + v8 自检 + v2 EQL）
+                     sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
+                     validation_geometry='slope'):  # 写出统一工况元数据（含验证几何模式）
     """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
     作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、自由场配置及一维理论台阶等参数，
     供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
@@ -2669,6 +2777,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'model_script': str(script_name),  # 建模脚本文件名
             'incident_angle': _meta_f(material_cfg['angle']),  # SV 入射角 θs（度）
             'surface_geometry': str(sgeom),  # v7：表层几何模式 horizontal/terrain
+            'validation_geometry': str(validation_geometry),  # 验证几何模式 slope/flat
             'mesh_size': _meta_f(mesh_size),  # 网格尺寸（m）
             'geometry': geometry,  # 几何参数（含派生 H/h/w_slope）
             'bedrock': bedrock,  # 基岩材料字典
@@ -3881,12 +3990,14 @@ def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终�
 
 
 def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, ffcfg,
-                               surface_geometry, acc_info, selfcheck, eql_meta):  # 写出工况元数据
+                               surface_geometry, acc_info, selfcheck, eql_meta,
+                               validation_geometry='slope'):  # 写出工况元数据
     """写出 case_meta.json，并输出远场理论台阶 QA 摘要。"""
     first_rec = acc_info[0][0] if acc_info else None
     ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
                                  damping=damping, ffcfg=ffcfg, sgeom=surface_geometry, acc_path=first_rec,
-                                 selfcheck=selfcheck, eql_info=eql_meta)
+                                 selfcheck=selfcheck, eql_info=eql_meta,
+                                 validation_geometry=validation_geometry)
     if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
         log_step(logger, '远场一维理论台阶: 左(上平台) TAF_h=%.3f TAF_v=%.3f | 右(下平台) TAF_h=%.3f TAF_v=%.3f (FE 远场应与之一致±5%%)',
                  ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],
@@ -3915,6 +4026,52 @@ def _submit_models(model_names, logger):  # 批量提交作业
                    memory_percent=job_cfg['memory_percent'],
                    model_name=model_name,
                    logger=logger)
+
+
+def _write_geometry_validation_audit(model_name, part_name, inst_name, geom,
+                                     validation_geometry, logger):  # 写出几何集合审计
+    """在 Abaqus 建模完成后核查外形包络、顶面平整度和边界节点集。"""
+    model = mdb.models[model_name]
+    part = model.parts[part_name]
+    nodes = list(part.nodes)
+    if not nodes:
+        raise ValueError('几何审计失败：零件没有节点')
+    coords = [(float(node.coordinates[0]), float(node.coordinates[1])) for node in nodes]
+    top_nodes = list(part.sets['TOP_SURFACE'].nodes)
+    if not top_nodes:
+        raise ValueError('几何审计失败：TOP_SURFACE 为空')
+    top_y = [float(node.coordinates[1]) for node in top_nodes]
+    boundary_counts = {}
+    for set_name in ('Left_boundary', 'Right_boundary', 'Bottom_boundary', 'TOP_SURFACE'):
+        if set_name not in part.sets:
+            raise ValueError('几何审计失败：缺少节点集 %s' % set_name)
+        boundary_counts[set_name] = len(part.sets[set_name].nodes)
+    audit = {
+        'schema_version': 1,
+        'validation_geometry': str(validation_geometry),
+        'model_name': str(model_name),
+        'part_name': str(part_name),
+        'instance_name': str(inst_name),
+        'node_count': len(nodes),
+        'element_count': len(part.elements),
+        'bbox': {'xmin': min(x for x, _y in coords), 'xmax': max(x for x, _y in coords),
+                 'ymin': min(y for _x, y in coords), 'ymax': max(y for _x, y in coords)},
+        'top_surface': {'node_count': len(top_nodes), 'ymin': min(top_y), 'ymax': max(top_y),
+                        'y_range': max(top_y) - min(top_y)},
+        'boundary_node_counts': boundary_counts,
+        'expected_layer_interfaces_y': [float(y) for y in geom.layer_interfaces],
+    }
+    if validation_geometry == 'flat' and audit['top_surface']['y_range'] > 1.0e-5:
+        raise ValueError('平场顶面不平整：y_range=%.6e' % audit['top_surface']['y_range'])
+    text = json.dumps(audit, ensure_ascii=False, indent=2, default=_meta_f)
+    if isinstance(text, bytes):
+        text = text.decode('utf-8')
+    with io.open(os.path.join(os.getcwd(), 'geometry_validation.json'), 'w', encoding='utf-8') as handle:
+        handle.write(text)
+    log_step(logger, '几何审计完成: geometry_validation.json, mode=%s, nodes=%d, elems=%d, TOP_SURFACE=%d',
+             validation_geometry, len(nodes), len(part.elements), len(top_nodes))
+    return audit
+
 
 # ==========================================================
 #  主函数
@@ -3954,12 +4111,26 @@ def main():
             toe_surface_y=geometry_cfg['H_lower'],  # 坡脚地表高程（坡脚面以下深度恒定）
             soil_thicknesses=soil_thicknesses)  # 各土层厚度（从上到下，推层间界面与基岩顶面）
 
+        validation_geometry = str(_run_cfg.get('validation_geometry', 'slope')).lower()  # 读取验证几何模式
+        if validation_geometry not in ('slope', 'flat'):
+            raise ValueError("run_cfg['validation_geometry'] 仅支持 'slope' 或 'flat'，当前: %s" % validation_geometry)
+        scene_cfg = str(tssi_cfg.get('scene', 'ssi')).lower()  # 读取场景配置，平场只允许 freefield
+        if validation_geometry == 'flat':
+            if scene_cfg != 'freefield' or tssi_cfg.get('enable'):
+                raise ValueError("validation_geometry='flat' 必须配合 tssi_cfg.scene='freefield' 且 enable=False")
+            if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element':
+                raise ValueError("validation_geometry='flat' 暂不支持 eql_cfg.mode='2d_element'")
+            geom_for_model = make_flat_validation_geometry(geom)  # 显式平坦外形
+        else:
+            geom_for_model = geom  # 默认生产坡地行为保持原几何对象
+        log_step(logger, '验证几何模式: %s（场景=%s）', validation_geometry, scene_cfg)
+
         acc_info = find_acc_txt(logger, wave_files=_run_cfg.get('wave_files'))  # 波形来源：注入路径优先，否则扫工况目录
 
-        damping, fc_resolved = _resolve_material_damping(site, geom, damping_cfg, acc_info, sgeom, logger)  # 解析材料阻尼
+        damping, fc_resolved = _resolve_material_damping(site, geom_for_model, damping_cfg, acc_info, sgeom, logger)  # 解析材料阻尼
 
         # ── 土体非线性：等效线性(EQL) 在建 FE 前更新 site/damping ──
-        site, _eql_meta = _run_eql_if_enabled(site, geom, acc_info, damping, logger)  # EQL 失败时自动回退线性
+        site, _eql_meta = _run_eql_if_enabled(site, geom_for_model, acc_info, damping, logger)  # EQL 失败时自动回退线性
 
         # ── 项②：网格自适应 ─────────────────────────────────────────────────────
         mesh_used = _resolve_mesh_used(site, mesh_size, fc_resolved, _mesh_cfg, logger)  # 频率判据下的实际网格尺寸
@@ -3970,10 +4141,12 @@ def main():
 
         log_step(logger, '====== 阶段: 写出工况元数据 case_meta.json ======')
 
-        _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, _ff_cfg,
-                                   sgeom, acc_info, selfcheck, _eql_meta)  # 写 case_meta 并输出理论 QA
+        _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping, _ff_cfg,
+                                   sgeom, acc_info, selfcheck, _eql_meta,
+                                   validation_geometry=validation_geometry)  # 写 case_meta 并输出理论 QA
 
-        log_step(logger, '运行控制: 自由场引擎=%s（已移除平坦对照模型，TAF 分母用解析自由场）', _ff_cfg.get('engine'))
+        log_step(logger, '运行控制: 几何=%s, 自由场引擎=%s（TAF 分母用解析自由场）',
+                 validation_geometry, _ff_cfg.get('engine'))
 
         # ── 三胞胎场景调度 ────────────────────────────────────────────────────
         scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'
@@ -3990,39 +4163,50 @@ def main():
             log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
             return  # fixed 场景提前返回，不走坡地建模流程
 
-        # ── 坡地建模流程（freefield 和 ssi 共用） ──────────────────────────────
-        cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
-                                                int(material_cfg['angle']), n_total_layers)  # 文件名追加总层数
+        # ── 坡地/平场基础建模流程（平场只用于显式验证） ────────────────────────
+        if validation_geometry == 'flat':
+            cae_name = 'flat_h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
+                                                         int(material_cfg['angle']), n_total_layers)
+        else:
+            cae_name = 'h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
+                                                    int(material_cfg['angle']), n_total_layers)  # 保持生产坡地原文件名
         log_step(logger, '====== 阶段: 创建基础几何与网格模型 (cae=%s) ======', cae_name)
 
-        base_model, part_name, inst_name = create_model(
-            site=site, geom=geom, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,  # 场地/几何/自适应网格/文件名/阻尼
-            surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)  # v7 单元类型 + v9 分层网格 + v9.1 软层谐波加密(fc)
+        if validation_geometry == 'flat':
+            base_model, part_name, inst_name = create_flat_validation_model(
+                site=site, geom=geom_for_model, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,
+                surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)
+        else:
+            base_model, part_name, inst_name = create_model(
+                site=site, geom=geom_for_model, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,
+                surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)
+        _write_geometry_validation_audit(base_model, part_name, inst_name, geom_for_model,
+                                        validation_geometry, logger)  # 建模后立即审计外形和节点集
 
         if tssi_cfg.get('enable'):  # ssi 场景: 在坡地基础模型上追加坡顶框架(Tie 耦合); build_models 会复制到各波
-            add_frame_on_crest(base_model, geom, part_name, inst_name, logger)
+            add_frame_on_crest(base_model, geom_for_model, part_name, inst_name, logger)
             write_tssi_meta(logger)
 
         if scene == 'freefield':  # freefield 场景: 补建 CREST_REF 参考点（不建框架但需提取坡顶运动）
-            _add_crest_ref_for_freefield(base_model, geom, inst_name, logger)
+            _add_crest_ref_for_freefield(base_model, geom_for_model, inst_name, logger)
 
         if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element' and site.layers and acc_info:  # ② 逐单元 2D EQL(自管迭代提交)
             log_step(logger, '====== 阶段: 逐单元 2D EQL 迭代(自管建/提/读/更新) ======')
-            _run_2d_element_eql(base_model, part_name, inst_name, site, geom, eql_cfg, damping, fc_resolved,
+            _run_2d_element_eql(base_model, part_name, inst_name, site, geom_for_model, eql_cfg, damping, fc_resolved,
                                 _ff_cfg, _time_cfg, sgeom, _run_cfg, acc_info[0], material_cfg['angle'], job_cfg, logger,
                                 elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v3：单元类型透传
             model_names = []
         else:  # 1D 应变相容 或 线性: 原批量建模+提交
             log_step(logger, '====== 阶段: 批量复制模型并施加人工边界(共 %d 条记录) ======', len(acc_info))
-            slope_model_names = build_models(  # 批量复制斜坡模型并施加等效边界
+            slope_model_names = build_models(  # 批量复制当前验证几何模型并施加等效边界
                 acc_info=acc_info, base_model=base_model, part_name=part_name, inst_name=inst_name,  # 地震动信息与基础模型/零件/实例
-                site=site, geom=geom, angle=material_cfg['angle'],  # 场地、斜坡几何与入射角
-                job=job_cfg, model_scene='slope', logger=logger,  # 作业配置与斜坡场景标签
+                site=site, geom=geom_for_model, angle=material_cfg['angle'],  # 场地、当前几何与入射角
+                job=job_cfg, model_scene=validation_geometry, logger=logger,  # 作业配置与场景标签
                 tcfg=_time_cfg, fc_used=fc_resolved, ffcfg=_ff_cfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼
                 surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)),  # v7 表层几何 + v8 输出瘦身
                 critical_angle_check=bool(_run_cfg.get('critical_angle_check', True)),  # v8：临界角校验开关
                 elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v3：单元类型透传(CPE8R 时边界自动用二次一致权重)
-            model_names = slope_model_names  # 待提交的模型名称（已移除平坦对照模型）
+            model_names = slope_model_names  # 待提交的模型名称
 
         if tssi_cfg.get('enable') and model_names:  # ssi 场景: 各波 SSI 模型追加框架层历史输出(步已建)
             for _mn in model_names:
@@ -4034,7 +4218,10 @@ def main():
             for _mn in model_names:
                 _add_freefield_crest_outputs(_mn, inst_name, logger)
 
-        _submit_models(model_names, logger)  # 统一提交所有待运行模型
+        if bool(_run_cfg.get('submit_jobs', True)):
+            _submit_models(model_names, logger)  # 统一提交所有待运行模型
+        else:
+            log_step(logger, 'submit_jobs=False：仅保留建模与几何审计，不提交 Abaqus 求解')
 
         log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
     except Exception as exc:  # 捕获脚本运行异常

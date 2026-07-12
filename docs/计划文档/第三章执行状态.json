@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-12T10:50:18+08:00",
+  "project": "第三章斜入射成层坡地有限元模型与可信性验证",
+  "canonical_files": {
+    "plan": "docs/计划文档/第三章数值模型与可信性验证实施计划.md",
+    "review": "docs/技术文档/第三章严格审查与重构论证.md",
+    "validation_record": "docs/技术文档/第三章数值模型验证记录.md",
+    "working_thesis": "docs/论文材料/边坡地震动放大效应研究论文初稿（第三章重构）.docx",
+    "archive_manifest": "docs/论文材料/归档/2026-07-12_第三章重构归档清单.json",
+    "workflow_skill": ".agents/skills/chapter3-fe-validation-workflow/SKILL.md",
+    "archived_full_thesis": "docs/论文材料/归档/2026-07-12_第三章重构前完整论文备份.docx",
+    "archived_chapter3": "docs/论文材料/归档/2026-07-12_第三章重构前正文.docx",
+    "archived_plan": "docs/计划文档/归档/2026-07-12_第三章原实施计划.md"
+  },
+  "fixed_pipeline": [
+    "Modeling/Hybrid/slope_frame_ssi_full_v2.py",
+    "Postprocess/Hybrid/Postprocess_All_surface_v2.py",
+    "Postprocess/Hybrid/Collect_All_results_v2.py",
+    "Postprocess/Hybrid/Plot_Hybrid_surface_v2.py"
+  ],
+  "directory_policy": {
+    "autorun": "Batch",
+    "paper_abaqus_outputs": "Run",
+    "temporary_diagnostics": "test/Abaqus"
+  },
+  "active": {
+    "phase_id": "F0",
+    "task_id": "F0-1-EXPLICIT-FLAT-MODE",
+    "status": "in_progress",
+    "gate": "implement_and_static_validate_explicit_flat_geometry",
+    "solver_authorized": false,
+    "next_task_after_gate": "F0-2_independent_reference_solver"
+  },
+  "execution_hold": {
+    "enabled": false,
+    "set_at": "2026-07-12T10:45:43+08:00",
+    "set_by": "researcher",
+    "reason": "Skill 做好即可，暂不执行第三章建模、Autorun、模拟或后处理任务",
+    "lift_condition": "研究者在后续消息中明确要求继续执行第三章工作",
+    "lifted_at": "2026-07-12T10:50:18+08:00",
+    "lifted_by": "researcher"
+  },
+  "researcher_approval": {
+    "restructured_plan": "approved",
+    "approved_at": "2026-07-12T10:36:47+08:00",
+    "approval_required_before_F0": true
+  },
+  "historical_evidence": {
+    "U0": {
+      "status": "infrastructure_pass_only",
+      "formal_thesis_evidence": false
+    },
+    "U1": {
+      "status": "single_case_diagnostic_pass_needs_expansion",
+      "formal_thesis_evidence": false
+    },
+    "U2": {
+      "status": "directional_diagnostic_only_formal_validation_not_done",
+      "formal_thesis_evidence": false
+    },
+    "U3a": {
+      "status": "easy_case_pretest_only",
+      "formal_thesis_evidence": false
+    },
+    "U3b": {
+      "status": "frozen_pretest_run002_invalid_run003_unclosed",
+      "formal_thesis_evidence": false
+    }
+  },
+  "work_packages": {
+    "P0": "completed_and_approved",
+    "F0": "in_progress",
+    "V1": "not_started",
+    "V2": "not_started",
+    "V3": "not_started",
+    "V4": "not_started",
+    "V5": "not_started",
+    "V6": "not_started",
+    "V7": "not_started",
+    "V8": "decision_pending",
+    "V9": "not_started"
+  },
+  "environment_findings": {
+    "abaqus": "available",
+    "opensees": "not_found_in_path",
+    "specfem2d": "not_found_in_path",
+    "cross_method_install_authorized": false
+  },
+  "artifact_qa": {
+    "archive_manifest": "docs/论文材料/归档/2026-07-12_第三章重构归档清单.json",
+    "docx_openxml": "passed",
+    "chapter_boundary_and_stale_claim_scan": "passed",
+    "word_native_render": "passed_55_page_pdf_chapter3_pages_26_to_27_chapter4_page_28",
+    "skill_creator_quick_validate": "passed_official_validator_with_temporary_pyyaml_target",
+    "skill_forward_test": "initial_test_completed_gaps_fixed_local_state_checker_retest_passed",
+    "execution_hold_gate": "passed_require_execution_returns_exit_5",
+    "working_docx_sha256": "0e9af8a7e7887c5ac024689ec5cddd8db5dab12291b7c3af83d9ee67b42fccba",
+    "word_validation_pdf_sha256": "905be9f850ad0804e27e63322da5d63c9a36f13b3eaef1330b64819553e4f1ef"
+  },
+  "known_stale_lock_files": [
+    "Run/ch3_00_smoke/run-001/case-homogeneous-freefield/job-ricker_wavelet_4Hz-slope.lck",
+    "test/Abaqus/hybrid_test/case-hybrid_slope_real_test/job-ricker_wavelet_4Hz-slope.lck",
+    "test/Abaqus/hybrid_test_full/case-hybrid_ssi_full_test/job-ricker_wavelet_4Hz-slope.lck",
+    "test/Abaqus/hybrid_test_new/case-hybrid_slope_real_test/job-ricker_wavelet_4Hz-slope.lck"
+  ],
+  "mandatory_startup_checks": [
+    "read_AGENTS.md",
+    "read_plan",
+    "read_this_state",
+    "read_validation_record_for_current_task",
+    "verify_fixed_pipeline_files_exist",
+    "verify_no_other_chapter3_solver_is_running",
+    "honor_execution_hold_before_any_task_action",
+    "do_not_treat_historical_U0_U3_as_formal_pass"
+  ],
+  "pass_logic": "overall_pass_is_logical_and_of_all_mandatory_qa_gates",
+  "state_update_rule": "update_only_after_preserving_evidence_and_validating_artifacts"
+}

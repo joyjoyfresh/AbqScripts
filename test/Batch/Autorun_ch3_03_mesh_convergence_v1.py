@@ -121,7 +121,7 @@ def read_curve(case_dir):
             if not key.endswith('_header'):
                 continue
             fields = [npz_text(item) for item in package[key]]
-            if 's' in fields and 'segment' in fields and 'TAF_h' in fields:
+            if 's' in fields and ('seg' in fields or 'segment' in fields) and 'TAF_h' in fields:
                 table_key = key[:-7]
                 header = fields
                 break

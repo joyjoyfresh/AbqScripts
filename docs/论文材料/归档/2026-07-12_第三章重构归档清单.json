@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-07-12T01:00:00+08:00",
+  "source_files": {
+    "original_thesis": {
+      "path": "docs/论文材料/边坡地震动放大效应研究论文初稿.docx",
+      "sha256": "237f8c62c201b3248fa541264f6b92b236b3120041cd2425c28aac2840dabac9",
+      "modified": false
+    },
+    "integrated_revision": {
+      "path": "docs/论文材料/边坡地震动放大效应研究论文初稿（整合修订）.docx",
+      "sha256": "80f5d705dcadea46e10daf19034644055c813f38969a03b404413c237c507182",
+      "modified": false
+    }
+  },
+  "archive_files": {
+    "full_revision_backup": {
+      "path": "docs/论文材料/归档/2026-07-12_第三章重构前完整论文备份.docx",
+      "sha256": "80f5d705dcadea46e10daf19034644055c813f38969a03b404413c237c507182",
+      "exact_copy_of_integrated_revision": true
+    },
+    "chapter3_only": {
+      "path": "docs/论文材料/归档/2026-07-12_第三章重构前正文.docx",
+      "sha256": "868fe909657defe441ebd724a74393d99b9bff25eb01076da0470c1b2f0b0cbd",
+      "paragraphs": 78,
+      "tables": 4
+    }
+  },
+  "working_file": {
+    "path": "docs/论文材料/边坡地震动放大效应研究论文初稿（第三章重构）.docx",
+    "sha256": "0e9af8a7e7887c5ac024689ec5cddd8db5dab12291b7c3af83d9ee67b42fccba",
+    "size_bytes": 106762,
+    "paragraphs": 554,
+    "tables": 7,
+    "chapter3_structure": "new_3.1_to_3.9_gate_skeleton",
+    "old_chapter3_claims_removed": true
+  },
+  "qa": {
+    "zip_integrity": "passed",
+    "openxml_readability": "passed",
+    "chapter3_chapter4_boundary": "passed",
+    "required_heading_scan": "passed",
+    "stale_claim_scan": "passed",
+    "word_native_field_update": "passed",
+    "word_native_pdf_render": {
+      "status": "passed",
+      "path": "docs/论文材料/边坡地震动放大效应研究论文初稿（第三章重构）_校验.pdf",
+      "sha256": "905be9f850ad0804e27e63322da5d63c9a36f13b3eaef1330b64819553e4f1ef",
+      "size_bytes": 897745,
+      "pages": 55
+    },
+    "visual_pagination_review": "passed_chapter3_pages_26_to_27_chapter4_starts_page_28"
+  }
+}
