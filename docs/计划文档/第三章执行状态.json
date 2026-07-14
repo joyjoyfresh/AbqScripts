@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-07-12T10:50:18+08:00",
+  "updated_at": "2026-07-14T14:30:00+08:00",
   "project": "第三章斜入射成层坡地有限元模型与可信性验证",
   "canonical_files": {
     "plan": "docs/计划文档/第三章数值模型与可信性验证实施计划.md",
@@ -25,12 +25,12 @@
     "temporary_diagnostics": "test/Abaqus"
   },
   "active": {
-    "phase_id": "F0",
-    "task_id": "F0-1-EXPLICIT-FLAT-MODE",
+    "phase_id": "V3",
+    "task_id": "V3-LAYERED-1D-AND-NUMERICAL-CONVERGENCE",
     "status": "in_progress",
-    "gate": "implement_and_static_validate_explicit_flat_geometry",
-    "solver_authorized": false,
-    "next_task_after_gate": "F0-2_independent_reference_solver"
+    "gate": "f1_frequency_protocol_solver_authorized",
+    "solver_authorized": true,
+    "next_task_after_gate": "V3_layered_1d_reference_and_convergence"
   },
   "execution_hold": {
     "enabled": false,
@@ -70,10 +70,11 @@
   },
   "work_packages": {
     "P0": "completed_and_approved",
-    "F0": "in_progress",
-    "V1": "not_started",
-    "V2": "not_started",
-    "V3": "not_started",
+    "F0": "completed_F0_1_to_F0_8_passed",
+    "V1": "completed_12_cases_passed",
+    "V2": "archived_diagnostic_no_formal_pass",
+    "F1": "A1_A2_A3_A4_A5_passed_with_diagnostics",
+    "V3": "in_progress_word_draft_written_solver_pending",
     "V4": "not_started",
     "V5": "not_started",
     "V6": "not_started",
@@ -91,12 +92,26 @@
     "archive_manifest": "docs/论文材料/归档/2026-07-12_第三章重构归档清单.json",
     "docx_openxml": "passed",
     "chapter_boundary_and_stale_claim_scan": "passed",
-    "word_native_render": "passed_55_page_pdf_chapter3_pages_26_to_27_chapter4_page_28",
+    "word_native_render": "passed_libreoffice_pdf_visual_review_chapter3_pages_27_to_34_chapter4_page_35",
     "skill_creator_quick_validate": "passed_official_validator_with_temporary_pyyaml_target",
     "skill_forward_test": "initial_test_completed_gaps_fixed_local_state_checker_retest_passed",
     "execution_hold_gate": "passed_require_execution_returns_exit_5",
-    "working_docx_sha256": "0e9af8a7e7887c5ac024689ec5cddd8db5dab12291b7c3af83d9ee67b42fccba",
-    "word_validation_pdf_sha256": "905be9f850ad0804e27e63322da5d63c9a36f13b3eaef1330b64819553e4f1ef"
+    "f0_1_flat_mode": "passed_run002_three_cases_no_odb",
+    "f0_1_run_dir": "Run/ch3_F0_01_flat_mode/run-002",
+    "f0_2_independent_reference": "passed_run002_36_records_residual_6_42e-13",
+    "f0_2_run_dir": "Run/ch3_F0_02_reference/run-002",
+    "f0_3_npz_protocol": "passed_test_4_of_4_backward_compatible_table_keys",
+    "f0_4_qa_gates": "passed_test_7_of_7_overall_and_negative_control_logic",
+    "f0_5_collect_audit": "passed_test_5_of_5_and_existing_npz_index_audit_fields",
+    "f0_6_energy_history": "passed_run001_artificial_ratio_4_41e-7_energy_residual_3_25e-6",
+    "f0_7_manifest_hash": "passed_three_manifests_and_negative_control_2_of_2",
+    "f0_8_eql_fail_closed": "passed_test_2_of_2_and_f0_1_run004_regression",
+    "v1_geometry_material": "passed_run001_12_of_12_no_odb",
+    "v2_pilot": "run004_run005_run006_protocol_failures_run007_timeout_waiting_methodological_decision",
+    "f1_frequency_protocol": "A1_A2_A3_A4_A5_passed_runs003_004_005_007_009",
+    "working_docx_sha256": "8d1f6faa480c419158c90408b2a162e18d2313be302458d1e4aa5353e08b0225",
+    "word_validation_pdf_sha256": "78018964c2860bfd682873347a8fc7a148d21ccc12753532801192a7efd76cf9",
+    "word_validation_render_dir": "Run/ch3_docx_render_20260714_final3"
   },
   "known_stale_lock_files": [
     "Run/ch3_00_smoke/run-001/case-homogeneous-freefield/job-ricker_wavelet_4Hz-slope.lck",

@@ -14,6 +14,7 @@ import shutil  # 导入文件复制模块
 import csv  # 导入 CSV 写入模块
 import io  # 导入 io 模块
 import json  # 导入 JSON 模块
+import hashlib  # 计算脚本和输入波哈希
 import numpy as np  # 导入 NumPy 模块用于读取 NPZ 清单
 try:
     if hasattr(sys, 'setdefaultencoding'):  # 仅在 Python 2 下执行
@@ -56,6 +57,14 @@ INDEX_META_FIELDS = [  # 元数据扁平字段列表 / 用于 index.csv 对应�
     'n_finite_layers', 'n_layers_total', 'vs_bedrock', 'vs_surface', 'vs_cover',
     'vr_over_vs2', 'vs1_over_vs2', 'slope_height', 'a0_base', 'layers_json',
 ]
+AUDIT_FIELDS = [  # 结果侧审计字段 / 不以注入配置代替实际产物
+    'actual_dt', 'duration_s', 'n_surface_nodes', 'n_model_nodes', 'n_elements', 'element_type',
+    'damping_enable', 'damping_fc', 'damping_method', 'damping_anchor',
+    'domain_xmin', 'domain_xmax', 'domain_ymin', 'domain_ymax', 'domain_source',
+    'validation_geometry', 'script_hashes_json', 'input_wave_hashes_json',
+    'qa_required', 'qa_theory', 'qa_reflection', 'qa_mesh', 'qa_time', 'qa_domain',
+    'qa_energy', 'qa_external', 'overall_pass', 'qa_status', 'qa_gate_status_json',
+]
 
 
 def _read_meta(folder):  # 读取工况元数据 case_meta.json
@@ -75,6 +84,124 @@ def _read_meta(folder):  # 读取工况元数据 case_meta.json
             return json.load(f)  # 返回解析出的字典
     except Exception:  # 解析异常
         return None  # 返回空
+
+
+def _read_json_file(path):  # 读取 JSON 配置，缺失或损坏时返回空字典
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with io.open(path, 'r', encoding='utf-8') as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _sha256_file(path):  # 计算文件 SHA-256，缺失文件返回 None
+    if not path or not os.path.isfile(path):
+        return None
+    digest = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _repo_root_for_hashes():  # 定位仓库根目录以读取固定四脚本
+    candidates = []
+    here = os.path.abspath(os.path.dirname(__file__))
+    candidates.append(os.path.abspath(os.path.join(here, '..', '..')))
+    candidates.append(os.path.abspath(os.getcwd()))
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py')):
+            return candidate
+    return None
+
+
+def _read_geometry_audit(folder):  # 读取建模阶段保存的几何和网格审计
+    return _read_json_file(os.path.join(folder, 'geometry_validation.json'))
+
+
+def _read_model_log_audit(folder):  # 从建模日志回退读取实际节点和单元数
+    path = os.path.join(folder, 'slope_frame_ssi_full_v2.log')
+    if not os.path.isfile(path):
+        return {}
+    try:
+        text = io.open(path, 'r', encoding='utf-8', errors='ignore').read()
+    except TypeError:  # Python 2 的 io.open 不接受 errors 参数
+        text = io.open(path, 'r', encoding='utf-8').read()
+    match = re.search(r'网格统计:\s*单元=(\d+),\s*节点=(\d+)', text)
+    if not match:
+        return {}
+    return {'n_elements': int(match.group(1)), 'n_model_nodes': int(match.group(2))}
+
+
+def _script_hashes(folder):  # 记录固定四脚本和工况内副本的哈希
+    root = _repo_root_for_hashes()
+    fixed = [
+        ('Modeling/Hybrid/slope_frame_ssi_full_v2.py', os.path.join(root, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py') if root else None),
+        ('Postprocess/Hybrid/Postprocess_All_surface_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Postprocess_All_surface_v2.py') if root else None),
+        ('Postprocess/Hybrid/Collect_All_results_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Collect_All_results_v2.py') if root else None),
+        ('Postprocess/Hybrid/Plot_Hybrid_surface_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Plot_Hybrid_surface_v2.py') if root else None),
+    ]
+    result = {}
+    for relative, canonical in fixed:
+        local = os.path.join(folder, os.path.basename(relative))
+        path = canonical if canonical and os.path.isfile(canonical) else local
+        result[relative] = {'sha256': _sha256_file(path), 'source': path if path and os.path.isfile(path) else None}
+    return result
+
+
+def _input_wave_hashes(folder, config):  # 记录实际注入输入波文件哈希
+    waves = ((config.get('run_cfg') or {}).get('wave_files') or []) if isinstance(config, dict) else []
+    if not isinstance(waves, (list, tuple)):
+        waves = [waves]
+    result = {}
+    for raw in waves:
+        path = str(raw)
+        if not os.path.isabs(path):
+            path = os.path.join(folder, path)
+        result[str(raw)] = {'sha256': _sha256_file(path), 'path': os.path.abspath(path)}
+    return result
+
+
+def _audit_fields(folder, meta, config, summary):  # 组合结果侧实际审计字段
+    geometry_audit = _read_geometry_audit(folder)
+    log_audit = _read_model_log_audit(folder)
+    bbox = geometry_audit.get('bbox') or {}
+    geometry = (meta or {}).get('geometry') or {}
+    if not bbox:
+        total_l = geometry.get('total_L')
+        bedrock = geometry.get('bedrock_thickness')
+        h = geometry.get('H') or geometry.get('H_minus_h') or 0.0
+        bbox = {'xmin': 0.0, 'xmax': total_l, 'ymin': 0.0,
+                'ymax': (float(bedrock) + float(h)) if bedrock is not None else None}
+    mesh_cfg = (config or {}).get('mesh_cfg') or {}
+    damping = (meta or {}).get('damping') or (config or {}).get('damping_cfg') or {}
+    mesh_audit = dict(log_audit)
+    mesh_audit.update({'n_model_nodes': geometry_audit.get('node_count', mesh_audit.get('n_model_nodes')),
+                       'n_elements': geometry_audit.get('element_count', mesh_audit.get('n_elements'))})
+    gates = summary.get('qa_gates') or {}
+    gate_status = summary.get('qa_gate_status') or {}
+    return {
+        'actual_dt': summary.get('dt'), 'duration_s': summary.get('duration'),
+        'n_surface_nodes': summary.get('n_nodes'), 'n_model_nodes': mesh_audit.get('n_model_nodes'),
+        'n_elements': mesh_audit.get('n_elements'), 'element_type': mesh_cfg.get('elem'),
+        'damping_enable': damping.get('enable'), 'damping_fc': damping.get('fc'),
+        'damping_method': damping.get('method'), 'damping_anchor': damping.get('anchor'),
+        'domain_xmin': bbox.get('xmin'), 'domain_xmax': bbox.get('xmax'),
+        'domain_ymin': bbox.get('ymin'), 'domain_ymax': bbox.get('ymax'),
+        'domain_source': 'geometry_validation.json' if geometry_audit else 'case_meta.geometry_fallback',
+        'validation_geometry': (meta or {}).get('validation_geometry'),
+        'script_hashes_json': json.dumps(_script_hashes(folder), ensure_ascii=True, sort_keys=True),
+        'input_wave_hashes_json': json.dumps(_input_wave_hashes(folder, config), ensure_ascii=True, sort_keys=True),
+        'qa_required': json.dumps(summary.get('qa_required'), ensure_ascii=True),
+        'qa_theory': gates.get('theory'), 'qa_reflection': gates.get('reflection'),
+        'qa_mesh': gates.get('mesh'), 'qa_time': gates.get('time'), 'qa_domain': gates.get('domain'),
+        'qa_energy': gates.get('energy'), 'qa_external': gates.get('external'),
+        'overall_pass': summary.get('overall_pass'), 'qa_status': summary.get('qa_status'),
+        'qa_gate_status_json': json.dumps(gate_status, ensure_ascii=True, sort_keys=True),
+    }
 
 
 def _read_summary(folder):  # 读取地表响应摘要 surface_summary.json
@@ -100,6 +227,10 @@ def _read_summary(folder):  # 读取地表响应摘要 surface_summary.json
                     mapping[rec_name] = {  # 填充指标
                         'AR_max': r.get('AR_max'),  # 提取最大放大倍数
                         'suspect': r.get('suspect'),  # 提取可疑标记
+                        'dt': r.get('dt'), 'duration': r.get('duration'), 'n_nodes': r.get('n_nodes'),
+                        'qa_required': r.get('qa_required'), 'qa_gates': r.get('qa_gates'),
+                        'qa_gate_status': r.get('qa_gate_status'), 'overall_pass': r.get('overall_pass'),
+                        'qa_status': r.get('qa_status'),
                     }
             return mapping  # 返回映射结果
     except Exception:  # 解析异常
@@ -243,6 +374,10 @@ def _summary_from_surface_npz(path):  # 从最终数值包中恢复质量摘要
                 mapping[record] = {
                     'AR_max': item.get('AR_max'),  # 原始节点曲线上的最大水平放大
                     'suspect': item.get('suspect'),  # 最终远场或窗口收敛质量标记
+                    'dt': item.get('dt'), 'duration': item.get('duration'), 'n_nodes': item.get('n_nodes'),
+                    'qa_required': item.get('qa_required'), 'qa_gates': item.get('qa_gates'),
+                    'qa_gate_status': item.get('qa_gate_status'), 'overall_pass': item.get('overall_pass'),
+                    'qa_status': item.get('qa_status'),
                 }
         return mapping  # 返回可直接合并到索引的摘要
     finally:
@@ -289,6 +424,7 @@ def main():  # 主入口逻辑
             continue  # 跳过
 
         meta = _read_meta(folder)  # 读取 case_meta.json 元数据
+        config = _read_json_file(os.path.join(folder, 'case_config.json'))  # 读取实际工况配置用于审计
         if meta is None:  # 元数据不存在
             n_missing_meta += 1  # 递增警告计数
             meta_flat = {k: None for k in INDEX_META_FIELDS}  # 填充为空值列
@@ -321,6 +457,7 @@ def main():  # 主入口逻辑
             rec_summary = summary_map.get(record, {})  # 查找记录参数
             ar_max_val = rec_summary.get('AR_max')  # 提取 AR_max
             suspect_val = rec_summary.get('suspect')  # 提取 suspect
+            audit = _audit_fields(folder, meta or {}, config, rec_summary)  # 组合实际审计字段
 
             row = {  # 初始化文件级行记录
                 'collected_file': new_name,  # 归档后唯一名
@@ -332,6 +469,7 @@ def main():  # 主入口逻辑
                 'suspect': suspect_val,  # 是否异常警告
             }
             row.update(meta_flat)  # 合并工况结构元数据
+            row.update(audit)  # 合并结果侧审计字段
             manifest.append(row)  # 追加至清单列表
             print('    %s  ->  %s' % (os.path.basename(src), new_name))  # 打印归档日志
 
@@ -351,6 +489,7 @@ def main():  # 主入口逻辑
                 n_files += 1  # 最终数值包计入已归档文件数
                 for record, scene in npz_records:  # 每条记录写一行，供绘图脚本逐记录检索
                     rec_summary = summary_map.get(record, {})  # 尝试保留兼容摘要指标
+                    audit = _audit_fields(folder, meta or {}, config, rec_summary)  # 组合 NPZ 对应记录的实际审计字段
                     row = {
                         'collected_file': npz_name,  # 集中目录中的 NPZ 文件名
                         'source_folder': entry,  # 原始工况目录
@@ -361,6 +500,7 @@ def main():  # 主入口逻辑
                         'suspect': rec_summary.get('suspect'),  # 兼容旧摘要中的可疑标记
                     }
                     row.update(meta_flat)  # 合并工况结构元数据
+                    row.update(audit)  # 合并结果侧审计字段
                     manifest.append(row)  # 写入按记录展开的索引行
                     print('    %s[%s]  ->  %s' % (SURFACE_NPZ_NAME, record, npz_name))  # 打印归档日志
 
@@ -370,7 +510,7 @@ def main():  # 主入口逻辑
 
     # 将清单写出至 index.csv 文件中
     index_path = os.path.join(out_dir, 'index.csv')  # 清单输出绝对路径
-    fields = BASE_FIELDS + list(INDEX_META_FIELDS) + ['AR_max', 'suspect']  # 表头组合清单列
+    fields = BASE_FIELDS + list(INDEX_META_FIELDS) + ['AR_max', 'suspect'] + list(AUDIT_FIELDS)  # 表头组合清单列
     if sys.version_info[0] >= 3:  # 处于 Python 3 环境
         f = io.open(index_path, 'w', newline='', encoding='utf-8-sig')  # 自动写 BOM
     else:  # 处于 Python 2 环境

@@ -133,6 +133,7 @@ boundary_cfg = {
 # 土体非线性：等效线性(EQL) 配置
 eql_cfg = {
     'enable': False,                    #! True=建模前对软层做 EQL 应变相容(降Vs/增ξ)；False=保持线性(=原行为)
+    'fail_closed': True,                 #! 论文生产模式下 EQL 失败即中止，禁止静默回退线性
     'curve': 'darendeli',               # 经验曲线(可切换对比): 'darendeli'(通用) / 'seed_idriss_sand'(砂) / 'vucetic_dobry'(黏土)
     'nonlinear_layers': ['surface'],    # 参与非线性的层名(其余层保持线性；岩层一般不进入非线性)
     'PI': 15.0,                         # 塑性指数(Darendeli/Vucetic-Dobry 用)
@@ -1391,7 +1392,12 @@ def _fd_freefield_at_node(boundary, x0, y0, ymax_col, ctx):  # fd 引擎单节�
                                bool((ctx.ffcfg or {}).get('include_damping', True)))  # 是否计入阻尼
         _FD_SOLVER_CACHE[key] = sol  # 写入缓存
     fields = _fd_eval_column(sol, inp['omega'], ctx.p_horiz, y0)  # 单位入射场量谱
-    shift = np.exp(-1j * inp['omega'] * ctx.p_horiz * x0)  # 水平传播相位（左边界 x0=0 不移）
+    phase_origin = (ctx.ffcfg or {}).get('phase_origin_x', 0.0)  # V2 可将相位原点固定到模型中点，避免有限记录在端部被截断
+    if isinstance(phase_origin, basestring) and phase_origin.lower() == 'center':  # 统一使用模型域中点
+        phase_origin = 0.5 * float(ctx.geom.total_L)
+    else:
+        phase_origin = float(phase_origin or 0.0)
+    shift = np.exp(-1j * inp['omega'] * ctx.p_horiz * (x0 - phase_origin))  # 水平传播相位（相对预注册原点）
     scale = inp['U0'] * shift  # 输入位移谱 × 水平相位
     out = {}  # 时域结果容器
     for name in ('ux', 'uy', 'vx', 'vy', 'sxx', 'syy', 'sxy'):  # 逐场量逆变换
@@ -2496,6 +2502,10 @@ def build_models(acc_info, base_model, part_name, inst_name,
             surf_region = model.rootAssembly.allInstances[inst_name].sets['TOP_SURFACE']  # 地表节点集（实例级）
             model.FieldOutputRequest(name='F-Output-Surface', createStepName=step_name,  # 新建地表场输出请求
                                      variables=('A', 'U'), frequency=frequency, region=surf_region)  # 地表 A/U 每增量步
+            if 'VALIDATION_UNDERGROUND' in model.rootAssembly.sets.keys():  # 解析验证地下代表点全时程
+                underground_region = model.rootAssembly.sets['VALIDATION_UNDERGROUND']
+                model.FieldOutputRequest(name='F-Output-Validation', createStepName=step_name,
+                                         variables=('A', 'U'), frequency=frequency, region=underground_region)
             model.fieldOutputRequests['F-Output-1'].setValues(  # 整体场输出降频（仅留抽检帧）
                 variables=variables, frequency=10000000)  # 设为极大间隔（几乎只输出首末帧）
             log_step(logger, '%s 输出瘦身: TOP_SURFACE 全时程 A/U + 整体场输出降频', new_model_name)  # 记录瘦身日志
@@ -3644,6 +3654,23 @@ def _add_crest_ref_for_freefield(base_model, geom, inst_name, logger):
     asm.Set(name='CREST_REF', nodes=asm.instances[inst_name].nodes.sequenceFromLabels([crest_node.label]))
     log_step(logger, u'[freefield] 坡顶参考点 CREST_REF 已建: x=%.1f(目标x=%.1f), y=%.1f',
              crest_node.coordinates[0], x_target, crest_node.coordinates[1])
+    # 解析端到端验证额外保留两个坡肩地下代表点，避免仅用地表点判定输入传播
+    top_y = max(float(node.coordinates[1]) for node in top.nodes)
+    depth_ref = max(float(geom.bedrock_thickness) * 0.25, 1.0)
+    underground_nodes = []
+    for index, depth in enumerate((depth_ref, 2.0 * depth_ref), 1):
+        target_y = top_y - depth
+        candidate = min(asm.instances[inst_name].nodes,
+                        key=lambda node: abs(float(node.coordinates[0]) - float(crest_node.coordinates[0])) +
+                                         2.0 * abs(float(node.coordinates[1]) - target_y))
+        asm.Set(name='VALIDATION_UNDERGROUND_%d' % index,
+                nodes=asm.instances[inst_name].nodes.sequenceFromLabels([candidate.label]))
+        underground_nodes.append(candidate)
+        log_step(logger, u'[freefield] 地下验证点%d 已建: x=%.1f, y=%.1f, 目标深度=%.1f',
+                 index, candidate.coordinates[0], candidate.coordinates[1], depth)
+    if underground_nodes:
+        asm.Set(name='VALIDATION_UNDERGROUND',
+                nodes=asm.instances[inst_name].nodes.sequenceFromLabels([node.label for node in underground_nodes]))
 
 
 def _add_freefield_crest_outputs(model_name, inst_name, logger):
@@ -3658,7 +3685,11 @@ def _add_freefield_crest_outputs(model_name, inst_name, logger):
     model.HistoryOutputRequest(name='H-Crest', createStepName=DEFAULT_STEP_NAME,
                                variables=('U1', 'U2', 'A1', 'A2'),
                                region=asm.sets['CREST_REF'], frequency=freq)
-    log_step(logger, u'[%s] freefield 坡顶输出已配: CREST_REF U1/U2/A1/A2', model_name)
+    # freefield 也保留整体能量历史，供人工边界和减缩积分误差审计
+    model.HistoryOutputRequest(name='H-Energy', createStepName=DEFAULT_STEP_NAME,
+                               variables=('ALLAE', 'ALLIE', 'ALLKE', 'ALLVD', 'ALLWK',
+                                          'ALLPD', 'ALLSE', 'ETOTAL'), frequency=freq)
+    log_step(logger, u'[%s] freefield 输出已配: CREST_REF U1/U2/A1/A2 + H-Energy(ALLAE/ALLIE/ALLKE/ALLVD/ALLWK/ETOTAL)', model_name)
 
 
 def extract_crest_motion(odb_path, step_name=None, logger=None):
@@ -3956,7 +3987,7 @@ def _log_perband_anchors(logger, site, geom, surface_geometry, damping, fc):  # 
 
 
 def _run_eql_if_enabled(site, geom, acc_info, damping, logger):  # 执行 EQL 预处理
-    """按配置执行等效线性预处理，失败时回退线性并返回 meta。"""
+    """按配置执行等效线性预处理；论文生产模式下失败即中止。"""
     eql_meta = {'enable': False}
     if not (eql_cfg.get('enable') and site.layers and acc_info):
         return site, eql_meta
@@ -3969,7 +4000,10 @@ def _run_eql_if_enabled(site, geom, acc_info, damping, logger):  # 执行 EQL �
                     'PI': eql_cfg.get('PI'), 'sigma0_kpa': eql_cfg.get('sigma0_kpa'), 'layers': eql_info}
         log_step(logger, '土体非线性 EQL: 曲线=%s, 非线性层=%s', eql_cfg.get('curve'), list(xi_by.keys()))
     except Exception as exc:
-        log_step(logger, 'EQL 失败(回退线性): %s', str(exc))
+        if bool(eql_cfg.get('fail_closed', True)):
+            log_step(logger, 'EQL 失败(论文生产模式中止，不回退线性): %s', str(exc))
+            raise RuntimeError('EQL 失败且 fail_closed=True，已停止以禁止静默回退线性: %s' % str(exc))
+        log_step(logger, 'EQL 失败(显式允许回退线性): %s', str(exc))
     return site, eql_meta
 
 

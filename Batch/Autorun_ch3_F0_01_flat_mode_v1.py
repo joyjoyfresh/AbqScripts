@@ -50,7 +50,9 @@ def next_run_dir(unit_root):
         os.makedirs(unit_root)
     numbers = [int(name[4:]) for name in os.listdir(unit_root)
                if name.startswith('run-') and name[4:].isdigit()]
-    return os.path.join(unit_root, 'run-%03d' % ((max(numbers) if numbers else 0) + 1))
+    run_dir = os.path.join(unit_root, 'run-%03d' % ((max(numbers) if numbers else 0) + 1))
+    os.makedirs(run_dir)
+    return run_dir
 
 
 def run_command(case_dir, log_path):
@@ -98,7 +100,7 @@ def _run_variant(root_dir, variant):
             'surface_only': True,
             'critical_angle_check': True,
             'wave_files': [wave_name],
-            'validation_geometry': 'flat',
+            'validation_geometry': variant.get('validation_geometry', 'flat'),
             'submit_jobs': False,
         },
         'tssi_cfg': {'enable': False, 'scene': 'freefield', 'nonlinear': False, 'gravity': 'off'},
@@ -113,10 +115,14 @@ def _run_variant(root_dir, variant):
         audit = json.load(handle)
     with io_open(meta_path, 'r') as handle:
         meta = json.load(handle)
-    if audit.get('validation_geometry') != 'flat' or meta.get('validation_geometry') != 'flat':
-        raise RuntimeError('%s 的审计或 case_meta 未记录 validation_geometry=flat' % case_name)
-    if float(audit['top_surface']['y_range']) > 1.0e-5:
+    expected_mode = variant.get('validation_geometry', 'flat')
+    if audit.get('validation_geometry') != expected_mode or meta.get('validation_geometry') != expected_mode:
+        raise RuntimeError('%s 的审计或 case_meta 模式错误，期望=%s' % (case_name, expected_mode))
+    top_range = float(audit['top_surface']['y_range'])
+    if expected_mode == 'flat' and top_range > 1.0e-5:
         raise RuntimeError('%s 平场顶面 y_range 超出阈值' % case_name)
+    if expected_mode == 'slope' and top_range <= 1.0:
+        raise RuntimeError('%s 默认坡地哨兵的地表高差异常小，可能误走 flat 分支' % case_name)
     for key in ('Left_boundary', 'Right_boundary', 'Bottom_boundary', 'TOP_SURFACE'):
         if int(audit['boundary_node_counts'].get(key, 0)) <= 0:
             raise RuntimeError('%s 边界节点集为空：%s' % (case_name, key))
@@ -127,7 +133,7 @@ def _run_variant(root_dir, variant):
 
 
 def main():
-    """准备两类 F0-1 工况，运行建模回归并写出验收报告。"""
+    """准备均质、成层平场和默认坡地哨兵三类工况，运行建模回归并写出验收报告。"""
     unit_root = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_ROOT
     root_dir = next_run_dir(unit_root)
     for path, label in ((MODEL_SOURCE, 'Hybrid v2 建模脚本'),
@@ -147,6 +153,8 @@ def main():
              {'name': 'overlying', 'vs': 800.0, 'poisson_ratio': 0.3,
               'density': 2200.0, 'thickness': 40.0},
          ]},
+        {'name': 'case-slope-default-sentinel', 'surface_geometry': 'horizontal',
+         'base_depth': 1.0, 'layers': [], 'validation_geometry': 'slope'},
     ]
     manifest = {'unit': 'F0-1', 'purpose': '显式平场验证模式只建模回归，不提交求解',
                 'created_at': datetime.datetime.now().isoformat(), 'run_dir': root_dir,

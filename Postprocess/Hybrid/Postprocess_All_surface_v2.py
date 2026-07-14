@@ -310,6 +310,112 @@ def farfield_qa(rows, taf_lr, incident_angle=0.0):
     return err_l, err_r, suspect, basis
 
 
+QA_GATE_NAMES = ('theory', 'reflection', 'mesh', 'time', 'domain', 'energy', 'external')  # 第三章强制 QA 门槛名称
+try:
+    _QA_STRING_TYPES = (basestring,)  # Python 2/Abaqus 中同时覆盖 str 与 unicode
+except NameError:
+    _QA_STRING_TYPES = (str,)  # 普通 Python 3 环境
+
+
+def _qa_bool(value):  # 把布尔/字符串状态统一转换为 QA 布尔值
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, _QA_STRING_TYPES):
+        return value.strip().lower() in ('true', '1', 'pass', 'passed', 'ok', '通过')
+    return None
+
+
+def _qa_json_payload(raw_data, field):  # 从 NPZ 原始记录中读取 JSON QA 字段
+    if not isinstance(raw_data, dict):
+        return {}
+    value = raw_data.get(field)
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, _QA_STRING_TYPES):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取各类 QA 门槛
+    """根据单条记录和原始时程返回可审计的并列 QA 状态。
+
+    `suspect` 只表示远场端点诊断，不再作为所有质量问题的代理变量；
+    未提供证据的门槛一律返回 False，只有显式 required 列表才可缩小强制门槛范围。
+    """
+    summary = summary or {}
+    case_cfg = case_cfg or {}
+    raw_data = raw_data or {}
+    theory_basis = str(summary.get('qa_farfield_basis') or '')
+    err_l = summary.get('qa_farfield_err_left')
+    err_r = summary.get('qa_farfield_err_right')
+    endpoint_suspect = bool(summary.get('suspect', False))
+    if theory_basis == 'both_ends':
+        theory_evidence = err_l is not None and err_r is not None
+    elif theory_basis == 'upstream_left':
+        theory_evidence = err_l is not None
+    elif theory_basis == 'upstream_right':
+        theory_evidence = err_r is not None
+    else:
+        theory_evidence = False
+    theory_pass = bool(theory_evidence and not endpoint_suspect)
+
+    reflection_payload = _qa_json_payload(raw_data, 'qa_reflection_json')
+    energy_payload = _qa_json_payload(raw_data, 'qa_energy_json')
+    reflection_pass = str(reflection_payload.get('status', '')).lower() == 'passed'
+    energy_pass = str(energy_payload.get('status', '')).lower() == 'passed'
+
+    window_payload = summary.get('qa_window_convergence') or {}
+    time_value = window_payload.get('passed') if isinstance(window_payload, dict) else None
+    if time_value is None:
+        for key in ('qa_time_pass', 'qa_time', 'time_pass'):
+            if key in summary:
+                time_value = summary.get(key)
+                break
+    time_pass = bool(_qa_bool(time_value))
+
+    def summary_gate(name):  # 读取配置/汇总中的显式门槛，不把缺失当作通过
+        for key in ('qa_%s_pass' % name, 'qa_%s' % name, '%s_pass' % name):
+            if key in summary:
+                parsed = _qa_bool(summary.get(key))
+                if parsed is not None:
+                    return parsed
+        return False
+
+    gates = {
+        'theory': theory_pass,
+        'reflection': reflection_pass,
+        'mesh': summary_gate('mesh'),
+        'time': time_pass,
+        'domain': summary_gate('domain'),
+        'energy': energy_pass,
+        'external': summary_gate('external'),
+    }
+    qa_cfg = case_cfg.get('qa_cfg') or {}
+    required = qa_cfg.get('required')
+    if required is None:
+        required = list(QA_GATE_NAMES)
+    elif isinstance(required, _QA_STRING_TYPES):
+        required = [required]
+    required = [str(name) for name in required if str(name) in QA_GATE_NAMES]
+    overall_pass = bool(all(gates[name] for name in required))
+    statuses = dict((name, 'passed' if gates[name] else 'failed') for name in QA_GATE_NAMES)
+    return {
+        'qa_required': required,
+        'qa_gates': gates,
+        'qa_gate_status': statuses,
+        'overall_pass': overall_pass,
+        'qa_status': 'passed' if overall_pass else 'failed',
+        'qa_theory_evidence': theory_evidence,
+        'qa_farfield_endpoint_suspect': endpoint_suspect,
+    }
+
+
 # ==========================================================
 #  工况文件读取（meta / config / 输入波）
 # ==========================================================
@@ -397,6 +503,149 @@ def extract_surface_acc(odb):
     return xs, ys, np.array(times, dtype=float), a1_mat, a2_mat
 
 
+def extract_validation_underground_acc(odb):  # 提取两个地下验证点的双分量时程
+    """返回验证点坐标和时程；旧 ODB 缺少集合时返回空字典。"""
+    def first_node(node_set):  # 兼容装配级节点集返回的嵌套 OdbMeshNodeArray
+        node = node_set.nodes
+        while not hasattr(node, 'coordinates'):
+            if len(node) <= 0:
+                raise RuntimeError('地下验证点集合为空')
+            node = node[0]
+        return node
+
+    point_sets = []
+    assembly_sets = getattr(odb.rootAssembly, 'nodeSets', {})
+    for name in ('VALIDATION_UNDERGROUND_1', 'VALIDATION_UNDERGROUND_2'):
+        if name in assembly_sets:
+            point_sets.append((name, assembly_sets[name]))
+    for iname in odb.rootAssembly.instances.keys():
+        inst = odb.rootAssembly.instances[iname]
+        for name in ('VALIDATION_UNDERGROUND_1', 'VALIDATION_UNDERGROUND_2'):
+            if name not in [item[0] for item in point_sets] and name in inst.nodeSets.keys():
+                point_sets.append((name, inst.nodeSets[name]))
+    if not point_sets:
+        return {}
+    step = odb.steps[odb.steps.keys()[-1]]
+    times, rows_h, rows_v, xs, ys = [], [], [], [], []
+    for name, nset in sorted(point_sets):
+        node = first_node(nset)
+        xs.append(float(node.coordinates[0]))
+        ys.append(float(node.coordinates[1]))
+    for frame in step.frames:
+        fo = frame.fieldOutputs['A']
+        frame_h, frame_v = [], []
+        for _name, nset in sorted(point_sets):
+            values = fo.getSubset(region=nset).values
+            if not values:
+                raise RuntimeError('地下验证点集合无 A 输出值')
+            frame_h.append(float(values[0].data[0]))
+            frame_v.append(float(values[0].data[1]))
+        times.append(float(frame.frameValue))
+        rows_h.append(frame_h)
+        rows_v.append(frame_v)
+    return {'time': np.asarray(times, dtype=float), 'x': np.asarray(xs, dtype=float),
+            'y': np.asarray(ys, dtype=float), 'acc_h': np.asarray(rows_h, dtype=float).T,
+            'acc_v': np.asarray(rows_v, dtype=float).T}
+
+
+ENERGY_HISTORY_VARIABLES = ('ALLAE', 'ALLIE', 'ALLKE', 'ALLVD', 'ALLWK', 'ALLPD', 'ALLSE', 'ETOTAL')  # freefield 能量历史变量
+
+
+def extract_energy_history(odb):  # 从 ODB 整体历史输出提取能量时间序列
+    """返回 {'time': 时间轴, 'values': {变量: 序列}}；缺少历史输出时返回空字典。"""
+    step = odb.steps[odb.steps.keys()[-1]]  # 读取最后一个动力分析步
+    selected = None
+    for region_name in step.historyRegions.keys():  # 遍历 Assembly/节点历史区域
+        region = step.historyRegions[region_name]
+        available = set(region.historyOutputs.keys())
+        if 'ALLIE' in available and ('ALLWK' in available or 'ETOTAL' in available):  # 优先整体能量区域
+            selected = region
+            break
+    if selected is None:
+        return {}
+    values = {}
+    reference_time = None
+    for variable in ENERGY_HISTORY_VARIABLES:
+        if variable not in selected.historyOutputs:
+            continue
+        data = np.asarray(selected.historyOutputs[variable].data, dtype=float)
+        if data.ndim != 2 or data.shape[1] < 2 or data.shape[0] < 2:
+            continue
+        times = data[:, 0]
+        series = data[:, 1]
+        if reference_time is None:
+            reference_time = times
+            values[variable] = series
+        elif times.shape == reference_time.shape and np.allclose(times, reference_time):
+            values[variable] = series
+        else:
+            values[variable] = np.interp(reference_time, times, series)
+    if reference_time is None:
+        return {}
+    return {'time': np.asarray(reference_time, dtype=float), 'values': values}
+
+
+def energy_qa_payload(energy, case_cfg=None):  # 计算人工能量比和能量平衡残差
+    """对 ODB 能量历史执行可审计 QA；历史不完整时明确返回不可用状态。"""
+    energy = energy or {}
+    values = energy.get('values') or {}
+    required = ('ALLAE', 'ALLIE', 'ALLKE', 'ALLWK', 'ETOTAL')
+    missing = [name for name in required if name not in values]
+    if missing:
+        return {'status': 'not_available', 'missing': missing, 'variables': sorted(values.keys())}
+    finite = all(np.all(np.isfinite(np.asarray(values[name], dtype=float))) for name in required)
+    if not finite:
+        return {'status': 'invalid', 'reason': 'nonfinite_energy_history', 'variables': sorted(values.keys())}
+    cfg = (case_cfg or {}).get('qa_cfg') or {}
+    artificial_tol = float(cfg.get('artificial_energy_ratio_tol', 0.05))
+    residual_tol = float(cfg.get('energy_residual_tol', 0.05))
+    internal_scale = max(float(np.max(np.abs(values['ALLIE']))), 1.0e-30)
+    work_scale = max(float(np.max(np.abs(values['ALLWK']))), 1.0e-30)
+    artificial_ratio = float(np.max(np.abs(values['ALLAE'])) / internal_scale)
+    residual = float(np.max(np.abs(values['ETOTAL'])) / work_scale)
+    passed = bool(artificial_ratio <= artificial_tol and residual <= residual_tol)
+    return {'status': 'passed' if passed else 'failed', 'variables': sorted(values.keys()),
+            'artificial_energy_ratio': artificial_ratio, 'energy_residual': residual,
+            'artificial_energy_ratio_tol': artificial_tol, 'energy_residual_tol': residual_tol,
+            'passed': passed}
+
+
+def _theory_series_from_input(a_in_pad, factor_h, factor_v):  # 构造可追溯理论基线时程
+    """由自由表面解析系数和输入波构造理论基线；成层精确理论由 F0-2 参考包补充。"""
+    if a_in_pad is None:
+        return None, None
+    return float(factor_h) * np.asarray(a_in_pad, dtype=float), \
+        float(factor_v) * np.asarray(a_in_pad, dtype=float)
+
+
+def _series_error(actual, theory):  # 计算逐点相对误差数组和幅值误差
+    """返回误差数组、幅值相对误差和可用性标记。"""
+    if actual is None or theory is None or len(actual) != len(theory):
+        return None, None, False
+    actual = np.asarray(actual, dtype=float)
+    theory = np.asarray(theory, dtype=float)
+    denom = max(float(np.max(np.abs(theory))), 1.0e-30)
+    return actual - theory, float(np.max(np.abs(actual - theory)) / denom), True
+
+
+def _phase_error_deg(actual, theory, dt, fc):  # 计算目标频率处相位误差
+    """在理论幅值足够时返回目标频率相位差，否则返回 None。"""
+    if actual is None or theory is None or fc is None or fc <= 0.0:
+        return None
+    actual = np.asarray(actual, dtype=float)
+    theory = np.asarray(theory, dtype=float)
+    if actual.size != theory.size or actual.size < 4:
+        return None
+    freqs = np.fft.rfftfreq(actual.size, d=float(dt))
+    index = int(np.argmin(np.abs(freqs - float(fc))))
+    a_spec = np.fft.rfft(actual)[index]
+    t_spec = np.fft.rfft(theory)[index]
+    if abs(a_spec) <= 1.0e-30 or abs(t_spec) <= 1.0e-30:
+        return None
+    diff = np.angle(a_spec / t_spec, deg=True)
+    return float((diff + 180.0) % 360.0 - 180.0)
+
+
 # ==========================================================
 #  输出
 # ==========================================================
@@ -442,6 +691,7 @@ def write_H_csv(path, freqs, xs, H):
 
 NPZ_FILENAME = 'surface_results.npz'  # 单工况唯一数值输出文件名
 XLSX_FILENAME = 'surface_results.xlsx'  # 供研究者查阅的 Excel 工作簿文件名
+RAW_TIMESERIES = {}  # 逐记录原始时程与 QA 扩展字段，最终直接写入 NPZ
 _NPZ_TEMP_PATTERNS = (  # 打包后删除的运行期临时数值文件
     'surface_response_*.csv', 'H_surface_h_*.csv', 'H_surface_v_*.csv', 'H_topo_h_*.csv',
     'sgrid_response_*.csv', 'sgrid_H_surface_h_*.csv', 'sgrid_H_surface_v_*.csv', 'sgrid_H_topo_h_*.csv',
@@ -470,7 +720,44 @@ def _read_csv_table_for_npz(path):  # 读取临时 CSV 为表头和文本矩阵
     return rows[0], rows[1:]
 
 
-def write_surface_npz(meta, case_cfg):  # 打包全部数值产物并删除临时 CSV/JSON
+def _npz_safe_record(record):  # 生成稳定的 NPZ 键后缀
+    """把记录名转换为不含路径和空格的 NPZ 键后缀。"""
+    text = str(record or 'record')
+    return ''.join(ch if (ch.isalnum() or ch in ('_', '-')) else '_' for ch in text)
+
+
+def _put_raw_timeseries_payload(payload, manifest, raw_timeseries):  # 写入原始时程扩展字段
+    """将逐记录原始时程、理论基线和并列 QA 字段直接写入 NPZ。"""
+    for record, data in sorted((raw_timeseries or {}).items()):
+        suffix = _npz_safe_record(record)
+        prefix = 'raw_%s_' % suffix
+        for field in ('time', 'x', 'y', 'acc_h', 'acc_v', 'input_acc',
+                      'theory_acc_h', 'theory_acc_v', 'error_acc_h', 'error_acc_v',
+                      'representative_indices', 'underground_time', 'underground_x', 'underground_y',
+                      'underground_acc_h', 'underground_acc_v', 'energy_time'):
+            value = data.get(field)
+            if value is None:
+                continue
+            payload[prefix + field] = np.asarray(value)
+            manifest.append({'key': prefix + field, 'name': 'raw_%s_%s' % (record, field),
+                             'kind': 'raw_timeseries'})
+        for variable, value in sorted((data.get('energy_values') or {}).items()):
+            if value is None:
+                continue
+            field = 'energy_%s' % str(variable)
+            payload[prefix + field] = np.asarray(value)
+            manifest.append({'key': prefix + field, 'name': 'raw_%s_%s' % (record, field),
+                             'kind': 'energy_history'})
+        for field in ('qa_theory_json', 'qa_reflection_json', 'qa_v2_protocol_json', 'qa_energy_json'):
+            value = data.get(field)
+            if value is None:
+                continue
+            payload[prefix + field] = _npz_bytes(value if isinstance(value, str) else json.dumps(value, ensure_ascii=True, sort_keys=True))
+            manifest.append({'key': prefix + field, 'name': 'raw_%s_%s' % (record, field),
+                             'kind': 'qa_json'})
+
+
+def write_surface_npz(meta, case_cfg, raw_timeseries=None):  # 打包全部数值产物并删除临时 CSV/JSON
     """写单工况 NPZ 数值包；表结构由 manifest_json 描述，禁止 pickle 以保障跨环境读取。"""
     paths = []
     for pattern in _NPZ_TEMP_PATTERNS:
@@ -486,6 +773,7 @@ def write_surface_npz(meta, case_cfg):  # 打包全部数值产物并删除临�
             with open(name, 'rb') as fh:
                 payload[name.replace('.', '_')] = np.asarray(fh.read())
     manifest = []
+    _put_raw_timeseries_payload(payload, manifest, raw_timeseries)
     for index, path in enumerate(paths):
         header, rows = _read_csv_table_for_npz(path)
         key = 'table_%03d' % index
@@ -561,6 +849,8 @@ def write_surface_xlsx_from_npz():  # 由 NPZ 生成研究者查阅用 Excel 工
         sheets = [('Overview', overview)]  # Abaqus Python 2 XML 拼接使用 ASCII 工作表名以避免编码错误
         used_names = set(['Overview'])
         for index, item in enumerate(manifest, 1):
+            if item.get('kind') in ('raw_timeseries', 'qa_json', 'energy_history'):
+                continue  # 原始时程/QA 键不是二维表，不在概览 Excel 中重复展开
             base = item['name'].replace('.csv', '')
             name = base[:28]
             while name in used_names:
@@ -606,6 +896,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     odb = openOdb(path=odb_path, readOnly=True)
     try:
         xs, ys, t, a1_mat, a2_mat = extract_surface_acc(odb)
+        underground = extract_validation_underground_acc(odb)  # 读取解析验证地下点
+        energy = extract_energy_history(odb)  # 读取 freefield 整体能量历史
     finally:
         odb.close()
     t_raw = t  # 保留 ODB 原始帧时间轴，两个分量必须据此同步重采样
@@ -616,6 +908,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
 
     pga_in = None
     a_in = None
+    a_in_pad = None
     if wave:
         rec = np.loadtxt(wave)  # 输入记录 [time, acc]
         a_in = rec[:, 1]
@@ -651,6 +944,61 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         write_H_csv('H_surface_v_%s.csv' % record, freqs, xs, H_v)
         write_H_csv('H_topo_h_%s.csv' % record, freqs, xs, Ht)
 
+    theory_h, theory_v = _theory_series_from_input(a_in_pad, factor_h, factor_v)  # 理论基线时程
+    v2_cfg = case_cfg.get('v2_validation_cfg') or {}
+    v2_positions = v2_cfg.get('surface_positions') or []
+    if v2_positions and len(xs) >= len(v2_positions):
+        x_min, x_max = float(np.min(xs)), float(np.max(xs))
+        rep_idx = np.asarray(sorted(set([int(np.argmin(np.abs(xs - (x_min + float(frac) * (x_max - x_min)))))
+                                         for frac in v2_positions])), dtype=int)
+    else:
+        rep_idx = np.asarray(sorted(set([0, len(xs) // 2, len(xs) - 1])), dtype=int)
+    error_h = None
+    error_v = None
+    amp_errors_h, amp_errors_v = [], []
+    phase_errors_h, phase_errors_v = [], []
+    if theory_h is not None:
+        error_h = a1_mat[rep_idx] - theory_h[None, :]
+        error_v = a2_mat[rep_idx] - theory_v[None, :]
+        for idx in rep_idx:
+            _unused_h, amp_h, _ok_h = _series_error(a1_mat[idx], theory_h)
+            _unused_v, amp_v, _ok_v = _series_error(a2_mat[idx], theory_v)
+            amp_errors_h.append(amp_h)
+            amp_errors_v.append(amp_v)
+            phase_errors_h.append(_phase_error_deg(a1_mat[idx], theory_h, dt, fc))
+            phase_errors_v.append(_phase_error_deg(a2_mat[idx], theory_v, dt, fc))
+    energy_payload = energy_qa_payload(energy, case_cfg)  # 计算能量门槛与可审计指标
+    RAW_TIMESERIES[record] = {
+        'time': t, 'x': xs, 'y': ys, 'acc_h': a1_mat, 'acc_v': a2_mat,
+        'input_acc': a_in_pad, 'theory_acc_h': theory_h, 'theory_acc_v': theory_v,
+        'error_acc_h': error_h, 'error_acc_v': error_v,
+        'representative_indices': rep_idx,
+        'underground_time': underground.get('time'), 'underground_x': underground.get('x'),
+        'underground_y': underground.get('y'), 'underground_acc_h': underground.get('acc_h'),
+        'underground_acc_v': underground.get('acc_v'),
+        'energy_time': np.asarray(energy.get('time', []), dtype=float),
+        'energy_values': energy.get('values', {}),
+        'qa_theory_json': json.dumps({
+            'status': 'baseline_only' if theory_h is not None else 'not_available',
+            'source': 'free_surface_factor_times_input',
+            'exact_for_layered_reference': False,
+            'v2_protocol': v2_cfg if v2_cfg else None,
+            'representative_indices': [int(v) for v in rep_idx],
+            'amplitude_relative_error_h': amp_errors_h,
+            'amplitude_relative_error_v': amp_errors_v,
+            'phase_error_deg_h': phase_errors_h,
+            'phase_error_deg_v': phase_errors_v,
+        }, ensure_ascii=True, sort_keys=True),
+        'qa_reflection_json': json.dumps({
+            'status': 'not_computed',
+            'direct_window_s': [float(t[0]), float(t[-1])],
+            'reflected_window_s': None,
+            'reason': 'F0-4 前不将边界反射与窗口收敛混为单一 suspect',
+        }, ensure_ascii=True, sort_keys=True),
+        'qa_v2_protocol_json': json.dumps(v2_cfg, ensure_ascii=True, sort_keys=True) if v2_cfg else None,
+        'qa_energy_json': json.dumps(energy_payload, ensure_ascii=True, sort_keys=True),
+    }
+
     taf_arr = np.array([r['TAF_h'] for r in rows], dtype=float)
     ar_idx = int(np.nanargmax(taf_arr)) if np.any(~np.isnan(taf_arr)) else None  # AR_max 在重采样前的原始曲线上取
     summary = {'record': record, 'n_nodes': len(xs), 'dt': dt, 'duration': float(t[-1]),
@@ -659,6 +1007,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
                'AR_max_x': (rows[ar_idx]['x'] if ar_idx is not None else None),  # 峰值位置
                'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r,
                'qa_farfield_basis': qa_basis, 'incident_angle': incident_angle, 'suspect': suspect}
+    summary.update(evaluate_qa_gates(summary, case_cfg, RAW_TIMESERIES.get(record)))  # 各类 QA 独立判定后再合取
     log_step(logger, '%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s 判据=%s%s',
              record, len(xs), str(pga_in),
              str(summary['AR_max']), str(summary['AR_max_x']),
@@ -1395,18 +1744,22 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
             rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field,
                                             'n_points': len(diffs), 'max_rel_diff': float(max_diff),
                                             'max_rel_diff_s': float(max_s), 'tol': float(tol), 'passed': passed}  # 写可审计证据
-            rec['suspect'] = not passed  # 显式窗口收敛时以其作为最终质量门槛
-            rec['qa_status'] = 'pass_window_convergence' if passed else 'fail_window_convergence'  # 机器可读状态
+            rec['qa_time_pass'] = passed  # 仅更新时间/观测窗门槛，不覆盖理论或端点诊断
+            refreshed = evaluate_qa_gates(rec, case_cfg, RAW_TIMESERIES.get(record))  # 重新合取全部门槛
+            rec.update(refreshed)
+            rec['qa_status'] = 'passed' if refreshed['overall_pass'] else 'failed'  # 机器可读整体状态
             changed = True  # 标记需写回
             log_step(logger, '[qa] %s: 窗口收敛 %d 点，最大差异=%.3f%%@s=%.3f，阈值=%.1f%% -> %s；端点诊断=%s',
                      record, len(diffs), 100.0 * max_diff, max_s, 100.0 * tol,
                      '通过' if passed else '失败', 'SUSPECT' if endpoint_suspect else 'PASS')
         except Exception as e:  # 配置或参考包异常必须保留原严格判定
             rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field, 'passed': False, 'error': str(e)}
-            rec['qa_status'] = 'fail_window_convergence'
-            rec['suspect'] = True
+            rec['qa_time_pass'] = False  # 窗口收敛失败只影响时间门槛
+            refreshed = evaluate_qa_gates(rec, case_cfg, RAW_TIMESERIES.get(record))
+            rec.update(refreshed)
+            rec['qa_status'] = 'failed'
             changed = True
-            log_step(logger, '[qa] %s: 窗口收敛 QA 失败，保留 suspect=True：%s', str(record), str(e))
+            log_step(logger, '[qa] %s: 窗口收敛 QA 失败，已保留端点 suspect=%s 并单独置 qa_time=false：%s', str(record), str(rec.get('suspect', False)), str(e))
     if changed:  # 仅在明确执行后写回
         with open(summary_path, 'w') as fh:
             json.dump(summary_data, fh, indent=2)  # 写回最终 QA 状态与审计证据
@@ -1535,7 +1888,7 @@ def main():  # 主入口函数
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
     apply_window_convergence_qa(case_cfg, logger=logger)  # 可选：用不同净空参考验证研究窗口收敛
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
-    n_tables = write_surface_npz(meta, case_cfg)  # 所有数值临时文件收敛为单一 NPZ 包
+    n_tables = write_surface_npz(meta, case_cfg, RAW_TIMESERIES)  # 表格与原始时程统一收敛为单一 NPZ 包
     n_sheets = write_surface_xlsx_from_npz()  # 再由 NPZ 导出研究者查阅用 Excel 工作簿
     log_step(logger, '完成: 已写入 %s（%d 张数值表）与 %s（%d 个工作表）；运行期 CSV/JSON 已清理。',
              NPZ_FILENAME, n_tables, XLSX_FILENAME, n_sheets)
