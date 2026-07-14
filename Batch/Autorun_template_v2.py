@@ -27,13 +27,13 @@ MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
 
 SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\Hybrid\slope_frame_ssi_full_v2.py",  # 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Postprocess_All_surface_v2.py",  # 后处理提取脚本路径 / 提取单工况数据
+    r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\slope_frame_ssi_full_v2.py",  # 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_All_surface_v2.py",  # 后处理提取脚本路径 / 提取单工况数据
 ]
 
 POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行的全局后处理脚本绝对路径
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Hybrid\Plot_Hybrid_surface_v1.py",  # 绘图脚本路径 / 绘制汇总对比图表
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Plot_Hybrid_surface_v1.py",  # 绘图脚本路径 / 绘制汇总对比图表
 ]
 
 PARAMETER_CASES = [  # 变参数工况列表，每项需包含 config 配置覆盖字典

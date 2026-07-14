@@ -1,6 +1,0 @@
-interface:
-  display_name: "第三章有限元验证工作流"
-  short_description: "按计划门禁续跑有限元验证、诊断、图表生成与论文写作"
-  default_prompt: "Use $chapter3-fe-validation-workflow to inspect the current Chapter 3 gate and continue the next permitted validation task."
-policy:
-  allow_implicit_invocation: true
