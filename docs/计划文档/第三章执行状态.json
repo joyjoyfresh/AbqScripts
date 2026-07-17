@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-07-14T14:30:00+08:00",
+  "updated_at": "2026-07-17T00:10:00+08:00",
   "project": "第三章斜入射成层坡地有限元模型与可信性验证",
   "canonical_files": {
     "plan": "docs/计划文档/第三章数值模型与可信性验证实施计划.md",
@@ -14,23 +14,23 @@
     "archived_plan": "docs/计划文档/归档/2026-07-12_第三章原实施计划.md"
   },
   "fixed_pipeline": [
-    "Modeling/Hybrid/slope_frame_ssi_full_v2.py",
-    "Postprocess/Hybrid/Postprocess_All_surface_v2.py",
-    "Postprocess/Hybrid/Collect_All_results_v2.py",
-    "Postprocess/Hybrid/Plot_Hybrid_surface_v2.py"
+    "Modeling/slope_frame_ssi_full_v2.py",
+    "Postprocess/Postprocess_All_surface_v2.py",
+    "Postprocess/Collect_All_results_v2.py",
+    "Postprocess/Plot_Hybrid_surface_v2.py"
   ],
   "directory_policy": {
-    "autorun": "Batch",
+    "autorun": "Run/Auto_ch3",
     "paper_abaqus_outputs": "Run",
     "temporary_diagnostics": "test/Abaqus"
   },
   "active": {
-    "phase_id": "V3",
-    "task_id": "V3-LAYERED-1D-AND-NUMERICAL-CONVERGENCE",
-    "status": "in_progress",
+    "phase_id": "CHAPTER3-FINALIZATION",
+    "task_id": "CHAPTER3-MARKDOWN-FIGURE-QA",
+    "status": "completed",
     "gate": "f1_frequency_protocol_solver_authorized",
     "solver_authorized": true,
-    "next_task_after_gate": "V3_layered_1d_reference_and_convergence"
+    "next_task_after_gate": "chapter3_figures_and_manuscript_finalization"
   },
   "execution_hold": {
     "enabled": false,
@@ -73,9 +73,9 @@
     "F0": "completed_F0_1_to_F0_8_passed",
     "V1": "completed_12_cases_passed",
     "V2": "archived_diagnostic_no_formal_pass",
-    "F1": "A1_A2_A3_A4_A5_passed_with_diagnostics",
-    "V3": "in_progress_word_draft_written_solver_pending",
-    "V4": "not_started",
+    "F1": "A1_A2_A3_A4_passed_A5_conditionally_passed_vertical_peak_frequency_failed",
+    "V3": "run001_downgraded_diagnostic_run002_eleven_case_soft_layer_matrix_passed_schema2",
+    "V4": "completed_run002_failed_frozen_four_channel_gate_energy_passed_external_benchmark_unresolved",
     "V5": "not_started",
     "V6": "not_started",
     "V7": "not_started",
@@ -108,7 +108,13 @@
     "f0_8_eql_fail_closed": "passed_test_2_of_2_and_f0_1_run004_regression",
     "v1_geometry_material": "passed_run001_12_of_12_no_odb",
     "v2_pilot": "run004_run005_run006_protocol_failures_run007_timeout_waiting_methodological_decision",
-    "f1_frequency_protocol": "A1_A2_A3_A4_A5_passed_runs003_004_005_007_009",
+    "f1_frequency_protocol": "A1_A2_A3_A4_passed_A5_conditionally_passed_runs003_004_005_007_009_vertical_peak_error_9_37pct",
+    "v3_slope_solution_verification": "passed_run002_11_cases_curve_errors_le_0_488pct_peak_errors_le_1_327pct_near_peak_overlap_ge_0_933",
+    "v4_external_slope_benchmark": "failed_run002_only_A_vertical_passed_four_channel_gate_energy_passed_no_threshold_relaxation",
+    "v3_report_sha256": "4FE3541C235657F6441D10036ADF2499BA04D9B6334861D56BFCBFBA9BF63DA3",
+    "v4_report_sha256": "9A187ACC308D0EDD49F0A8A329B48C2D6FF7AF0B04ECB9274947CAA1EC5AC19B",
+    "chapter3_markdown_qa": "passed_10_of_10_image_refs_10_figures_13_tables_sequential_diff_check_and_py_compile",
+    "chapter3_markdown_sha256": "1096AC6B3F746022A925321E184E5A9E7172378F4EACC87C640676BD51BC30FE",
     "working_docx_sha256": "8d1f6faa480c419158c90408b2a162e18d2313be302458d1e4aa5353e08b0225",
     "word_validation_pdf_sha256": "78018964c2860bfd682873347a8fc7a148d21ccc12753532801192a7efd76cf9",
     "word_validation_render_dir": "Run/ch3_docx_render_20260714_final3"

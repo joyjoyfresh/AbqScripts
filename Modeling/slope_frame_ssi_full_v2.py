@@ -2098,16 +2098,20 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax, logge
 
     dscale = float(boundary_cfg.get('dashpot_scale', 1.0))  # 边界阻尼器(吸收)缩放系数（1=全吸收/0=全反射）
     sscale = float(boundary_cfg.get('spring_scale', 1.0))   # 边界弹簧(恢复)缩放系数（1=现行/2=标准Liu/0=纯黏性）
+    dnscale = float(boundary_cfg.get('dashpot_normal_scale', dscale))  # 可选法向系数；缺省保持旧行为
+    dtscale = float(boundary_cfg.get('dashpot_tangential_scale', dscale))  # 可选切向系数；缺省保持旧行为
+    snscale = float(boundary_cfg.get('spring_normal_scale', sscale))  # 可选法向系数；用于文献边界精确复现
+    stscale = float(boundary_cfg.get('spring_tangential_scale', sscale))  # 可选切向系数；用于文献边界精确复现
     result = []
     for idx in range(n):
         x0 = arr[idx, 1]
         y0 = arr[idx, 2]
         inf = influence[idx]
         mat = pick_material(x0, y0)
-        kn = mat['GG'] / 2.0 / ymax * inf * sscale  # 法向弹簧(恢复) × 缩放
-        cn = mat['density'] * mat['cp'] * inf * dscale  # 法向阻尼器(吸收) × 缩放
-        kt = mat['GG'] / 4.0 / ymax * inf * sscale  # 切向弹簧(恢复) × 缩放
-        ct = mat['density'] * mat['cs'] * inf * dscale  # 切向阻尼器(吸收) × 缩放
+        kn = mat['GG'] / 2.0 / ymax * inf * snscale  # 法向弹簧(恢复) × 缩放
+        cn = mat['density'] * mat['cp'] * inf * dnscale  # 法向阻尼器(吸收) × 缩放
+        kt = mat['GG'] / 4.0 / ymax * inf * stscale  # 切向弹簧(恢复) × 缩放
+        ct = mat['density'] * mat['cs'] * inf * dtscale  # 切向阻尼器(吸收) × 缩放
         result.append(BoundaryNode(label=int(arr[idx, 0]), x=x0, y=y0, influence=inf,
                                    kn=kn, cn=cn, kt=kt, ct=ct))
     if logger and abs(dscale - 1.0) > 1e-9:  # 非标准吸收时显式告警（对照实验留痕）

@@ -28,10 +28,10 @@ V1_REPORT = REPO_ROOT / "Run" / "ch3_V1_geometry_material" / "run-001" / "v1_val
 ENERGY_REPORT = REPO_ROOT / "Run" / "ch3_F0_06_energy" / "run-001" / "f0_6_validation_report.json"
 V3_RUN = REPO_ROOT / "Run" / "ch3_V3_slope_solution_verification" / "run-002"
 V3_REPORT = V3_RUN / "v3_validation_report.json"
-V4_RUN = REPO_ROOT / "Run" / "ch3_V4_external_slope_benchmark"
+V4_RUN = REPO_ROOT / "Run" / "ch3_V4_external_slope_benchmark" / "run-002"
 V4_CASE = V4_RUN / "B1_shen2024_step_slope"
 V4_REPORT = V4_RUN / "v4_validation_report.json"
-V4_REFERENCE = V4_RUN / "shen2024_figure9_published_abaqus_digitized.csv"
+V4_REFERENCE = V4_RUN.parent / "shen2024_figure9_published_abaqus_digitized.csv"
 
 OKABE_ITO = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9"]
 THEORY_COLOR = "#202020"
@@ -162,7 +162,7 @@ def draw_validation_framework():
         ("实现核验", "12组组合\n集合与网格", "#E3F2EA"),
         ("独立理论", "A1—A5\n传递函数", "#FFF0D6"),
         ("坡地解验证", "网格、时间步\n域尺寸、退化", "#F6E2EC"),
-        ("外部基准", "文献坡形\n四通道时程", "#FCE4D6"),
+        ("外部基准\n未闭合", "公开坡形\n四通道复算", "#FCE4D6"),
         ("数值质量", "波长、采样\n人工能量", "#E9E2F4"),
         ("结论边界", "已验目标量可信\n物理外推受限", "#E7EEF4"),
     ]
@@ -355,7 +355,7 @@ def draw_error_summary():
     peak_v = np.array([item["peak_v"] for item in rows], dtype=float)
     peak_vector = np.array([item["peak_vector"] for item in rows], dtype=float)
     ax.bar(x - width, peak_h, width, color=OKABE_ITO[0], label="水平分量", zorder=3)
-    ax.bar(x, peak_v, width, color=OKABE_ITO[3], label="竖向分量（诊断）", zorder=3)
+    ax.bar(x, peak_v, width, color=OKABE_ITO[3], label="竖向分量（A5未通过）", zorder=3)
     ax.bar(x + width, peak_vector, width, color=OKABE_ITO[2], hatch="..",
            edgecolor="#22684E", linewidth=0.4, label="合成谱主判据", zorder=3)
     ax.axhline(3.0, color=THEORY_COLOR, linestyle="--", linewidth=1.0, label="3%容限")
@@ -364,7 +364,7 @@ def draw_error_summary():
     ax.set_ylabel("峰频误差（%）")
     ax.set_ylim(0, 10.5)
     ax.legend(frameon=False, loc="upper left", ncol=1)
-    ax.annotate("9.37%\n诊断量", xy=(4, peak_v[4]), xytext=(3.25, 8.0),
+    ax.annotate("9.37%\n超过控制线", xy=(4, peak_v[4]), xytext=(3.25, 8.0),
                 arrowprops=dict(arrowstyle="->", linewidth=0.8, color="#555555"),
                 fontsize=7.0, ha="center")
     finish_axis(ax)
@@ -446,10 +446,12 @@ def draw_slope_solution_verification():
         (["M1", "S0", "M3"], ["12 m", "8 m", "5.33 m"], "网格尺寸"),
         (["T1", "S0", "T3"], ["2.0 ms", "1.0 ms", "0.5 ms"], "输入与求解时间步"),
         (["D1", "S0", "D3"], ["4h", "6h", "8h"], "侧向净空"),
+        (["B1", "S0", "B3"], ["3h", "5h", "7h"], "底部深度"),
     ]
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.75), gridspec_kw={"wspace": 0.30})
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0),
+                             gridspec_kw={"wspace": 0.28, "hspace": 0.34})
     styles = [(OKABE_ITO[1], "--"), (THEORY_COLOR, "-"), (OKABE_ITO[0], ":")]
-    for panel, (ax, (case_ids, labels, title)) in enumerate(zip(axes, groups)):
+    for panel, (ax, (case_ids, labels, title)) in enumerate(zip(axes.flat, groups)):
         for case_id, label, (color, linestyle) in zip(case_ids, labels, styles):
             s, taf = load_v3_case(case_id)
             ax.plot(s, taf, color=color, linestyle=linestyle, label=label, zorder=3)
@@ -479,9 +481,10 @@ def draw_slope_solution_verification():
     finish_axis(ax)
     panel_label(ax, "a")
 
-    names = ["网格", "时间步", "计算域", "同材退化"]
+    names = ["网格", "时间步", "侧向域", "底部域", "同材退化"]
     keys = ["mesh_medium_to_fine", "time_medium_to_fine",
-            "domain_baseline_to_far", "same_material_degradation"]
+            "domain_baseline_to_far", "depth_baseline_to_deep",
+            "same_material_degradation"]
     curve_error = [100.0 * report["comparisons"][key]["curve_l2_relative"] for key in keys]
     peak_error = [100.0 * report["comparisons"][key]["peak_relative"] for key in keys]
     x = np.arange(len(names))
@@ -506,8 +509,14 @@ def load_v4_histories():
     """读取V4有限元时程与文献图9数字化曲线。"""
     package = np.load(V4_CASE / "surface_results.npz", allow_pickle=False)
     try:
-        prefixes = sorted(set(key[:-4] for key in package.files
-                              if key.startswith("raw_") and key.endswith("time")))
+        prefixes = sorted(
+            key[:-4] for key in package.files
+            if key.startswith("raw_") and key.endswith("time")
+            and key[:-4] + "acc_h" in package.files
+            and key[:-4] + "acc_v" in package.files
+            and key[:-4] + "x" in package.files
+            and key[:-4] + "representative_indices" in package.files
+        )
         if len(prefixes) != 1:
             raise RuntimeError("V4原始记录数异常：%s" % prefixes)
         prefix = prefixes[0]
