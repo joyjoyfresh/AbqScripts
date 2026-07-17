@@ -10,7 +10,7 @@ import os
 import numpy as np
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / "Postprocess" / "Hybrid" / "Postprocess_All_surface_v2.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "Postprocess" / "Postprocess_All_surface_v2.py"
 ABAQUS_CONSTANTS = types.ModuleType("abaqusConstants")
 ODB_ACCESS = types.ModuleType("odbAccess")
 ODB_ACCESS.openOdb = None
@@ -23,6 +23,105 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PostprocessAllSurfaceTests(unittest.TestCase):
+    def test_complex_frf_preserves_amplitude_phase_and_mask(self):
+        """复频响必须保留相位，旧 compute_H 只能是同掩码下的幅值视图。"""
+        dt = 1.0 / 128.0
+        time = np.arange(256, dtype=float) * dt
+        frequency = 8.0
+        phase = 0.4
+        input_acc = np.cos(2.0 * np.pi * frequency * time)
+        output_acc = 2.0 * np.cos(2.0 * np.pi * frequency * time + phase)
+
+        freqs, transfer, valid, _ = MODULE.compute_complex_H(output_acc, input_acc, dt, fc=frequency)
+        index = int(np.argmin(np.abs(freqs - frequency)))
+        self.assertTrue(valid[index])
+        self.assertAlmostEqual(abs(transfer[0, index]), 2.0, places=12)
+        self.assertAlmostEqual(np.angle(transfer[0, index]), phase, places=12)
+
+        old_freqs, amplitude = MODULE.compute_H(output_acc, input_acc, dt, fc=frequency)
+        np.testing.assert_allclose(old_freqs, freqs[valid])
+        np.testing.assert_allclose(amplitude, np.abs(transfer[:, valid]))
+
+    def test_complex_frf_rejects_zero_reference_without_epsilon(self):
+        freqs, transfer, valid, _ = MODULE.compute_complex_H(
+            np.ones((2, 32)), np.zeros(32), 0.01, fc=4.0
+        )
+
+        self.assertEqual(freqs.shape, valid.shape)
+        self.assertFalse(np.any(valid))
+        self.assertTrue(np.all(np.isnan(transfer.real)))
+        self.assertTrue(np.all(np.isnan(transfer.imag)))
+
+    def test_complex_frf_resamples_real_and_imaginary_parts(self):
+        transfer = np.array([[1.0 + 0.0j], [3.0 + 2.0j]])
+        aligned = MODULE.resample_H_matrix(
+            transfer, np.array([0.0, 1.0]), np.array([0.0, 0.5, 1.0]), ["A", "B", "C"]
+        )
+
+        self.assertTrue(np.isnan(aligned[0, 0].real))
+        self.assertAlmostEqual(aligned[1, 0].real, 2.0)
+        self.assertAlmostEqual(aligned[1, 0].imag, 1.0)
+        self.assertTrue(np.isnan(aligned[2, 0].real))
+
+    def test_psa_and_rsaf_use_exact_reference_time_histories(self):
+        """PSA 应保持线性缩放；RSAF 只使用配置的真实 rock/1D 参考。"""
+        dt = 0.005
+        time = np.arange(0.0, 4.0 + 0.5 * dt, dt)
+        base = np.sin(2.0 * np.pi * 2.0 * time)
+        xs = np.array([0.0, 1.0])
+        acc_h = np.vstack([2.0 * base, 3.0 * base])
+        acc_v = np.vstack([0.5 * base, 0.75 * base])
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = {}
+            for name, values in (("rock", base), ("left", 2.0 * base), ("right", 1.5 * base)):
+                path = Path(folder) / (name + ".txt")
+                np.savetxt(str(path), np.column_stack([time, values]))
+                paths[name] = str(path)
+            case_cfg = {
+                "run_cfg": {
+                    "response_spectrum_cfg": {
+                        "periods": [0.1, 0.2, 0.5, 1.0, 2.0],
+                        "reference_files": {
+                            "demo": {
+                                "rock": paths["rock"],
+                                "one_d_left": paths["left"],
+                                "one_d_right": paths["right"],
+                            }
+                        },
+                    }
+                }
+            }
+            payload = MODULE.compute_response_spectrum_payload(
+                "demo", xs, 0.5, time, acc_h, acc_v, dt, case_cfg
+            )
+
+        self.assertTrue(payload["quality"]["passed"])
+        np.testing.assert_allclose(payload["RSAF_rock_h"][0], 2.0, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(payload["RSAF_rock_h"][1], 3.0, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(payload["RSAF_1D_h"][0], 1.0, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(payload["RSAF_1D_h"][1], 2.0, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(payload["URSAF_z"][0], 0.5, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(payload["key_period"], [0.1, 0.2, 0.5, 1.0, 2.0])
+        np.testing.assert_allclose(payload["key_RSAF_1D_h"][1], 2.0, rtol=1e-12, atol=1e-12)
+        self.assertTrue(np.all(payload["RSAF_rock_valid_mask"]))
+
+        freqs, _incident_h, incident_valid, _ = MODULE.compute_complex_H(acc_h, base, dt, fc=2.0)
+        over_1d, over_1d_valid = MODULE.compute_side_reference_H(
+            acc_h, xs, 0.5, 2.0 * base, 1.5 * base, dt, freqs, incident_valid, fc=2.0
+        )
+        frequency_index = int(np.argmin(np.abs(freqs - 2.0)))
+        self.assertTrue(np.all(over_1d_valid[:, frequency_index]))
+        np.testing.assert_allclose(np.abs(over_1d[:, frequency_index]), [1.0, 2.0], rtol=1e-12, atol=1e-12)
+
+        missing = MODULE.compute_response_spectrum_payload(
+            "demo", xs, 0.5, time, acc_h, acc_v, dt,
+            {"run_cfg": {"response_spectrum_cfg": {"periods": [0.2, 1.0]}}},
+        )
+        self.assertFalse(missing["quality"]["passed"])
+        self.assertTrue(np.all(np.isnan(missing["RSAF_rock_h"])))
+        self.assertFalse(np.any(missing["RSAF_rock_valid_mask"]))
+
     def test_surface_metrics_adds_unified_vertical_definitions(self):
         xs = np.array([0.0, 10.0])
         a1 = np.array([[2.0, -1.0], [4.0, -2.0]])
@@ -103,6 +202,7 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
 
                 package = np.load("surface_results.npz")
                 try:
+                    self.assertEqual(int(package["schema_version"]), 2)
                     manifest = json.loads(MODULE._npz_bytes(package["manifest_json"].item()).item().decode("utf-8"))
                     self.assertEqual([item["name"] for item in manifest], ["sgrid_response_demo.csv", "surface_response_demo.csv"])
                 finally:
@@ -111,6 +211,41 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
                 self.assertFalse(Path("sgrid_response_demo.csv").exists())
                 self.assertFalse(Path("surface_summary.json").exists())
                 os.chdir(old_cwd)  # Windows 不允许删除仍作为当前目录的临时文件夹
+        finally:
+            os.chdir(old_cwd)
+
+    def test_npz_package_preserves_complex_frf_and_valid_masks(self):
+        """规范 NPZ 必须无损保存复数 H、布尔掩码和反应谱数组。"""
+        spectral = {
+            "demo": {
+                "frf": {
+                    "frequency": np.array([0.0, 1.0]),
+                    "H_surface_h": np.array([[np.nan + 1j * np.nan, 2.0 + 0.5j]]),
+                    "valid_mask": np.array([False, True]),
+                    "quality_json": json.dumps({"status": "passed"}),
+                },
+                "rsa": {
+                    "period": np.array([0.2, 1.0]),
+                    "RSAF_rock_h": np.array([[1.2, 1.5]]),
+                    "RSAF_rock_valid_mask": np.array([[True, True]]),
+                    "quality_json": json.dumps({"status": "passed"}),
+                },
+            }
+        }
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                os.chdir(folder)
+                MODULE.write_surface_npz({}, {}, spectral_results=spectral)
+                package = np.load("surface_results.npz", allow_pickle=False)
+                try:
+                    self.assertTrue(np.iscomplexobj(package["frf_demo_H_surface_h"]))
+                    self.assertEqual(package["frf_demo_valid_mask"].dtype, np.dtype(bool))
+                    self.assertEqual(package["rsa_demo_RSAF_rock_h"].shape, (1, 2))
+                    self.assertAlmostEqual(package["frf_demo_H_surface_h"][0, 1].imag, 0.5)
+                finally:
+                    package.close()
+                os.chdir(old_cwd)
         finally:
             os.chdir(old_cwd)
 

@@ -28,10 +28,23 @@ except Exception:
 # ==============================================================================
 #  配置
 # ==============================================================================
-COLLECT_PREFIXES = ('sgrid_response', 'sgrid_H_surface_h', 'sgrid_H_surface_v', 'sgrid_H_topo_h')  # 收集前缀 / 仅收集 v2 统一 s 子网格对齐产物
+COLLECT_PREFIXES = (  # 收集前缀；新口径优先，旧 H 名称仅作兼容
+    'sgrid_response', 'sgrid_FSAF_inc_h', 'sgrid_FSAF_inc_v', 'sgrid_FSAF_1D_h', 'sgrid_FSAF_station_h',
+    'sgrid_PSA_surface_h', 'sgrid_PSA_surface_v', 'sgrid_RSAF_rock_h', 'sgrid_RSAF_1D_h', 'sgrid_URSAF_z',
+    'sgrid_H_surface_h', 'sgrid_H_surface_v', 'sgrid_H_topo_h',
+)
 SURFACE_NPZ_NAME = 'surface_results.npz'  # v2 后处理的单工况最终数值包名称
 SURFACE_NPZ_TYPE = 'SURFACE_RESULTS_NPZ'  # 供统一绘图脚本识别的最终数值包类型
 KNOWN_PREFIXES = [  # 已知前缀转换映射表 / 长度从长到短排列防截断错误
+    ('sgrid_FSAF_station_h_', 'SGRID_FSAF_STATION_H'),  # 同侧端点参考台站谱比
+    ('sgrid_FSAF_inc_h_', 'SGRID_FSAF_INC_H'),  # 相对入射波水平 FSAF
+    ('sgrid_FSAF_inc_v_', 'SGRID_FSAF_INC_V'),  # 相对水平入射波竖向 FSAF
+    ('sgrid_FSAF_1D_h_', 'SGRID_FSAF_1D_H'),  # 相对同侧真实一维自由场水平 FSAF
+    ('sgrid_PSA_surface_h_', 'SGRID_PSA_SURFACE_H'),  # 水平伪加速度反应谱
+    ('sgrid_PSA_surface_v_', 'SGRID_PSA_SURFACE_V'),  # 竖向伪加速度反应谱
+    ('sgrid_RSAF_rock_h_', 'SGRID_RSAF_ROCK_H'),  # 相对真实岩基自由场反应谱放大
+    ('sgrid_RSAF_1D_h_', 'SGRID_RSAF_1D_H'),  # 相对同侧真实一维自由场反应谱放大
+    ('sgrid_URSAF_z_', 'SGRID_URSAF_Z'),  # 统一水平岩基分母的竖向反应谱放大
     ('sgrid_H_surface_h_', 'SGRID_H_SURFACE_H'),  # 对齐水平传函（v2 重采样）
     ('sgrid_H_surface_v_', 'SGRID_H_SURFACE_V'),  # 对齐竖向传函（v2 重采样）
     ('sgrid_H_topo_h_', 'SGRID_H_TOPO_H'),  # 对齐地形谱比（v2 重采样）
@@ -63,8 +76,22 @@ AUDIT_FIELDS = [  # 结果侧审计字段 / 不以注入配置代替实际产物
     'domain_xmin', 'domain_xmax', 'domain_ymin', 'domain_ymax', 'domain_source',
     'validation_geometry', 'script_hashes_json', 'input_wave_hashes_json',
     'qa_required', 'qa_theory', 'qa_reflection', 'qa_mesh', 'qa_time', 'qa_domain',
-    'qa_energy', 'qa_external', 'overall_pass', 'qa_status', 'qa_gate_status_json',
+    'qa_energy', 'qa_external', 'qa_frf', 'qa_response_spectrum',
+    'frf_valid_bin_count', 'frf_valid_fraction', 'fsaf_identity_max_relative_error',
+    'response_spectrum_status', 'response_spectrum_period_count', 'response_spectrum_missing_references_json',
+    'response_spectrum_insufficient_coverage_json',
+    'overall_pass', 'qa_status', 'qa_gate_status_json',
 ]
+
+
+def _load_npz_no_pickle(path):  # 兼容 Abaqus NumPy 1.15/Windows 的 NPZ 路径读取缺陷
+    """只读无 pickle NPZ；Python 2 下绕开 np.load 传文件对象给旧 zipfile 的错误。"""
+    if sys.version_info[0] < 3 and hasattr(np.lib.npyio, 'NpzFile'):
+        return np.lib.npyio.NpzFile(path, allow_pickle=False)
+    try:
+        return np.load(path, allow_pickle=False)
+    except TypeError:
+        return np.load(path)
 
 
 def _read_meta(folder):  # 读取工况元数据 case_meta.json
@@ -110,10 +137,11 @@ def _sha256_file(path):  # 计算文件 SHA-256，缺失文件返回 None
 def _repo_root_for_hashes():  # 定位仓库根目录以读取固定四脚本
     candidates = []
     here = os.path.abspath(os.path.dirname(__file__))
+    candidates.append(os.path.abspath(os.path.join(here, '..')))
     candidates.append(os.path.abspath(os.path.join(here, '..', '..')))
     candidates.append(os.path.abspath(os.getcwd()))
     for candidate in candidates:
-        if os.path.isfile(os.path.join(candidate, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py')):
+        if os.path.isfile(os.path.join(candidate, 'Modeling', 'slope_frame_ssi_full_v2.py')):
             return candidate
     return None
 
@@ -139,10 +167,10 @@ def _read_model_log_audit(folder):  # 从建模日志回退读取实际节点和
 def _script_hashes(folder):  # 记录固定四脚本和工况内副本的哈希
     root = _repo_root_for_hashes()
     fixed = [
-        ('Modeling/Hybrid/slope_frame_ssi_full_v2.py', os.path.join(root, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py') if root else None),
-        ('Postprocess/Hybrid/Postprocess_All_surface_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Postprocess_All_surface_v2.py') if root else None),
-        ('Postprocess/Hybrid/Collect_All_results_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Collect_All_results_v2.py') if root else None),
-        ('Postprocess/Hybrid/Plot_Hybrid_surface_v2.py', os.path.join(root, 'Postprocess', 'Hybrid', 'Plot_Hybrid_surface_v2.py') if root else None),
+        ('Modeling/slope_frame_ssi_full_v2.py', os.path.join(root, 'Modeling', 'slope_frame_ssi_full_v2.py') if root else None),
+        ('Postprocess/Postprocess_All_surface_v2.py', os.path.join(root, 'Postprocess', 'Postprocess_All_surface_v2.py') if root else None),
+        ('Postprocess/Collect_All_results_v2.py', os.path.join(root, 'Postprocess', 'Collect_All_results_v2.py') if root else None),
+        ('Postprocess/Plot_Hybrid_surface_v2.py', os.path.join(root, 'Postprocess', 'Plot_Hybrid_surface_v2.py') if root else None),
     ]
     result = {}
     for relative, canonical in fixed:
@@ -199,6 +227,14 @@ def _audit_fields(folder, meta, config, summary):  # 组合结果侧实际审计
         'qa_theory': gates.get('theory'), 'qa_reflection': gates.get('reflection'),
         'qa_mesh': gates.get('mesh'), 'qa_time': gates.get('time'), 'qa_domain': gates.get('domain'),
         'qa_energy': gates.get('energy'), 'qa_external': gates.get('external'),
+        'qa_frf': gates.get('frf'), 'qa_response_spectrum': gates.get('response_spectrum'),
+        'frf_valid_bin_count': summary.get('frf_valid_bin_count'),
+        'frf_valid_fraction': summary.get('frf_valid_fraction'),
+        'fsaf_identity_max_relative_error': summary.get('fsaf_identity_max_relative_error'),
+        'response_spectrum_status': summary.get('response_spectrum_status'),
+        'response_spectrum_period_count': summary.get('response_spectrum_period_count'),
+        'response_spectrum_missing_references_json': json.dumps(summary.get('response_spectrum_missing_references'), ensure_ascii=True),
+        'response_spectrum_insufficient_coverage_json': json.dumps(summary.get('response_spectrum_insufficient_coverage'), ensure_ascii=True),
         'overall_pass': summary.get('overall_pass'), 'qa_status': summary.get('qa_status'),
         'qa_gate_status_json': json.dumps(gate_status, ensure_ascii=True, sort_keys=True),
     }
@@ -231,6 +267,13 @@ def _read_summary(folder):  # 读取地表响应摘要 surface_summary.json
                         'qa_required': r.get('qa_required'), 'qa_gates': r.get('qa_gates'),
                         'qa_gate_status': r.get('qa_gate_status'), 'overall_pass': r.get('overall_pass'),
                         'qa_status': r.get('qa_status'),
+                        'frf_valid_bin_count': r.get('frf_valid_bin_count'),
+                        'frf_valid_fraction': r.get('frf_valid_fraction'),
+                        'fsaf_identity_max_relative_error': r.get('fsaf_identity_max_relative_error'),
+                        'response_spectrum_status': r.get('response_spectrum_status'),
+                        'response_spectrum_period_count': r.get('response_spectrum_period_count'),
+                        'response_spectrum_missing_references': r.get('response_spectrum_missing_references'),
+                        'response_spectrum_insufficient_coverage': r.get('response_spectrum_insufficient_coverage'),
                     }
             return mapping  # 返回映射结果
     except Exception:  # 解析异常
@@ -340,7 +383,7 @@ def _npz_text(value):  # 兼容 Python 2/3 解析 NPZ 内 UTF-8 文本标量
 
 def _records_from_surface_npz(path):  # 从最终数值包中恢复记录名与场景
     """读取 manifest_json，返回包含 sgrid 响应表的 (record, scene) 列表。"""
-    package = np.load(path)  # NPZ 由同链路后处理脚本生成，不使用 pickle
+    package = _load_npz_no_pickle(path)  # NPZ 由同链路后处理脚本生成，不使用 pickle
     try:
         manifest = json.loads(_npz_text(package['manifest_json']))  # 读取内部表清单
         records = []  # 初始化记录列表
@@ -361,7 +404,7 @@ def _records_from_surface_npz(path):  # 从最终数值包中恢复记录名与�
 
 def _summary_from_surface_npz(path):  # 从最终数值包中恢复质量摘要
     """读取 surface_summary_json，返回按 record 索引的 AR_max 与 suspect 映射。"""
-    package = np.load(path)  # 打开同工况最终数值包
+    package = _load_npz_no_pickle(path)  # 打开同工况最终数值包
     try:
         if 'surface_summary_json' not in package.files:  # 兼容尚未写入摘要的旧包
             return {}  # 无摘要时交由旧版 JSON 回退
@@ -378,6 +421,13 @@ def _summary_from_surface_npz(path):  # 从最终数值包中恢复质量摘要
                     'qa_required': item.get('qa_required'), 'qa_gates': item.get('qa_gates'),
                     'qa_gate_status': item.get('qa_gate_status'), 'overall_pass': item.get('overall_pass'),
                     'qa_status': item.get('qa_status'),
+                    'frf_valid_bin_count': item.get('frf_valid_bin_count'),
+                    'frf_valid_fraction': item.get('frf_valid_fraction'),
+                    'fsaf_identity_max_relative_error': item.get('fsaf_identity_max_relative_error'),
+                    'response_spectrum_status': item.get('response_spectrum_status'),
+                    'response_spectrum_period_count': item.get('response_spectrum_period_count'),
+                    'response_spectrum_missing_references': item.get('response_spectrum_missing_references'),
+                    'response_spectrum_insufficient_coverage': item.get('response_spectrum_insufficient_coverage'),
                 }
         return mapping  # 返回可直接合并到索引的摘要
     finally:

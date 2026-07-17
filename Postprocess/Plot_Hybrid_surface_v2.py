@@ -10,7 +10,7 @@
   results/index.csv + results/SURFACE_RESULTS-*.npz（由 Collect_All_results_v2 收集）
 
 运行：
-  python Postprocess/Hybrid/Plot_Hybrid_surface_v2.py <工况根目录或 results 目录>
+  python Postprocess/Plot_Hybrid_surface_v2.py <工况根目录或 results 目录>
   不传参数则取当前目录。
 """
 
@@ -25,6 +25,16 @@ matplotlib.use('Agg')  # 使用无界面后端
 import matplotlib.pyplot as plt  # 导入绘图子模块
 import matplotlib.ticker as mticker  # 导入刻度定位器
 import matplotlib.font_manager as fm  # 导入字体管理器
+
+
+def _load_npz_no_pickle(path):  # 兼容 Abaqus NumPy 1.15/Windows 的 NPZ 路径读取缺陷
+    """只读无 pickle NPZ；Python 2 下直接以路径构造 NpzFile。"""
+    if sys.version_info[0] < 3 and hasattr(np.lib.npyio, 'NpzFile'):
+        return np.lib.npyio.NpzFile(path, allow_pickle=False)
+    try:
+        return np.load(path, allow_pickle=False)
+    except TypeError:
+        return np.load(path)
 
 
 # ==============================================================================
@@ -199,7 +209,7 @@ def _npz_text(value):  # 解析 NPZ 内的 UTF-8 标量文本
 
 def read_sgrid_response_npz(path, record):  # 从单工况 NPZ 读取指定记录的 s 网格响应表
     """按 manifest_json 定位 sgrid_response_<record>.csv 并返回 DataFrame。"""
-    package = np.load(path)  # NPZ 只含数值与 UTF-8 文本数组，不使用 pickle
+    package = _load_npz_no_pickle(path)  # NPZ 只含数值与 UTF-8 文本数组，不使用 pickle
     try:
         manifest = json.loads(_npz_text(package['manifest_json']))
         target = 'sgrid_response_%s.csv' % record

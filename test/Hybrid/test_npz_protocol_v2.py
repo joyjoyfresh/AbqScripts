@@ -7,6 +7,8 @@ import json
 import os
 import sys
 import tempfile
+import shutil
+import csv
 sys.modules['abaqusConstants'] = None
 sys.modules['odbAccess'] = None
 
@@ -14,10 +16,23 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-POSTPROCESS_DIR = os.path.join(REPO, 'Postprocess', 'Hybrid')
+POSTPROCESS_DIR = os.path.join(REPO, 'Postprocess')
 if POSTPROCESS_DIR not in sys.path:
     sys.path.insert(0, POSTPROCESS_DIR)
 import Postprocess_All_surface_v2 as post
+
+
+try:
+    _TemporaryDirectory = tempfile.TemporaryDirectory
+except AttributeError:
+    class _TemporaryDirectory(object):
+        """为 Abaqus Python 2.7 提供最小临时目录上下文管理器。"""
+        def __enter__(self):
+            self.path = tempfile.mkdtemp()
+            return self.path
+
+        def __exit__(self, _type, _value, _traceback):
+            shutil.rmtree(self.path)
 
 
 def main():
@@ -54,15 +69,47 @@ def main():
     assert 'raw_ricker-flat_acc_h' in payload
     assert 'raw_ricker-flat_qa_theory_json' in payload
     assert len(manifest) == 15
-    with tempfile.TemporaryDirectory() as folder:
+    with _TemporaryDirectory() as folder:
         path = os.path.join(folder, 'surface_results.npz')
         np.savez_compressed(path, **payload)
-        package = np.load(path)
+        package = post._load_npz_no_pickle(path)
         try:
             assert package['raw_ricker-flat_acc_h'].shape == (2, 101)
             assert json.loads(package['raw_ricker-flat_qa_reflection_json'].item())['status'] == 'not_computed'
         finally:
             package.close()
+
+    with _TemporaryDirectory() as folder:
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(folder)
+            fh = post._open_csv('surface_response_demo.csv')
+            try:
+                writer = csv.writer(fh)
+                writer.writerow(['x', 'PGA_h'])
+                writer.writerow([0.0, 1.0])
+            finally:
+                fh.close()
+            with open('surface_summary.json', 'wb') as fh:
+                fh.write(json.dumps({'schema_version': 2, 'records': [{'record': 'demo'}]}).encode('utf-8'))
+            spectral = {'demo': {'frf': {
+                'frequency': np.asarray([1.0]),
+                'H_surface_h': np.asarray([[2.0 + 0.5j]]),
+                'valid_mask': np.asarray([True]),
+                'quality_json': json.dumps({'status': 'passed'}),
+            }}}
+            post.write_surface_npz({}, {}, spectral_results=spectral)
+            package = post._load_npz_no_pickle(post.NPZ_FILENAME)
+            try:
+                assert int(package['schema_version']) == 2
+                assert np.iscomplexobj(package['frf_demo_H_surface_h'])
+                assert package['frf_demo_valid_mask'].dtype == np.dtype(bool)
+            finally:
+                package.close()
+            assert post.write_surface_xlsx_from_npz() == 2
+            assert os.path.isfile(post.XLSX_FILENAME)
+        finally:
+            os.chdir(old_cwd)
 
     base_summary = {
         'qa_farfield_basis': 'upstream_left',
@@ -85,13 +132,16 @@ def main():
 
     theory_only = post.evaluate_qa_gates(base_summary, {'qa_cfg': {'required': ['theory']}}, raw_not_ready)
     assert theory_only['overall_pass'] is True
+    nested_theory_only = post.evaluate_qa_gates(
+        base_summary, {'run_cfg': {'qa_cfg': {'required': ['theory']}}}, raw_not_ready)
+    assert nested_theory_only['overall_pass'] is True
 
     base_summary['suspect'] = True
     window_fail = post.evaluate_qa_gates(base_summary, {'qa_cfg': {'required': ['theory', 'time']}}, raw_not_ready)
     assert window_fail['qa_gates']['theory'] is False
     assert window_fail['qa_gates']['time'] is True
     assert window_fail['overall_pass'] is False
-    print('test_npz_protocol_v2: 7/7 ok')
+    print('test_npz_protocol_v2: 10/10 ok')
 
 
 if __name__ == '__main__':

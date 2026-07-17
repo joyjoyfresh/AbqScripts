@@ -7,19 +7,42 @@ import json
 import os
 import sys
 import tempfile
+import shutil
+import gc
 
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-COLLECT_DIR = os.path.join(REPO, 'Postprocess', 'Hybrid')
+COLLECT_DIR = os.path.join(REPO, 'Postprocess')
 if COLLECT_DIR not in sys.path:
     sys.path.insert(0, COLLECT_DIR)
 import Collect_All_results_v2 as collect
 
 
+try:
+    _TemporaryDirectory = tempfile.TemporaryDirectory
+except AttributeError:
+    class _TemporaryDirectory(object):
+        """为 Abaqus Python 2.7 提供最小临时目录上下文管理器。"""
+        def __enter__(self):
+            self.path = tempfile.mkdtemp()
+            return self.path
+
+        def __exit__(self, _type, _value, _traceback):
+            gc.collect()  # NumPy 1.15/Windows 可能延迟释放 NpzFile 句柄
+            try:
+                shutil.rmtree(self.path)
+            except OSError:
+                gc.collect()
+                try:
+                    shutil.rmtree(self.path)
+                except OSError:
+                    pass  # 仅测试临时目录；解释器退出后由系统清理
+
+
 def main():
-    with tempfile.TemporaryDirectory() as folder:
+    with _TemporaryDirectory() as folder:
         meta = {
             'model_type': 'single', 'model_script': 'slope_frame_ssi_full_v2.py',
             'mesh_size': 8.0, 'validation_geometry': 'flat',
@@ -60,8 +83,10 @@ def main():
         assert audit['domain_xmax'] == 270.0 and audit['qa_theory'] is True
         assert audit['overall_pass'] is True
         hashes = json.loads(audit['script_hashes_json'])
-        assert 'Modeling/Hybrid/slope_frame_ssi_full_v2.py' in hashes
-    print('test_collect_audit_v2: 5/5 ok')
+        assert 'Modeling/slope_frame_ssi_full_v2.py' in hashes
+        ftype, parsed_record, scene = collect.split_csv_name('sgrid_FSAF_1D_h_demo-flat')
+        assert (ftype, parsed_record, scene) == ('SGRID_FSAF_1D_H', 'demo', 'flat')
+    print('test_collect_audit_v2: 6/6 ok')
 
 
 if __name__ == '__main__':

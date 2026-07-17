@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""坡地模型地表响应统一后处理 v2（PGA + AF/TAF + H(f) + 三段重采样，配 slope_frame_ssi_full_v1.py）。
+"""坡地模型地表响应统一后处理 v2（PGA + AF/TAF + 复频响/FSAF + 5% PSA/RSAF + 三段重采样）。
 
 v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的重采样——把逐节点曲线与 H(f,s) 曲面
 按三段（坡顶平台A/坡面B/坡脚平台C）插值到统一 s 子网格（N_A=120/N_B=60/N_C=80，段A 近坡顶棱加密），
@@ -18,12 +18,12 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
        DUTAF_v = (PGA_v - PGA_v_ff) / PGA_R_ff   —— 地形额外诱发的竖向响应增量
        V/H   = PGA_v / PGA_h                    —— 同点竖横比
      同侧规则：x ≤ x_toe（坡顶平台+坡面）用 left 柱，x > x_toe（坡脚平台）用 right 柱。
-  3. 频域传函（线弹性前提；tssi 非线性/EQL 开启时曲线仅供参考）：
-       H_h(x,f)     = |FFT(a1_surf)| / |FFT(a_in)|            —— 相对输入的水平传函
-       H_v(x,f)     = |FFT(a2_surf)| / |FFT(a_in)|            —— 竖向传函（同一水平输入分母）
-       Htopo_h(x,f) = |FFT(a1_surf)| / |FFT(a1_同侧远场参考)|  —— 参考台站谱比，纯地形放大谱
-     输入谱幅 < SPEC_MASK_RATIO×峰值的频点直接剔除（0/0 噪声），频带再截 [F_LO, FMAX_FACTOR×fc]。
-  4. QA：垂直入射检查两端；斜入射检查传播上游端，避免把下游坡体散射误判为边界输入误差。
+  3. 复频响与傅里叶谱放大：规范 NPZ 保存复数 H、相位所需信息和显式 valid_mask；
+     FSAF=|H| 只作为确定性派生视图；真实一维参考齐全时另算 FSAF_1D。
+     同侧端点分母另记 station_ratio，禁止误称匹配均质坡 H_topo。
+  4. 反应谱：计算 5% 阻尼弹性伪加速度谱 PSA；只有配置了同一记录的真实 rock/1D 参考时才计算
+     RSAF_rock、RSAF_1D 和 URSAF_z，缺参考或分母过小时写 NaN+valid_mask，不以 epsilon 造峰。
+  5. QA：垂直入射检查两端；斜入射检查传播上游端，并独立记录频响与反应谱协议状态。
 
 输入：job-*.odb + case_meta.json + 输入波 txt（路径优先取 case_config.json 的 run_cfg.wave_files，
       按文件名主干与记录名匹配；缺省回退工况目录下同名 .txt）。
@@ -75,6 +75,12 @@ PAD_FACTOR = 4           # FFT 补零倍数（防卷绕，与建模脚本 fd 引
 QA_TOL = 0.05            # 远场 AF_h 对拍一维理论台阶的相对误差阈值（±5%）
 TAFV_GUARD = 0.05        # taf_v 低于该值视为"竖向自由场≈0"（垂直入射），TAF_v 置 NaN 防除零
 SAFE_DENOM_EPS = 1e-30   # 分母安全阈值：只用于判定无效分母，不用小量强行制造比值
+RSA_DENOM_RATIO = 1e-8   # 反应谱分母相对峰值阈值：低于此值的周期点置为无效
+RSA_DAMPING = 0.05       # 默认反应谱阻尼比
+RSA_PERIOD_MIN = 0.10    # 默认反应谱最小周期(s)，PGA 不混入 T=0
+RSA_PERIOD_MAX = 2.00    # 默认反应谱最大周期(s)
+RSA_PERIOD_COUNT = 40    # 默认反应谱对数等距点数
+RSA_KEY_PERIODS = (0.10, 0.20, 0.50, 1.00, 2.00)  # 论文单列的关键周期(s)
 
 
 _DEFAULT_SCRIPT_NAME = 'Postprocess_All_surface_v2.py'  # __file__ 缺失时的兜底文件名
@@ -177,33 +183,174 @@ def to_uniform(t, sig_mat):
     return t, sig_mat, dt
 
 
-def compute_H(a_out_mat, a_in, dt, fc=None):
-    """计算幅值传函矩阵 |H(x,f)| = |FFT(a_out)| / |FFT(a_in)|，只保留可靠频带。
+def _padded_fft_length(n):  # 统一计算补零后的 FFT 长度
+    """返回不小于 ``PAD_FACTOR*n`` 的最小 2 的幂。"""
+    nfft = 1
+    while nfft < PAD_FACTOR * int(n):
+        nfft *= 2
+    return nfft
 
-    a_out_mat : 节点×时刻 加速度矩阵；a_in：输入加速度（自动补零对齐长度）；dt：采样步长。
-    fc        : 输入主频(Hz)，给定时上限截 FMAX_FACTOR×fc，否则只按谱掩码与 F_LO。
-    返回 (freqs, H)：freqs 为保留频点，H 为 节点×频点 幅值矩阵。
+
+def compute_complex_H(a_out_mat, a_ref, dt, fc=None):
+    """计算候选物理频带上的复频响并显式返回输入谱有效掩码。
+
+    返回 ``(freqs, H_complex, valid_mask, A_ref)``。候选轴先按 ``F_LO`` 和可选网格上限裁剪，
+    再按候选带内参考谱峰值执行幅值掩码；无效频点写复 NaN。这样既保留显式无效点，
+    又避免把整个 Nyquist 高频区的 NaN 矩阵写入规范数据包。
     """
     a_out_mat = np.atleast_2d(np.asarray(a_out_mat, dtype=float))
-    a_in = np.asarray(a_in, dtype=float)
-    n = max(a_out_mat.shape[1], a_in.size)  # 以较长者定 FFT 基准长度
-    nfft = 1
-    while nfft < PAD_FACTOR * n:  # 补零至 4 倍长度的 2 的幂（防卷绕 + 加密频轴）
-        nfft *= 2
-    A_in = np.fft.rfft(a_in, n=nfft)  # 输入单边谱
-    A_out = np.fft.rfft(a_out_mat, n=nfft, axis=1)  # 各节点单边谱
-    freqs = np.fft.rfftfreq(nfft, dt)  # 频率轴
-    keep = np.abs(A_in) >= SPEC_MASK_RATIO * float(np.max(np.abs(A_in)))  # 谱幅值掩码：输入没能量的频点剔除
-    keep &= freqs >= F_LO  # 下限截断
-    if fc:  # 上限截断（网格只保证到 FMAX_FACTOR×fc）
-        keep &= freqs <= FMAX_FACTOR * float(fc)
-    keep[0] = False  # 排除直流分量
-    return freqs[keep], np.abs(A_out[:, keep]) / np.abs(A_in[keep])[None, :]
+    a_ref = np.asarray(a_ref, dtype=float).reshape(-1)
+    if a_out_mat.shape[1] < 2 or a_ref.size < 2:
+        raise ValueError('复频响至少需要 2 个时程点')
+    if not np.isfinite(float(dt)) or float(dt) <= 0.0:
+        raise ValueError('复频响采样步长 dt 必须为正数')
+    n = max(a_out_mat.shape[1], a_ref.size)  # 以较长者定 FFT 基准长度
+    nfft = _padded_fft_length(n)  # 补零至 4 倍长度的 2 的幂（防卷绕 + 加密频轴）
+    A_ref_full = np.fft.rfft(a_ref, n=nfft)  # 参考单边谱
+    A_out_full = np.fft.rfft(a_out_mat, n=nfft, axis=1)  # 各节点单边谱
+    freqs_full = np.fft.rfftfreq(nfft, dt)  # 完整频率轴
+    candidate = freqs_full >= F_LO
+    if fc is not None and float(fc) > 0.0:
+        candidate &= freqs_full <= FMAX_FACTOR * float(fc)
+    freqs = freqs_full[candidate]
+    A_ref = A_ref_full[candidate]
+    A_out = A_out_full[:, candidate]
+    del A_ref_full, A_out_full, freqs_full  # 尽早释放完整 Nyquist 谱，降低 Abaqus 内核峰值内存
+    ref_abs = np.abs(A_ref)
+    ref_peak = float(np.max(ref_abs)) if ref_abs.size else 0.0
+    keep = np.zeros(freqs.shape, dtype=bool)
+    if np.isfinite(ref_peak) and ref_peak > SAFE_DENOM_EPS:
+        keep = ref_abs >= SPEC_MASK_RATIO * ref_peak  # 参考没能量的频点不得相除
+    H_complex = np.empty(A_out.shape, dtype=np.complex128)
+    H_complex[:] = complex(float('nan'), float('nan'))
+    if np.any(keep):
+        H_complex[:, keep] = A_out[:, keep] / A_ref[keep][None, :]
+    return freqs, H_complex, keep, A_ref
+
+
+def compute_H(a_out_mat, a_in, dt, fc=None):
+    """兼容旧调用的 FSAF 视图：返回可靠频点及 ``|H_complex|``。"""
+    freqs, H_complex, valid_mask, _unused_ref = compute_complex_H(a_out_mat, a_in, dt, fc=fc)
+    return freqs[valid_mask], np.abs(H_complex[:, valid_mask])
 
 
 def spectral_ratio(a_out_mat, a_ref, dt, fc=None):
-    """参考台站谱比 |FFT(a_out)|/|FFT(a_ref)|（分母换成远场参考节点，掩码规则同 compute_H）。"""
+    """兼容旧调用的参考台站幅值谱比，不能解释为匹配均质坡地形传函。"""
     return compute_H(a_out_mat, a_ref, dt, fc=fc)
+
+
+def _safe_array_ratio(num, den, threshold_ratio=RSA_DENOM_RATIO):
+    """按真实分母阈值计算数组比值，返回 ``(ratio, valid_mask)``。
+
+    ``den`` 可按 NumPy 广播到 ``num``；阈值相对分母有限值峰值确定。无效位置使用 NaN，
+    临时安全分母只用于避免运行期除零，绝不作为结果中的 epsilon 分母。
+    """
+    num = np.asarray(num, dtype=float)
+    den = np.asarray(den, dtype=float)
+    finite_den = np.isfinite(den)
+    peak = float(np.max(np.abs(den[finite_den]))) if np.any(finite_den) else 0.0
+    threshold = max(SAFE_DENOM_EPS, float(threshold_ratio) * peak)
+    den_valid = np.zeros(den.shape, dtype=bool)
+    if np.any(finite_den):
+        den_valid[finite_den] = np.abs(den[finite_den]) > threshold  # 严格浮点模式下不对 NaN 做 abs/比较
+    safe_den = np.where(den_valid, den, 1.0)
+    finite_num = np.isfinite(num)
+    safe_num = np.where(finite_num, num, 0.0)
+    ratio = safe_num / safe_den
+    valid = finite_num & den_valid
+    ratio = np.where(valid, ratio, np.nan)
+    return ratio, valid
+
+
+def response_spectrum_periods(case_cfg=None):
+    """读取反应谱配置并返回严格递增的正周期数组和阻尼比。
+
+    配置位于 ``run_cfg.response_spectrum_cfg``；可显式给 ``periods``，否则使用
+    ``period_min/period_max/period_count`` 生成对数等距网格。
+    """
+    run_cfg = (case_cfg or {}).get('run_cfg') or {}
+    cfg = run_cfg.get('response_spectrum_cfg') or {}
+    damping = float(cfg.get('damping_ratio', RSA_DAMPING))
+    if not (0.0 <= damping < 1.0):
+        raise ValueError('反应谱阻尼比必须满足 0<=damping_ratio<1')
+    explicit = cfg.get('periods')
+    if explicit is not None:
+        periods = np.asarray(explicit, dtype=float).reshape(-1)
+    else:
+        p_min = float(cfg.get('period_min', RSA_PERIOD_MIN))
+        p_max = float(cfg.get('period_max', RSA_PERIOD_MAX))
+        count = int(cfg.get('period_count', RSA_PERIOD_COUNT))
+        if p_min <= 0.0 or p_max <= p_min or count < 2:
+            raise ValueError('反应谱周期配置必须满足 0<period_min<period_max 且 period_count>=2')
+        periods = np.exp(np.linspace(math.log(p_min), math.log(p_max), count))
+    periods = np.unique(periods[np.isfinite(periods) & (periods > 0.0)])
+    if periods.size == 0:
+        raise ValueError('反应谱周期数组没有有效正值')
+    return periods, damping
+
+
+def compute_psa(acc_mat, dt, periods, damping=RSA_DAMPING):
+    """用 Newmark 平均加速度法计算弹性单自由度伪加速度反应谱。
+
+    ``acc_mat`` 为 ``记录/节点×时刻``，返回 ``记录/节点×周期``；单位与输入加速度一致。
+    算法采用 ``beta=1/4``、``gamma=1/2``，不混入 ``T=0`` 的 PGA。
+    """
+    acc_mat = np.atleast_2d(np.asarray(acc_mat, dtype=float))
+    periods = np.asarray(periods, dtype=float).reshape(-1)
+    dt = float(dt)
+    damping = float(damping)
+    if acc_mat.shape[1] < 2 or dt <= 0.0:
+        raise ValueError('反应谱至少需要 2 个时程点且 dt>0')
+    if periods.size == 0 or np.any(~np.isfinite(periods)) or np.any(periods <= 0.0):
+        raise ValueError('反应谱周期必须为有限正数')
+    if not (0.0 <= damping < 1.0):
+        raise ValueError('反应谱阻尼比必须满足 0<=damping<1')
+    beta = 0.25
+    gamma = 0.5
+    omega = (2.0 * math.pi / periods)[None, :]
+    stiffness = omega * omega
+    viscous = 2.0 * damping * omega
+    denom = 1.0 + gamma * dt * viscous + beta * dt * dt * stiffness
+    shape = (acc_mat.shape[0], periods.size)
+    disp = np.zeros(shape, dtype=float)
+    vel = np.zeros(shape, dtype=float)
+    rel_acc = -acc_mat[:, 0][:, None] * np.ones((1, periods.size), dtype=float)
+    max_abs_disp = np.abs(disp)
+    for index in range(1, acc_mat.shape[1]):
+        disp_pred = disp + dt * vel + dt * dt * (0.5 - beta) * rel_acc
+        vel_pred = vel + dt * (1.0 - gamma) * rel_acc
+        rel_acc = (-acc_mat[:, index][:, None] - viscous * vel_pred - stiffness * disp_pred) / denom
+        disp = disp_pred + beta * dt * dt * rel_acc
+        vel = vel_pred + gamma * dt * rel_acc
+        max_abs_disp = np.maximum(max_abs_disp, np.abs(disp))
+    return stiffness * max_abs_disp
+
+
+def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs, excitation_valid, fc=None):
+    """计算相对同侧真实一维参考时程的复谱比及二维有效掩码。
+
+    结果仅在入射波与对应一维参考谱同时有效时保留；缺少任一侧参考时，该侧保持复NaN。
+    """
+    acc_h = np.atleast_2d(np.asarray(acc_h, dtype=float))
+    xs = np.asarray(xs, dtype=float)
+    freqs = np.asarray(freqs, dtype=float)
+    excitation_valid = np.asarray(excitation_valid, dtype=bool)
+    transfer = np.empty((acc_h.shape[0], freqs.size), dtype=np.complex128)
+    transfer[:] = complex(float('nan'), float('nan'))
+    valid = np.zeros(transfer.shape, dtype=bool)
+    left_mask = xs <= float(x_toe)
+    for node_mask, reference, side in ((left_mask, ref_left, 'left'), (~left_mask, ref_right, 'right')):
+        if reference is None or not np.any(node_mask):
+            continue
+        side_freqs, side_transfer, side_valid, _unused = compute_complex_H(
+            acc_h[node_mask], reference, dt, fc=fc)
+        if side_freqs.shape != freqs.shape or not np.allclose(side_freqs, freqs):
+            raise RuntimeError('%s 一维参考谱比频轴与入射频响不一致' % side)
+        shared = excitation_valid & side_valid
+        for local_index, global_index in enumerate(np.where(node_mask)[0]):
+            transfer[global_index, shared] = side_transfer[local_index, shared]
+            valid[global_index, shared] = True
+    return transfer, valid
 
 
 def _safe_ratio(num, den):  # 安全除法
@@ -310,7 +457,8 @@ def farfield_qa(rows, taf_lr, incident_angle=0.0):
     return err_l, err_r, suspect, basis
 
 
-QA_GATE_NAMES = ('theory', 'reflection', 'mesh', 'time', 'domain', 'energy', 'external')  # 第三章强制 QA 门槛名称
+QA_DEFAULT_GATE_NAMES = ('theory', 'reflection', 'mesh', 'time', 'domain', 'energy', 'external')  # 既有默认强制门槛
+QA_GATE_NAMES = QA_DEFAULT_GATE_NAMES + ('frf', 'response_spectrum')  # 新门槛仅在 required 显式列出时强制
 try:
     _QA_STRING_TYPES = (basestring,)  # Python 2/Abaqus 中同时覆盖 str 与 unicode
 except NameError:
@@ -340,6 +488,14 @@ def _qa_json_payload(raw_data, field):  # 从 NPZ 原始记录中读取 JSON QA 
         except Exception:
             return {}
     return {}
+
+
+def _qa_config(case_cfg):  # 兼容旧顶层并优先使用生产规范中的 run_cfg.qa_cfg
+    """返回合并后的 QA 配置；顶层 ``qa_cfg`` 仅用于兼容旧工况。"""
+    case_cfg = case_cfg or {}
+    merged = dict(((case_cfg.get('run_cfg') or {}).get('qa_cfg') or {}))
+    merged.update(case_cfg.get('qa_cfg') or {})
+    return merged
 
 
 def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取各类 QA 门槛
@@ -395,11 +551,13 @@ def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取
         'domain': summary_gate('domain'),
         'energy': energy_pass,
         'external': summary_gate('external'),
+        'frf': summary_gate('frf'),
+        'response_spectrum': summary_gate('response_spectrum'),
     }
-    qa_cfg = case_cfg.get('qa_cfg') or {}
+    qa_cfg = _qa_config(case_cfg)
     required = qa_cfg.get('required')
     if required is None:
-        required = list(QA_GATE_NAMES)
+        required = list(QA_DEFAULT_GATE_NAMES)  # 不让新增后处理门槛破坏既有第三章工况
     elif isinstance(required, _QA_STRING_TYPES):
         required = [required]
     required = [str(name) for name in required if str(name) in QA_GATE_NAMES]
@@ -441,6 +599,188 @@ def find_wave_file(record, case_cfg):
             return p
     exist = [p for p in cands if os.path.isfile(p)]  # 无精确匹配时
     return exist[0] if len(exist) == 1 else None  # 仅剩单一候选才敢兜底
+
+
+def _response_spectrum_cfg(case_cfg):  # 读取嵌套反应谱配置
+    """返回 ``run_cfg.response_spectrum_cfg``，避免增加生产配置顶层键。"""
+    return (((case_cfg or {}).get('run_cfg') or {}).get('response_spectrum_cfg') or {})
+
+
+def _response_reference_spec(record, case_cfg):  # 读取逐记录真实参考文件配置
+    """返回逐记录参考文件字典。
+
+    规范键为 ``rock``、``one_d_left``、``one_d_right``；``one_d`` 可表示左右共用同一参考。
+    配置位于 ``run_cfg.response_spectrum_cfg.reference_files.<record>``，并支持 ``default`` 兜底。
+    """
+    refs = _response_spectrum_cfg(case_cfg).get('reference_files') or {}
+    if not isinstance(refs, dict):
+        return {}
+    spec = refs.get(record)
+    if spec is None:
+        spec = refs.get('default')
+    return spec if isinstance(spec, dict) else {}
+
+
+def _load_reference_series(path, target_time):  # 载入并对齐真实自由场参考时程
+    """读取两列 ``time, acceleration`` 文件并插值到 ODB 时间轴，返回时程与审计信息。"""
+    if not path:
+        return None, {'status': 'not_configured'}
+    source = os.path.abspath(str(path)) if not os.path.isabs(str(path)) else str(path)
+    if not os.path.isfile(source):
+        return None, {'status': 'missing', 'path': source}
+    try:
+        table = np.asarray(np.loadtxt(source), dtype=float)
+        if table.ndim != 2 or table.shape[0] < 2 or table.shape[1] < 2:
+            raise ValueError('参考文件必须至少包含两行两列 time, acceleration')
+        ref_time = table[:, 0]
+        ref_acc = table[:, 1]
+        if np.any(~np.isfinite(ref_time)) or np.any(~np.isfinite(ref_acc)) or np.any(np.diff(ref_time) <= 0.0):
+            raise ValueError('参考时程包含非有限值或时间列不严格递增')
+        target_time = np.asarray(target_time, dtype=float)
+        aligned = np.interp(target_time, ref_time, ref_acc, left=0.0, right=0.0)
+        covered = (target_time >= ref_time[0]) & (target_time <= ref_time[-1])
+        return aligned, {'status': 'loaded', 'path': source,
+                         'source_time_range': [float(ref_time[0]), float(ref_time[-1])],
+                         'target_coverage_fraction': float(np.mean(covered))}
+    except Exception as exc:
+        return None, {'status': 'invalid', 'path': source, 'error': str(exc)}
+
+
+def compute_response_spectrum_payload(record, xs, x_toe, time_axis, acc_h, acc_v, dt, case_cfg):
+    """计算单条记录的 PSA、RSAF/URSAF、真实参考时程及质量协议字段。"""
+    cfg = _response_spectrum_cfg(case_cfg)
+    if _qa_bool(cfg.get('enable', True)) is False:
+        return None
+    periods, damping = response_spectrum_periods(case_cfg)
+    key_periods = np.asarray(cfg.get('key_periods', RSA_KEY_PERIODS), dtype=float).reshape(-1)
+    key_periods = np.unique(key_periods[np.isfinite(key_periods) & (key_periods > 0.0)])
+    if key_periods.size == 0:
+        raise ValueError('反应谱 key_periods 没有有效正值')
+    denominator_ratio = float(cfg.get('denominator_ratio', RSA_DENOM_RATIO))
+    min_reference_coverage = float(cfg.get('reference_min_coverage', 0.99))
+    if denominator_ratio < 0.0:
+        raise ValueError('反应谱 denominator_ratio 不得为负数')
+    if not (0.0 < min_reference_coverage <= 1.0):
+        raise ValueError('反应谱 reference_min_coverage 必须在 (0,1] 内')
+    xs = np.asarray(xs, dtype=float)
+    all_periods = np.unique(np.concatenate([periods, key_periods]))  # 合并计算，避免重复遍历长时程
+    period_indices = np.asarray([int(np.argmin(np.abs(all_periods - value))) for value in periods], dtype=int)
+    key_indices = np.asarray([int(np.argmin(np.abs(all_periods - value))) for value in key_periods], dtype=int)
+    all_psa_h = compute_psa(acc_h, dt, all_periods, damping=damping)
+    all_psa_v = compute_psa(acc_v, dt, all_periods, damping=damping)
+    psa_h, psa_v = all_psa_h[:, period_indices], all_psa_v[:, period_indices]
+    key_psa_h, key_psa_v = all_psa_h[:, key_indices], all_psa_v[:, key_indices]
+    nan_ref = np.nan * np.ones(periods.shape, dtype=float)
+    nan_key_ref = np.nan * np.ones(key_periods.shape, dtype=float)
+    nan_surface = np.nan * np.ones(psa_h.shape, dtype=float)
+    nan_key_surface = np.nan * np.ones(key_psa_h.shape, dtype=float)
+    false_surface = np.zeros(psa_h.shape, dtype=bool)
+    false_key_surface = np.zeros(key_psa_h.shape, dtype=bool)
+
+    spec = _response_reference_spec(record, case_cfg)
+    common_1d = spec.get('one_d')
+    paths = {
+        'rock': spec.get('rock'),
+        'one_d_left': spec.get('one_d_left') or common_1d,
+        'one_d_right': spec.get('one_d_right') or common_1d,
+    }
+    references = {}
+    reference_audit = {}
+    reference_psa = {}
+    reference_key_psa = {}
+    for name in ('rock', 'one_d_left', 'one_d_right'):
+        series, audit = _load_reference_series(paths.get(name), time_axis)
+        references[name] = series
+        reference_audit[name] = audit
+        if series is not None:
+            all_reference_psa = compute_psa(series, dt, all_periods, damping=damping)[0]
+            reference_psa[name] = all_reference_psa[period_indices]
+            reference_key_psa[name] = all_reference_psa[key_indices]
+        else:
+            reference_psa[name] = nan_ref.copy()
+            reference_key_psa[name] = nan_key_ref.copy()
+
+    if references['rock'] is not None:
+        rsaf_rock_h, rsaf_rock_valid = _safe_array_ratio(psa_h, reference_psa['rock'][None, :], denominator_ratio)
+        ursaf_z, ursaf_z_valid = _safe_array_ratio(psa_v, reference_psa['rock'][None, :], denominator_ratio)
+    else:
+        rsaf_rock_h, rsaf_rock_valid = nan_surface.copy(), false_surface.copy()
+        ursaf_z, ursaf_z_valid = nan_surface.copy(), false_surface.copy()
+    if references['rock'] is not None:
+        key_rsaf_rock_h, key_rsaf_rock_valid = _safe_array_ratio(
+            key_psa_h, reference_key_psa['rock'][None, :], denominator_ratio)
+        key_ursaf_z, key_ursaf_z_valid = _safe_array_ratio(
+            key_psa_v, reference_key_psa['rock'][None, :], denominator_ratio)
+    else:
+        key_rsaf_rock_h, key_rsaf_rock_valid = nan_key_surface.copy(), false_key_surface.copy()
+        key_ursaf_z, key_ursaf_z_valid = nan_key_surface.copy(), false_key_surface.copy()
+
+    left_mask = xs <= float(x_toe)
+    side_reference = np.nan * np.ones(psa_h.shape, dtype=float)
+    if references['one_d_left'] is not None:
+        side_reference[left_mask, :] = reference_psa['one_d_left'][None, :]
+    if references['one_d_right'] is not None and np.any(~left_mask):
+        side_reference[~left_mask, :] = reference_psa['one_d_right'][None, :]
+    rsaf_1d_h, rsaf_1d_valid = _safe_array_ratio(psa_h, side_reference, denominator_ratio)
+    key_side_reference = np.nan * np.ones(key_psa_h.shape, dtype=float)
+    if references['one_d_left'] is not None:
+        key_side_reference[left_mask, :] = reference_key_psa['one_d_left'][None, :]
+    if references['one_d_right'] is not None and np.any(~left_mask):
+        key_side_reference[~left_mask, :] = reference_key_psa['one_d_right'][None, :]
+    key_rsaf_1d_h, key_rsaf_1d_valid = _safe_array_ratio(key_psa_h, key_side_reference, denominator_ratio)
+
+    required_refs = ['rock']
+    if np.any(left_mask):
+        required_refs.append('one_d_left')
+    if np.any(~left_mask):
+        required_refs.append('one_d_right')
+    missing = [name for name in required_refs if references.get(name) is None]
+    insufficient_coverage = [name for name in required_refs
+                             if references.get(name) is not None and
+                             float(reference_audit[name].get('target_coverage_fraction', 0.0)) < min_reference_coverage]
+    finite_psa = bool(np.all(np.isfinite(psa_h)) and np.all(np.isfinite(psa_v)))
+    protocol_pass = bool(finite_psa and not missing and not insufficient_coverage and
+                         np.any(rsaf_rock_valid) and np.any(rsaf_1d_valid))
+    quality = {
+        'status': 'passed' if protocol_pass else ('partial' if finite_psa else 'failed'),
+        'passed': protocol_pass,
+        'record': record,
+        'method': 'Newmark_average_acceleration_beta_0.25_gamma_0.5_PSA',
+        'damping_ratio': damping,
+        'period_count': int(periods.size),
+        'period_range_s': [float(periods[0]), float(periods[-1])],
+        'key_periods_s': [float(value) for value in key_periods],
+        'denominator_ratio': denominator_ratio,
+        'reference_min_coverage': min_reference_coverage,
+        'reference_type': 'exact_time_history_files_only',
+        'reference_audit': reference_audit,
+        'missing_required_references': missing,
+        'insufficient_coverage_references': insufficient_coverage,
+        'note': '缺少真实参考时不以 factor_h*input 或 epsilon 分母代替',
+    }
+    return {
+        'period': periods, 'damping_ratio': np.asarray(damping), 'x': xs,
+        'key_period': key_periods,
+        'PSA_surface_h': psa_h, 'PSA_surface_v': psa_v,
+        'PSA_rock_h': reference_psa['rock'],
+        'PSA_1D_left_h': reference_psa['one_d_left'],
+        'PSA_1D_right_h': reference_psa['one_d_right'],
+        'RSAF_rock_h': rsaf_rock_h, 'RSAF_rock_valid_mask': rsaf_rock_valid,
+        'RSAF_1D_h': rsaf_1d_h, 'RSAF_1D_valid_mask': rsaf_1d_valid,
+        'URSAF_z': ursaf_z, 'URSAF_z_valid_mask': ursaf_z_valid,
+        'key_PSA_surface_h': key_psa_h, 'key_PSA_surface_v': key_psa_v,
+        'key_PSA_rock_h': reference_key_psa['rock'],
+        'key_PSA_1D_left_h': reference_key_psa['one_d_left'],
+        'key_PSA_1D_right_h': reference_key_psa['one_d_right'],
+        'key_RSAF_rock_h': key_rsaf_rock_h, 'key_RSAF_rock_valid_mask': key_rsaf_rock_valid,
+        'key_RSAF_1D_h': key_rsaf_1d_h, 'key_RSAF_1D_valid_mask': key_rsaf_1d_valid,
+        'key_URSAF_z': key_ursaf_z, 'key_URSAF_z_valid_mask': key_ursaf_z_valid,
+        'reference_rock_acc_h': references['rock'],
+        'reference_1D_left_acc_h': references['one_d_left'],
+        'reference_1D_right_acc_h': references['one_d_right'],
+        'quality_json': json.dumps(quality, ensure_ascii=True, sort_keys=True),
+        'quality': quality,
+    }
 
 
 def meta_pieces(meta):
@@ -596,7 +936,7 @@ def energy_qa_payload(energy, case_cfg=None):  # 计算人工能量比和能量�
     finite = all(np.all(np.isfinite(np.asarray(values[name], dtype=float))) for name in required)
     if not finite:
         return {'status': 'invalid', 'reason': 'nonfinite_energy_history', 'variables': sorted(values.keys())}
-    cfg = (case_cfg or {}).get('qa_cfg') or {}
+    cfg = _qa_config(case_cfg)
     artificial_tol = float(cfg.get('artificial_energy_ratio_tol', 0.05))
     residual_tol = float(cfg.get('energy_residual_tol', 0.05))
     internal_scale = max(float(np.max(np.abs(values['ALLIE']))), 1.0e-30)
@@ -679,22 +1019,36 @@ def write_response_csv(path, ys, rows):
     fh.close()
 
 
-def write_H_csv(path, freqs, xs, H):
-    """写传函矩阵 csv：首列 f(Hz)，其后每节点一列，列头为节点 x 坐标。"""
+def write_matrix_csv(path, axis_name, axis, xs, values):
+    """写频率/周期—空间矩阵 CSV：首列为坐标轴，其后每节点一列。"""
     fh = _open_csv(path)
     w = csv.writer(fh)
-    w.writerow(['f_Hz'] + ['x=%.3f' % float(x) for x in xs])
-    for i in range(len(freqs)):
-        w.writerow([float(freqs[i])] + [float(v) for v in H[:, i]])
+    w.writerow([axis_name] + ['x=%.3f' % float(x) for x in xs])
+    for i in range(len(axis)):
+        w.writerow([float(axis[i])] + [float(v) for v in values[:, i]])
     fh.close()
+
+
+def write_H_csv(path, freqs, xs, H):
+    """兼容旧调用：写频率—空间幅值矩阵 CSV。"""
+    write_matrix_csv(path, 'f_Hz', freqs, xs, H)
 
 
 NPZ_FILENAME = 'surface_results.npz'  # 单工况唯一数值输出文件名
 XLSX_FILENAME = 'surface_results.xlsx'  # 供研究者查阅的 Excel 工作簿文件名
 RAW_TIMESERIES = {}  # 逐记录原始时程与 QA 扩展字段，最终直接写入 NPZ
+SPECTRAL_RESULTS = {}  # 逐记录复频响、FSAF 派生依据、PSA/RSAF 与有效掩码
 _NPZ_TEMP_PATTERNS = (  # 打包后删除的运行期临时数值文件
-    'surface_response_*.csv', 'H_surface_h_*.csv', 'H_surface_v_*.csv', 'H_topo_h_*.csv',
-    'sgrid_response_*.csv', 'sgrid_H_surface_h_*.csv', 'sgrid_H_surface_v_*.csv', 'sgrid_H_topo_h_*.csv',
+    'surface_response_*.csv',
+    'FSAF_inc_h_*.csv', 'FSAF_inc_v_*.csv', 'FSAF_1D_h_*.csv', 'FSAF_station_h_*.csv',
+    'PSA_surface_h_*.csv', 'PSA_surface_v_*.csv', 'RSAF_rock_h_*.csv', 'RSAF_1D_h_*.csv', 'URSAF_z_*.csv',
+    'sgrid_response_*.csv',
+    'sgrid_FSAF_inc_h_*.csv', 'sgrid_FSAF_inc_v_*.csv', 'sgrid_FSAF_1D_h_*.csv', 'sgrid_FSAF_station_h_*.csv',
+    'sgrid_PSA_surface_h_*.csv', 'sgrid_PSA_surface_v_*.csv',
+    'sgrid_RSAF_rock_h_*.csv', 'sgrid_RSAF_1D_h_*.csv', 'sgrid_URSAF_z_*.csv',
+    # 旧 v2 临时文件仍可被重新打包，保证已有中断工况兼容
+    'H_surface_h_*.csv', 'H_surface_v_*.csv', 'H_topo_h_*.csv',
+    'sgrid_H_surface_h_*.csv', 'sgrid_H_surface_v_*.csv', 'sgrid_H_topo_h_*.csv',
 )
 
 
@@ -703,6 +1057,16 @@ def _npz_bytes(value):  # 把文本统一编码为 UTF-8 字节数组，兼容 P
     if not isinstance(value, bytes):
         value = value.encode('utf-8')
     return np.asarray(value)
+
+
+def _load_npz_no_pickle(path):  # 兼容 Abaqus NumPy 1.15/Windows 的 NPZ 路径读取缺陷
+    """只读无 pickle NPZ；Python 2 下直接以路径构造 NpzFile，避开旧 np.load 的文件对象定位错误。"""
+    if sys.version_info[0] < 3 and hasattr(np.lib.npyio, 'NpzFile'):
+        return np.lib.npyio.NpzFile(path, allow_pickle=False)
+    try:
+        return np.load(path, allow_pickle=False)
+    except TypeError:  # 极旧 NumPy 不接受 allow_pickle 参数
+        return np.load(path)
 
 
 def _read_csv_table_for_npz(path):  # 读取临时 CSV 为表头和文本矩阵
@@ -748,7 +1112,8 @@ def _put_raw_timeseries_payload(payload, manifest, raw_timeseries):  # 写入原
             payload[prefix + field] = np.asarray(value)
             manifest.append({'key': prefix + field, 'name': 'raw_%s_%s' % (record, field),
                              'kind': 'energy_history'})
-        for field in ('qa_theory_json', 'qa_reflection_json', 'qa_v2_protocol_json', 'qa_energy_json'):
+        for field in ('qa_theory_json', 'qa_reflection_json', 'qa_v2_protocol_json', 'qa_energy_json',
+                      'qa_frf_json', 'qa_response_spectrum_json'):
             value = data.get(field)
             if value is None:
                 continue
@@ -757,14 +1122,50 @@ def _put_raw_timeseries_payload(payload, manifest, raw_timeseries):  # 写入原
                              'kind': 'qa_json'})
 
 
-def write_surface_npz(meta, case_cfg, raw_timeseries=None):  # 打包全部数值产物并删除临时 CSV/JSON
+def _put_spectral_payload(payload, manifest, spectral_results):  # 写入规范复频响与反应谱数组
+    """把逐记录复数 FRF、PSA/RSAF 和显式有效掩码写入 NPZ，不使用 pickle。"""
+    for record, groups in sorted((spectral_results or {}).items()):
+        suffix = _npz_safe_record(record)
+        for group in ('frf', 'rsa'):
+            data = (groups or {}).get(group) or {}
+            for field, value in sorted(data.items()):
+                if value is None or field == 'quality':  # 内部字典不直接持久化，使用 quality_json
+                    continue
+                key = '%s_%s_%s' % (group, suffix, field)
+                if field.endswith('_json'):
+                    payload[key] = _npz_bytes(value if isinstance(value, _QA_STRING_TYPES)
+                                              else json.dumps(value, ensure_ascii=True, sort_keys=True))
+                    kind = 'quality_json'
+                else:
+                    payload[key] = np.asarray(value)
+                    kind = 'complex_frf' if group == 'frf' else 'response_spectrum'
+                array = np.asarray(payload[key])
+                manifest.append({'key': key, 'name': key, 'kind': kind,
+                                 'shape': list(array.shape), 'dtype': str(array.dtype)})
+
+
+def write_surface_npz(meta, case_cfg, raw_timeseries=None, spectral_results=None):  # 打包全部数值产物并删除临时 CSV/JSON
     """写单工况 NPZ 数值包；表结构由 manifest_json 描述，禁止 pickle 以保障跨环境读取。"""
     paths = []
     for pattern in _NPZ_TEMP_PATTERNS:
         paths.extend(glob.glob(pattern))
     paths = sorted(set(paths))
+    semantics = {
+        'complex_frf': 'H=A_surface/A_incident，保存复数值；相位由 angle(H) 派生',
+        'FSAF_inc': 'FSAF_inc=abs(H)，与复频响共用 valid_mask，不是独立标签',
+        'FSAF_1D': 'FSAF_1D=abs(A_surface/A_exact_same_side_1D)，同时受入射谱与一维参考谱掩码约束',
+        'FSAF_station': '同侧端点参考台站幅值谱比，不等于匹配均质坡 H_topo',
+        'PSA': '5% 默认阻尼弹性伪加速度谱，T=0 不在周期网格内',
+        'RSAF_rock': 'PSA_surface_h/PSA_exact_rock_reference_h',
+        'RSAF_1D': 'PSA_surface_h/PSA_exact_same_side_1D_reference_h',
+        'URSAF_z': 'PSA_surface_v/PSA_exact_rock_reference_h，采用统一水平分母',
+        'array_axis_order': 'FRF/FSAF 为 node_or_s × frequency；PSA/RSAF 为 node_or_s × period',
+        'invalid_policy': '真实分母不足时 NaN+valid_mask；禁止 epsilon 分母',
+    }
     payload = {
-        'schema_version': np.asarray(1),
+        'schema_version': np.asarray(2),
+        'postprocess_version': _npz_bytes('Postprocess_All_surface_v2'),
+        'metric_semantics_json': _npz_bytes(json.dumps(semantics, ensure_ascii=True, sort_keys=True)),
         'case_meta_json': _npz_bytes(json.dumps(meta or {}, ensure_ascii=True, sort_keys=True)),
         'case_config_json': _npz_bytes(json.dumps(case_cfg or {}, ensure_ascii=True, sort_keys=True)),
     }
@@ -774,12 +1175,13 @@ def write_surface_npz(meta, case_cfg, raw_timeseries=None):  # 打包全部数�
                 payload[name.replace('.', '_')] = np.asarray(fh.read())
     manifest = []
     _put_raw_timeseries_payload(payload, manifest, raw_timeseries)
+    _put_spectral_payload(payload, manifest, spectral_results)
     for index, path in enumerate(paths):
         header, rows = _read_csv_table_for_npz(path)
         key = 'table_%03d' % index
         payload[key + '_header'] = np.asarray([str(v).encode('utf-8') for v in header])
         payload[key + '_data'] = np.asarray([[str(v).encode('utf-8') for v in row] for row in rows])
-        manifest.append({'key': key, 'name': os.path.basename(path)})
+        manifest.append({'key': key, 'name': os.path.basename(path), 'kind': 'table'})
     payload['manifest_json'] = _npz_bytes(json.dumps(manifest, ensure_ascii=True, sort_keys=True))
     np.savez_compressed(NPZ_FILENAME, **payload)
     for path in paths + [name for name in ('surface_summary.json', 'sgrid_params.json') if os.path.isfile(name)]:
@@ -837,20 +1239,22 @@ def _xlsx_sheet_xml(rows):  # 将二维表写为简单工作表 XML
 
 def write_surface_xlsx_from_npz():  # 由 NPZ 生成研究者查阅用 Excel 工作簿
     """以标准库导出 XLSX：概览页 + NPZ 内每张数值表一页，不依赖 Abaqus 外部库。"""
-    package = np.load(NPZ_FILENAME)
+    package = _load_npz_no_pickle(NPZ_FILENAME)
     try:
         manifest = json.loads(_npz_text(package['manifest_json']))
         overview = [['项目', '内容'], ['schema_version', _npz_text(package['schema_version'])],
                     ['case_meta_json', _npz_text(package['case_meta_json'])],
                     ['case_config_json', _npz_text(package['case_config_json'])],
                     ['surface_summary_json', _npz_text(package['surface_summary_json'])]]
+        if 'metric_semantics_json' in package:
+            overview.append(['metric_semantics_json', _npz_text(package['metric_semantics_json'])])
         if 'sgrid_params_json' in package:
             overview.append(['sgrid_params_json', _npz_text(package['sgrid_params_json'])])
         sheets = [('Overview', overview)]  # Abaqus Python 2 XML 拼接使用 ASCII 工作表名以避免编码错误
         used_names = set(['Overview'])
         for index, item in enumerate(manifest, 1):
-            if item.get('kind') in ('raw_timeseries', 'qa_json', 'energy_history'):
-                continue  # 原始时程/QA 键不是二维表，不在概览 Excel 中重复展开
+            if item.get('kind') not in (None, 'table'):
+                continue  # 规范数组由 NPZ 保真保存，Excel 仅展开人读二维表
             base = item['name'].replace('.csv', '')
             name = base[:28]
             while name in used_names:
@@ -925,24 +1329,121 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     err_l, err_r, suspect, qa_basis = farfield_qa(rows, taf_lr, incident_angle)  # 按传播上游端对拍一维理论
     write_response_csv('surface_response_%s.csv' % record, ys, rows)
 
+    frf_payload = None
+    frf_quality = {'status': 'not_available', 'passed': False, 'reason': 'input_wave_missing'}
     if a_in is not None:
         n_len = a1_mat.shape[1]
         a_in_pad = np.zeros(n_len)  # 输入补零到地表时程长度（尾段静默）
         m = min(n_len, a_in.size)
         a_in_pad[:m] = a_in[:m]
-        freqs, H_h = compute_H(a1_mat, a_in_pad, dt, fc=fc)  # 水平传函
-        _, H_v = compute_H(a2_mat, a_in_pad, dt, fc=fc)  # 竖向传函（同一水平输入分母）
-        # 参考台站谱比：同侧远场端节点作分母（左端 idx=0 / 右端 idx=-1），纯地形谱
+        freqs, H_h_complex, input_valid, input_spectrum = compute_complex_H(a1_mat, a_in_pad, dt, fc=fc)
+        freqs_v, H_v_complex, input_valid_v, _unused_input_v = compute_complex_H(a2_mat, a_in_pad, dt, fc=fc)
+        if freqs_v.shape != freqs.shape or not np.allclose(freqs_v, freqs) or not np.array_equal(input_valid_v, input_valid):
+            raise RuntimeError('水平/竖向复频响的频轴或输入有效掩码不一致')
+
+        # 同侧端点参考台站复谱比；它是诊断量，不等同于匹配均质坡 H_topo
         left_mask = xs <= x_toe
-        Ht = np.zeros((len(xs), len(freqs)))
-        f_l, Ht_l = spectral_ratio(a1_mat[left_mask], a1_mat[0], dt, fc=fc)  # 左侧组/左端参考
-        f_r, Ht_r = spectral_ratio(a1_mat[~left_mask], a1_mat[-1], dt, fc=fc)  # 右侧组/右端参考
-        Ht[left_mask] = np.vstack([np.interp(freqs, f_l, Ht_l[k]) for k in range(Ht_l.shape[0])])  # 对齐到统一频轴
+        H_station = np.empty(H_h_complex.shape, dtype=np.complex128)
+        H_station[:] = complex(float('nan'), float('nan'))
+        station_valid = np.zeros(H_h_complex.shape, dtype=bool)
+        f_l, H_l, valid_l, _unused_l = compute_complex_H(a1_mat[left_mask], a1_mat[0], dt, fc=fc)
+        if f_l.shape != freqs.shape or not np.allclose(f_l, freqs):
+            raise RuntimeError('左参考台站谱比频轴与入射频响不一致')
+        shared_l = input_valid & valid_l
+        for local_index, global_index in enumerate(np.where(left_mask)[0]):
+            H_station[global_index, shared_l] = H_l[local_index, shared_l]
+            station_valid[global_index, shared_l] = True
         if np.any(~left_mask):
-            Ht[~left_mask] = np.vstack([np.interp(freqs, f_r, Ht_r[k]) for k in range(Ht_r.shape[0])])
-        write_H_csv('H_surface_h_%s.csv' % record, freqs, xs, H_h)
-        write_H_csv('H_surface_v_%s.csv' % record, freqs, xs, H_v)
-        write_H_csv('H_topo_h_%s.csv' % record, freqs, xs, Ht)
+            f_r, H_r, valid_r, _unused_r = compute_complex_H(a1_mat[~left_mask], a1_mat[-1], dt, fc=fc)
+            if f_r.shape != freqs.shape or not np.allclose(f_r, freqs):
+                raise RuntimeError('右参考台站谱比频轴与入射频响不一致')
+            shared_r = input_valid & valid_r
+            for local_index, global_index in enumerate(np.where(~left_mask)[0]):
+                H_station[global_index, shared_r] = H_r[local_index, shared_r]
+                station_valid[global_index, shared_r] = True
+
+        fsaf_h = np.abs(H_h_complex[:, input_valid])
+        fsaf_v = np.abs(H_v_complex[:, input_valid])
+        fsaf_station = np.abs(H_station[:, input_valid])
+        fsaf_h_path = 'FSAF_inc_h_%s.csv' % record
+        write_H_csv(fsaf_h_path, freqs[input_valid], xs, fsaf_h)
+        write_H_csv('FSAF_inc_v_%s.csv' % record, freqs[input_valid], xs, fsaf_v)
+        write_H_csv('FSAF_station_h_%s.csv' % record, freqs[input_valid], xs, fsaf_station)
+
+        # 回读 CSV 检查 FSAF 与规范复数 H 的派生一致性，防止掩码或转置错位
+        check_freq, _check_x, check_fsaf = read_H_csv_local(fsaf_h_path)
+        identity_error = None
+        if check_freq is not None and check_fsaf.shape == fsaf_h.shape and np.allclose(check_freq, freqs[input_valid]):
+            finite = np.isfinite(check_fsaf) & np.isfinite(fsaf_h)
+            if np.any(finite):
+                scale = np.maximum(np.abs(fsaf_h[finite]), SAFE_DENOM_EPS)
+                identity_error = float(np.max(np.abs(check_fsaf[finite] - fsaf_h[finite]) / scale))
+        band = freqs >= F_LO
+        if fc is not None and float(fc) > 0.0:
+            band &= freqs <= FMAX_FACTOR * float(fc)
+        if band.size:
+            band[0] = False
+        valid_count = int(np.sum(input_valid))
+        candidate_count = int(np.sum(band))
+        valid_fraction = float(valid_count) / float(candidate_count) if candidate_count else 0.0
+        min_valid_bins = int(_qa_config(case_cfg).get('min_frf_valid_bins', 8))
+        frf_pass = bool(valid_count >= min_valid_bins and identity_error is not None and identity_error <= 1.0e-8)
+        frf_quality = {
+            'status': 'passed' if frf_pass else 'failed', 'passed': frf_pass,
+            'reference': 'incident_base_acceleration',
+            'frequency_range_hz': [float(freqs[input_valid][0]), float(freqs[input_valid][-1])] if valid_count else None,
+            'valid_bin_count': valid_count, 'candidate_bin_count': candidate_count,
+            'valid_fraction': valid_fraction, 'min_valid_bins': min_valid_bins,
+            'spectrum_mask_ratio': SPEC_MASK_RATIO, 'frequency_lower_hz': F_LO,
+            'frequency_upper_hz': FMAX_FACTOR * float(fc) if fc is not None and float(fc) > 0.0 else None,
+            'zero_padding_factor': PAD_FACTOR,
+            'fft_length': _padded_fft_length(max(a1_mat.shape[1], a_in_pad.size)),
+            'window': 'full_odb_time_history_no_taper', 'detrend': 'none',
+            'fsaf_identity_max_relative_error': identity_error,
+            'station_ratio_definition': 'same_side_endpoint_reference_not_matched_homogeneous_slope',
+        }
+        frf_payload = {
+            'frequency': freqs, 'x': xs, 'input_spectrum': input_spectrum,
+            'valid_mask': input_valid, 'station_valid_mask': station_valid,
+            'H_surface_h': H_h_complex, 'H_surface_v': H_v_complex,
+            'H_station_h': H_station,
+            'quality_json': json.dumps(frf_quality, ensure_ascii=True, sort_keys=True),
+            'quality': frf_quality,
+        }
+
+    rsa_payload = compute_response_spectrum_payload(record, xs, x_toe, t, a1_mat, a2_mat, dt, case_cfg)
+    rsa_quality = {'status': 'disabled', 'passed': False}
+    if rsa_payload is not None:
+        rsa_quality = rsa_payload.get('quality') or rsa_quality
+        periods = rsa_payload['period']
+        write_matrix_csv('PSA_surface_h_%s.csv' % record, 'T_s', periods, xs, rsa_payload['PSA_surface_h'])
+        write_matrix_csv('PSA_surface_v_%s.csv' % record, 'T_s', periods, xs, rsa_payload['PSA_surface_v'])
+        write_matrix_csv('RSAF_rock_h_%s.csv' % record, 'T_s', periods, xs, rsa_payload['RSAF_rock_h'])
+        write_matrix_csv('RSAF_1D_h_%s.csv' % record, 'T_s', periods, xs, rsa_payload['RSAF_1D_h'])
+        write_matrix_csv('URSAF_z_%s.csv' % record, 'T_s', periods, xs, rsa_payload['URSAF_z'])
+
+    if frf_payload is not None:
+        ref_left = rsa_payload.get('reference_1D_left_acc_h') if rsa_payload is not None else None
+        ref_right = rsa_payload.get('reference_1D_right_acc_h') if rsa_payload is not None else None
+        H_over_1d, valid_over_1d = compute_side_reference_H(
+            a1_mat, xs, x_toe, ref_left, ref_right, dt, freqs, input_valid, fc=fc)
+        frf_payload['H_surface_over_1D_h'] = H_over_1d
+        frf_payload['one_d_valid_mask'] = valid_over_1d
+        write_H_csv('FSAF_1D_h_%s.csv' % record, freqs[input_valid], xs,
+                    np.abs(H_over_1d[:, input_valid]))
+        frf_quality['one_d_reference_status'] = 'available' if np.any(valid_over_1d) else 'not_available'
+        possible_1d = int(len(xs) * np.sum(input_valid))
+        frf_quality['one_d_valid_fraction'] = (float(np.sum(valid_over_1d)) / float(possible_1d)
+                                                if possible_1d else 0.0)
+        frf_payload['quality_json'] = json.dumps(frf_quality, ensure_ascii=True, sort_keys=True)
+
+    spectral_groups = {}
+    if frf_payload is not None:
+        spectral_groups['frf'] = frf_payload
+    if rsa_payload is not None:
+        spectral_groups['rsa'] = rsa_payload
+    if spectral_groups:
+        SPECTRAL_RESULTS[record] = spectral_groups
 
     theory_h, theory_v = _theory_series_from_input(a_in_pad, factor_h, factor_v)  # 理论基线时程
     v2_cfg = case_cfg.get('v2_validation_cfg') or {}
@@ -997,6 +1498,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         }, ensure_ascii=True, sort_keys=True),
         'qa_v2_protocol_json': json.dumps(v2_cfg, ensure_ascii=True, sort_keys=True) if v2_cfg else None,
         'qa_energy_json': json.dumps(energy_payload, ensure_ascii=True, sort_keys=True),
+        'qa_frf_json': json.dumps(frf_quality, ensure_ascii=True, sort_keys=True),
+        'qa_response_spectrum_json': json.dumps(rsa_quality, ensure_ascii=True, sort_keys=True),
     }
 
     taf_arr = np.array([r['TAF_h'] for r in rows], dtype=float)
@@ -1006,7 +1509,16 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
                'AR_max': (float(taf_arr[ar_idx]) if ar_idx is not None else None),  # 峰值放大（招牌标量）
                'AR_max_x': (rows[ar_idx]['x'] if ar_idx is not None else None),  # 峰值位置
                'qa_farfield_err_left': err_l, 'qa_farfield_err_right': err_r,
-               'qa_farfield_basis': qa_basis, 'incident_angle': incident_angle, 'suspect': suspect}
+               'qa_farfield_basis': qa_basis, 'incident_angle': incident_angle, 'suspect': suspect,
+               'frf_valid_bin_count': frf_quality.get('valid_bin_count', 0),
+               'frf_valid_fraction': frf_quality.get('valid_fraction', 0.0),
+               'fsaf_identity_max_relative_error': frf_quality.get('fsaf_identity_max_relative_error'),
+               'qa_frf_pass': bool(frf_quality.get('passed', False)),
+               'response_spectrum_status': rsa_quality.get('status'),
+               'response_spectrum_period_count': rsa_quality.get('period_count', 0),
+               'response_spectrum_missing_references': rsa_quality.get('missing_required_references', []),
+               'response_spectrum_insufficient_coverage': rsa_quality.get('insufficient_coverage_references', []),
+               'qa_response_spectrum_pass': bool(rsa_quality.get('passed', False))}
     summary.update(evaluate_qa_gates(summary, case_cfg, RAW_TIMESERIES.get(record)))  # 各类 QA 独立判定后再合取
     log_step(logger, '%s: 节点=%d PGA_in=%s AR_max=%s@x=%s QA(左/右)=%s/%s 判据=%s%s',
              record, len(xs), str(pga_in),
@@ -1569,19 +2081,38 @@ def fill_short_internal_gaps(out, s_nodes, y_nodes, s_grid, max_gap=SGRID_MAX_GA
 
 
 def resample_H_matrix(H, s_nodes, s_grid, seg_labels):  # H 曲面空间维三段重采样
-    """把 H(节点×频点) 沿空间维逐段插值到统一 s 子网格，返回 (N_A+N_B+N_C)×频点 矩阵。"""
-    H = np.atleast_2d(np.asarray(H, dtype=float))  # 节点×频点
+    """把实数或复数矩阵沿空间维逐段插值到统一 s 子网格。
+
+    复数频响分别插值实部和虚部，避免直接插值包裹相位；每个频点只使用有限节点。
+    """
+    H = np.atleast_2d(np.asarray(H))  # 节点×频点
+    is_complex = np.iscomplexobj(H)
     s_nodes = np.asarray(s_nodes, dtype=float)  # 节点 s 坐标
     grid = np.asarray(s_grid, dtype=float)  # 网格坐标
     lab = np.array(seg_labels)  # 网格段标签
-    out = np.nan * np.ones((len(grid), H.shape[1]))  # 输出矩阵
+    if is_complex:
+        out = np.empty((len(grid), H.shape[1]), dtype=np.complex128)
+        out[:] = complex(float('nan'), float('nan'))
+    else:
+        H = np.asarray(H, dtype=float)
+        out = np.nan * np.ones((len(grid), H.shape[1]))  # 输出矩阵
     for seg in ('A', 'B', 'C'):  # 逐段
-        nm = _seg_mask(s_nodes, seg)  # 段内节点
-        if int(np.sum(nm)) < 2:  # 节点不足
-            continue  # 跳过该段
+        seg_nodes = _seg_mask(s_nodes, seg)  # 段内节点
         gm = lab == seg  # 网格段掩码
         for j in range(H.shape[1]):  # 逐频点做空间插值
-            out[gm, j] = np.interp(grid[gm], s_nodes[nm], H[nm, j], left=np.nan, right=np.nan)  # 段内插值，端外不造假
+            if is_complex:
+                finite = np.isfinite(H[:, j].real) & np.isfinite(H[:, j].imag)
+            else:
+                finite = np.isfinite(H[:, j])
+            nm = seg_nodes & finite
+            if int(np.sum(nm)) < 2:
+                continue
+            if is_complex:
+                real = np.interp(grid[gm], s_nodes[nm], H[nm, j].real, left=np.nan, right=np.nan)
+                imag = np.interp(grid[gm], s_nodes[nm], H[nm, j].imag, left=np.nan, right=np.nan)
+                out[gm, j] = real + 1j * imag
+            else:
+                out[gm, j] = np.interp(grid[gm], s_nodes[nm], H[nm, j], left=np.nan, right=np.nan)
     return out  # 返回对齐曲面
 
 
@@ -1595,7 +2126,7 @@ def s_to_x(s, x_crest, x_toe, h_slope):  # 三段归一坐标反算物理 x
 
 
 def read_H_csv_local(path):  # 读回 write_H_csv 产物
-    """解析 H 矩阵 csv，返回 (freqs, xs, H 节点×频点)；文件缺失或解析失败返回 (None, None, None)。"""
+    """解析频率/周期—空间矩阵CSV，返回(轴坐标, xs, 节点×轴点矩阵)。"""
     if not os.path.isfile(path):  # 文件不存在（如该波未生成 H）
         return None, None, None  # 返回空
     try:  # 尝试解析
@@ -1610,7 +2141,7 @@ def read_H_csv_local(path):  # 读回 write_H_csv 产物
         for row in reader:  # 逐行（行=频点）
             if not row:  # 空行
                 continue  # 跳过
-            freqs.append(float(row[0]))  # 频率
+            freqs.append(float(row[0]))  # 频率或周期
             rows.append([float(v) for v in row[1:]])  # 各节点值
         fh.close()  # 关闭句柄
         return np.array(freqs, dtype=float), np.array(xs, dtype=float), np.array(rows, dtype=float).T  # 转 节点×频点
@@ -1630,14 +2161,19 @@ def write_sgrid_response_csv(path, s_grid, seg_labels, x_phys, cols):  # 写对�
     fh.close()  # 关闭
 
 
-def write_sgrid_H_csv(path, freqs, s_grid, seg_labels, H_s):  # 写对齐 H 曲面
-    """写对齐 H 曲面 csv：首列 f(Hz)，其后每个 s 网格点一列（列头 s=值_段）。"""
+def write_sgrid_matrix_csv(path, axis_name, axis, s_grid, seg_labels, values):
+    """写统一 s 网格上的频率/周期—空间矩阵 CSV。"""
     fh = _open_csv(path)  # 打开句柄
     w = csv.writer(fh)  # 创建 writer
-    w.writerow(['f_Hz'] + ['s=%.5f_%s' % (float(s_grid[k]), seg_labels[k]) for k in range(len(s_grid))])  # 表头
-    for i in range(len(freqs)):  # 行=频点
-        w.writerow([float(freqs[i])] + [float(v) for v in H_s[:, i]])  # 写一行
+    w.writerow([axis_name] + ['s=%.5f_%s' % (float(s_grid[k]), seg_labels[k]) for k in range(len(s_grid))])
+    for i in range(len(axis)):
+        w.writerow([float(axis[i])] + [float(v) for v in values[:, i]])
     fh.close()  # 关闭
+
+
+def write_sgrid_H_csv(path, freqs, s_grid, seg_labels, H_s):  # 兼容旧调用
+    """兼容旧调用：写统一 s 网格上的频率—空间幅值矩阵。"""
+    write_sgrid_matrix_csv(path, 'f_Hz', freqs, s_grid, seg_labels, H_s)
 
 
 def _update_summary_ar(updates, logger=None):  # 回写 AR_max 段号/归一坐标
@@ -1662,7 +2198,7 @@ def _update_summary_ar(updates, logger=None):  # 回写 AR_max 段号/归一坐�
 
 def _load_sgrid_rows_from_npz(npz_path, record):  # 从参考结果包读取指定记录的统一 s 网格
     """读取参考 NPZ 中 `sgrid_response_<record>.csv` 的行字典，用于观测窗收敛 QA。"""
-    package = np.load(npz_path)  # 打开已收敛的参考数值包
+    package = _load_npz_no_pickle(npz_path)  # 打开已收敛的参考数值包
     try:
         manifest = json.loads(_npz_text(package['manifest_json']))  # 读取表清单
         target = 'sgrid_response_%s.csv' % record  # 当前记录对应的统一网格表名
@@ -1697,7 +2233,7 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
     则以窗口收敛替代端点一维对拍作为最终 suspect 门槛，避免把散射尾波误判为边界反射。
     """
     logger = logger or log_step()
-    qa_cfg = (case_cfg or {}).get('qa_cfg') or {}  # 读取可选 QA 配置
+    qa_cfg = _qa_config(case_cfg)  # 读取可选 QA 配置
     if str(qa_cfg.get('mode', '')).lower() != 'window_convergence':  # 未显式声明则保持原严格端点 QA
         return
     ref_path = qa_cfg.get('reference_npz')  # 参考结果包路径
@@ -1766,10 +2302,10 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
 
 
 def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
-    """研究计划 §4.0 第②步：把逐节点曲线与 H(f,s) 曲面插值到统一三段 s 子网格并落盘。
+    """把逐节点曲线、FSAF/PSA/RSAF 视图和规范复频响插值到统一三段 s 子网格。
 
-    输入：当前目录 surface_response_<record>.csv 与 H_surface_h/v、H_topo_h_<record>.csv（第①步产物）。
-    输出：sgrid_response_<record>.csv、sgrid_H_*_<record>.csv、sgrid_params.json。
+    新输出采用 FSAF/RSAF 明确命名；旧 ``H_surface_*``/``H_topo_h`` 只作为中断工况读取回退。
+    复频响在内存中分别插值实部与虚部，最终直接写入 ``surface_results.npz``。
     同时把 AR_max 段号/归一坐标（重采样前原始曲线上精确取值）回写 surface_summary.json。
     普通 Python 即可运行（不依赖 odbAccess），可对已有 CSV 反复重跑。
     """
@@ -1817,17 +2353,68 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             updates[record] = {'AR_max': float(taf[k]), 'AR_max_x': float(data[k]['x']),
                                'AR_max_s': sk, 'AR_max_seg': seg,
                                'AR_window': [-float(a_max), 1.0 + float(c_max)]}  # 暂存回写项
-        n_h = 0  # H 曲面成功计数
-        for src_fmt, dst_fmt in (('H_surface_h_%s.csv', 'sgrid_H_surface_h_%s.csv'),
-                                 ('H_surface_v_%s.csv', 'sgrid_H_surface_v_%s.csv'),
-                                 ('H_topo_h_%s.csv', 'sgrid_H_topo_h_%s.csv')):  # 三类曲面同口径处理
-            freqs, xs_h, H = read_H_csv_local(src_fmt % record)  # 读回第①步矩阵
-            if freqs is None:  # 缺失（如该波无输入波文件未生成 H）
+        n_matrix = 0  # 幅值曲面成功计数
+        matrix_specs = (
+            (('FSAF_inc_h_%s.csv', 'H_surface_h_%s.csv'), 'sgrid_FSAF_inc_h_%s.csv', 'f_Hz'),
+            (('FSAF_inc_v_%s.csv', 'H_surface_v_%s.csv'), 'sgrid_FSAF_inc_v_%s.csv', 'f_Hz'),
+            (('FSAF_1D_h_%s.csv',), 'sgrid_FSAF_1D_h_%s.csv', 'f_Hz'),
+            (('FSAF_station_h_%s.csv', 'H_topo_h_%s.csv'), 'sgrid_FSAF_station_h_%s.csv', 'f_Hz'),
+            (('PSA_surface_h_%s.csv',), 'sgrid_PSA_surface_h_%s.csv', 'T_s'),
+            (('PSA_surface_v_%s.csv',), 'sgrid_PSA_surface_v_%s.csv', 'T_s'),
+            (('RSAF_rock_h_%s.csv',), 'sgrid_RSAF_rock_h_%s.csv', 'T_s'),
+            (('RSAF_1D_h_%s.csv',), 'sgrid_RSAF_1D_h_%s.csv', 'T_s'),
+            (('URSAF_z_%s.csv',), 'sgrid_URSAF_z_%s.csv', 'T_s'),
+        )
+        for source_formats, dst_fmt, axis_name in matrix_specs:
+            source_path = None
+            for source_format in source_formats:
+                candidate = source_format % record
+                if os.path.isfile(candidate):
+                    source_path = candidate
+                    break
+            if source_path is None:
                 continue  # 跳过
+            matrix_axis, xs_h, H = read_H_csv_local(source_path)
+            if matrix_axis is None:
+                continue
             s_h = calc_s_coords(xs_h, x_crest, x_toe, h_slope)  # H 列坐标转 s
             H_s = resample_H_matrix(H, s_h, s_grid, seg_labels)  # 空间维对齐
-            write_sgrid_H_csv(dst_fmt % record, freqs, s_grid, seg_labels, H_s)  # 落盘
-            n_h += 1  # 计数
+            write_sgrid_matrix_csv(dst_fmt % record, axis_name, matrix_axis, s_grid, seg_labels, H_s)
+            n_matrix += 1
+
+        # 规范 NPZ 数组同步对齐；复数频响按实部/虚部插值，不经过幅值 CSV
+        groups = SPECTRAL_RESULTS.get(record) or {}
+        segment_array = np.asarray([str(value).encode('ascii') for value in seg_labels])
+        frf = groups.get('frf') or {}
+        if frf:
+            frf_s = calc_s_coords(np.asarray(frf['x'], dtype=float), x_crest, x_toe, h_slope)
+            frf['sgrid_s'] = np.asarray(s_grid, dtype=float)
+            frf['sgrid_x'] = np.asarray(x_phys, dtype=float)
+            frf['sgrid_segment'] = segment_array
+            for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'):
+                aligned = resample_H_matrix(frf[field], frf_s, s_grid, seg_labels)
+                frf['sgrid_%s' % field] = aligned
+                frf['sgrid_%s_valid_mask' % field] = np.isfinite(aligned.real) & np.isfinite(aligned.imag)
+            frf_quality = frf.get('quality') or {}
+            frf_quality['sgrid_point_count'] = int(len(s_grid))
+            frf_quality['sgrid_complex_interpolation'] = 'real_imag_segmentwise'
+            frf['quality_json'] = json.dumps(frf_quality, ensure_ascii=True, sort_keys=True)
+        rsa = groups.get('rsa') or {}
+        if rsa:
+            rsa_s = calc_s_coords(np.asarray(rsa['x'], dtype=float), x_crest, x_toe, h_slope)
+            rsa['sgrid_s'] = np.asarray(s_grid, dtype=float)
+            rsa['sgrid_x'] = np.asarray(x_phys, dtype=float)
+            rsa['sgrid_segment'] = segment_array
+            for field in ('PSA_surface_h', 'PSA_surface_v', 'RSAF_rock_h', 'RSAF_1D_h', 'URSAF_z',
+                          'key_PSA_surface_h', 'key_PSA_surface_v', 'key_RSAF_rock_h',
+                          'key_RSAF_1D_h', 'key_URSAF_z'):
+                aligned = resample_H_matrix(rsa[field], rsa_s, s_grid, seg_labels)
+                rsa['sgrid_%s' % field] = aligned
+                if 'RSAF' in field or 'URSAF' in field:
+                    rsa['sgrid_%s_valid_mask' % field] = np.isfinite(aligned)
+            rsa_quality = rsa.get('quality') or {}
+            rsa_quality['sgrid_point_count'] = int(len(s_grid))
+            rsa['quality_json'] = json.dumps(rsa_quality, ensure_ascii=True, sort_keys=True)
         n_a_actual = int(np.sum(np.array(seg_labels) == 'A'))  # 实际 A 段点数
         n_b_actual = int(np.sum(np.array(seg_labels) == 'B'))  # 实际 B 段点数
         n_c_actual = int(np.sum(np.array(seg_labels) == 'C'))  # 实际 C 段点数
@@ -1839,14 +2426,16 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
                            'note': u'统一 s 子网格；按归一化坐标 s 每 0.01 划分；仅含 crest_window/toe_window 观测窗'},
                           fh, indent=2)  # 保存（ensure_ascii 默认开，Py2 安全）
             grid_written = True  # 标记已写
-        log_step(logger, '[sgrid] %s: 重采样完成 -> sgrid_response（%d 点/段A %d+段B %d+段C %d） + %d 个 H 曲面',
-                 record, len(s_grid), n_a_actual, n_b_actual, n_c_actual, n_h)  # 提示
+        log_step(logger, '[sgrid] %s: 重采样完成 -> sgrid_response（%d 点/段A %d+段B %d+段C %d） + %d 个谱曲面',
+                 record, len(s_grid), n_a_actual, n_b_actual, n_c_actual, n_matrix)  # 提示
     _update_summary_ar(updates, logger=logger)  # 回写 AR_max 段号/归一坐标
 
 
 def main():  # 主入口函数
     """后处理脚本控制流。"""
     logger = log_step()  # 自动使用与脚本同名的日志文件
+    RAW_TIMESERIES.clear()  # 同一解释器重复执行时不混入上一工况
+    SPECTRAL_RESULTS.clear()  # 复频响与反应谱同样按本次工况重新建立
     log_step(logger, '脚本开始执行 (Postprocess_All_surface_v2)')
     meta = _load_json('case_meta.json')  # 读取元数据
     case_cfg = _load_json('case_config.json')  # 读取配置
@@ -1878,7 +2467,7 @@ def main():  # 主入口函数
             failed_odbs.append(p)  # 记录失败项
 
     with open('surface_summary.json', 'w') as fh:  # 写摘要
-        json.dump({'schema_version': 1, 'records': summaries}, fh, indent=2)  # 保存 json
+        json.dump({'schema_version': 2, 'records': summaries}, fh, indent=2)  # 保存 json
     log_step(logger, '完成: %d 条 odb，汇总见 surface_summary.json', len(odbs))  # 提示完成
 
     if failed_odbs:  # 任一 ODB 失败时必须显式失败，避免批处理继续清理 ODB 并掩盖根因
@@ -1888,10 +2477,10 @@ def main():  # 主入口函数
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
     apply_window_convergence_qa(case_cfg, logger=logger)  # 可选：用不同净空参考验证研究窗口收敛
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
-    n_tables = write_surface_npz(meta, case_cfg, RAW_TIMESERIES)  # 表格与原始时程统一收敛为单一 NPZ 包
+    n_items = write_surface_npz(meta, case_cfg, RAW_TIMESERIES, SPECTRAL_RESULTS)  # 所有规范数组收敛为单一 NPZ 包
     n_sheets = write_surface_xlsx_from_npz()  # 再由 NPZ 导出研究者查阅用 Excel 工作簿
-    log_step(logger, '完成: 已写入 %s（%d 张数值表）与 %s（%d 个工作表）；运行期 CSV/JSON 已清理。',
-             NPZ_FILENAME, n_tables, XLSX_FILENAME, n_sheets)
+    log_step(logger, '完成: 已写入 %s（%d 个数值项）与 %s（%d 个工作表）；运行期 CSV/JSON 已清理。',
+             NPZ_FILENAME, n_items, XLSX_FILENAME, n_sheets)
 
 
 if __name__ == '__main__':  # 程序入口

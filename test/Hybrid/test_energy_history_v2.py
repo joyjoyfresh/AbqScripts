@@ -13,7 +13,7 @@ sys.modules['abaqusConstants'] = None
 sys.modules['odbAccess'] = None
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-POSTPROCESS_DIR = os.path.join(REPO, 'Postprocess', 'Hybrid')
+POSTPROCESS_DIR = os.path.join(REPO, 'Postprocess')
 if POSTPROCESS_DIR not in sys.path:
     sys.path.insert(0, POSTPROCESS_DIR)
 import Postprocess_All_surface_v2 as post

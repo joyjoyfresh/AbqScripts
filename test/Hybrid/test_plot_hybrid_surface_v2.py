@@ -7,7 +7,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 
-SCRIPT = Path(__file__).resolve().parents[2] / "Postprocess" / "Hybrid" / "Plot_Hybrid_surface_v2.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "Postprocess" / "Plot_Hybrid_surface_v2.py"
 SPEC = importlib.util.spec_from_file_location("plot_hybrid_surface_v2", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
