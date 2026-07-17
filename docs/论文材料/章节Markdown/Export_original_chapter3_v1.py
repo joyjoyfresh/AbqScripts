@@ -18,7 +18,7 @@ from Export_thesis_chapters_markdown import (
 
 ROOT = Path(__file__).resolve().parents[3]
 SOURCE = ROOT / 'docs' / '论文材料' / '边坡地震动放大效应研究论文初稿.docx'
-OUTPUT_DIR = ROOT / 'docs' / '论文材料' / '章节Markdown'
+OUTPUT_DIR = ROOT / 'docs' / '论文材料' / '归档'
 OUTPUT = OUTPUT_DIR / '第3章_坡地有限元模型建立与验证_v1.md'
 ATTACHMENTS = OUTPUT_DIR / '附件_第3章_v1'
 TARGET_HEADING = '3 坡地有限元模型建立与验证'
