@@ -33,7 +33,7 @@ SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路
 
 POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行的全局后处理脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
-    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Plot_Hybrid_surface_v1.py",  # 绘图脚本路径 / 绘制汇总对比图表
+    r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Plot_Hybrid_surface_v2.py",  # 绘图脚本路径 / 绘制汇总对比图表
 ]
 
 PARAMETER_CASES = [  # 变参数工况列表，每项需包含 config 配置覆盖字典

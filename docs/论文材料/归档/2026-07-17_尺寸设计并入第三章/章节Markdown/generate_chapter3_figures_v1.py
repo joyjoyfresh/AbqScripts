@@ -21,7 +21,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
 FIG_DIR = SCRIPT_DIR / "附件" / "第3章"
 FIG_DIR.mkdir(parents=True, exist_ok=True)
-GEOMETRY_FIG_SCRIPT = SCRIPT_DIR / "generate_chapter3_geometry_figure_v1.py"
 
 F1_SCRIPT = REPO_ROOT / "Run" / "Auto_ch3" / "Autorun_ch3_F1_frequency_theory_v1.py"
 F1_RUNS = {"A1": "003", "A2": "004", "A3": "005", "A4": "007", "A5": "009"}
@@ -93,14 +92,63 @@ def panel_label(ax, label):
 
 
 def draw_model_geometry():
-    """调用独立尺寸图脚本，保证技术文档与论文正文使用同一图源。"""
-    spec = importlib.util.spec_from_file_location("chapter3_geometry_figure", str(GEOMETRY_FIG_SCRIPT))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    module.draw_figure([
-        FIG_DIR / "图3-1_参数化坡地几何与成层方式.png",
-        FIG_DIR / "图3-1_参数化坡地几何与成层方式.pdf",
-    ])
+    """绘制参数化坡地几何及两类成层方式。"""
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.0), gridspec_kw={"wspace": 0.25})
+    ax = axes[0]
+    ground = np.array([[0.0, 3.0], [4.0, 3.0], [7.0, 0.0], [11.0, 0.0],
+                       [11.0, -3.2], [0.0, -3.2]])
+    ax.add_patch(Polygon(ground, closed=True, facecolor="#E8D5B7", edgecolor=THEORY_COLOR, linewidth=1.0))
+    ax.plot([0, 4, 7, 11], [3, 3, 0, 0], color=THEORY_COLOR, linewidth=1.5)
+    ax.annotate("", xy=(4.0, 3.0), xytext=(4.0, 0.0),
+                arrowprops=dict(arrowstyle="<->", color=OKABE_ITO[0], linewidth=1.0))
+    ax.text(4.18, 1.5, "$h$", color=OKABE_ITO[0], va="center")
+    ax.annotate("", xy=(0.0, 3.35), xytext=(4.0, 3.35),
+                arrowprops=dict(arrowstyle="<->", color=THEORY_COLOR, linewidth=0.9))
+    ax.text(2.0, 3.52, "$L_A=(A+c)h$", ha="center")
+    ax.annotate("", xy=(4.0, -0.35), xytext=(7.0, -0.35),
+                arrowprops=dict(arrowstyle="<->", color=THEORY_COLOR, linewidth=0.9))
+    ax.text(5.5, -0.55, "$L_B=h/\\tan i$", ha="center", va="top")
+    ax.annotate("", xy=(7.0, 0.35), xytext=(11.0, 0.35),
+                arrowprops=dict(arrowstyle="<->", color=THEORY_COLOR, linewidth=0.9))
+    ax.text(9.0, 0.55, "$L_C=(C+c)h$", ha="center")
+    ax.annotate("", xy=(10.65, 0.0), xytext=(10.65, -3.2),
+                arrowprops=dict(arrowstyle="<->", color=OKABE_ITO[1], linewidth=1.0))
+    ax.text(10.35, -1.6, "$D=sh$", color=OKABE_ITO[1], rotation=90, va="center", ha="right")
+    ax.plot([5.5, 6.2], [0.0, 0.0], color=THEORY_COLOR, linewidth=0.8)
+    ax.plot([5.5, 6.0], [0.0, 0.5], color=THEORY_COLOR, linewidth=0.8)
+    ax.text(5.62, 0.17, "$i$", fontsize=8)
+    ax.text(4.0, 3.12, "坡肩", ha="center")
+    ax.text(7.0, 0.12, "坡脚", ha="center")
+    ax.set_xlim(-0.3, 11.3)
+    ax.set_ylim(-3.6, 4.0)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("参数化坡地几何")
+    panel_label(ax, "a")
+
+    ax = axes[1]
+    x = np.linspace(0.0, 10.0, 300)
+    surface = np.piecewise(x, [x < 3.5, (x >= 3.5) & (x < 6.5), x >= 6.5],
+                           [3.0, lambda value: 3.0 - (value - 3.5), 0.0])
+    ax.fill_between(x, -4.0, surface, color="#EFE3CE", edgecolor="none")
+    ax.plot(x, surface, color=THEORY_COLOR, linewidth=1.3, label="地表")
+    for level, color in [(-0.8, OKABE_ITO[0]), (-2.2, OKABE_ITO[4])]:
+        ax.plot([0, 10], [level, level], color=color, linewidth=1.2)
+    ax.text(0.25, -0.55, "水平成层", color=OKABE_ITO[0], va="bottom")
+    terrain_1 = surface - 1.0
+    terrain_2 = surface - 2.0
+    mask = x >= 3.0
+    ax.plot(x[mask], terrain_1[mask], color=OKABE_ITO[2], linewidth=1.2, linestyle="--")
+    ax.plot(x[mask], terrain_2[mask], color=OKABE_ITO[3], linewidth=1.2, linestyle="--")
+    ax.text(6.9, 1.1, "随地形成层", color=OKABE_ITO[2], va="bottom")
+    ax.text(8.7, -3.55, "基岩", color="#6B5845")
+    ax.set_xlim(0, 10)
+    ax.set_ylim(-4, 3.5)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title("材料界面概化方式")
+    panel_label(ax, "b")
+    export_figure(fig, "图3-1_参数化坡地几何与成层方式")
 
 
 def draw_validation_framework():
