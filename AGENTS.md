@@ -38,4 +38,4 @@
 
 ## 提交
 
-- 每次完成修改后，使用以下命令提交 commit：`git add -A && git commit -m "$(date +%Y-%m-%d_%H:%M)"`。
+- 如果用户指明要提交，请使用以下命令提交 commit：`git add -A && git commit -m "$(date +%Y-%m-%d_%H:%M)"`。
