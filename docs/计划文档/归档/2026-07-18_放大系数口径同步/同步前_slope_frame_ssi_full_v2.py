@@ -2359,7 +2359,7 @@ def VAB_oblique(site, geom, angle,
     cp1 = mat_bedrock['cp']  # 基岩纵波波速
     # ── v8：SV 入射临界角校验（§3.1-A2 硬化，可由 run_cfg['critical_angle_check'] 关闭） ──
     # 基岩中 SV→P 临界角 = asin(cs/cp)（ν=0.3 时≈32.31°）；超临界后自由面反射 P 为非均匀波，
-    # ray 引擎实角公式与 AF 解析分母 factor_h 均失效，故默认达到临界角直接拒绝建模；
+    # ray 引擎实角公式与 TAF 解析分母 factor_h 均失效，故默认达到临界角直接拒绝建模；
     # 关闭校验时仅输出警告、不中断，便于探索超临界工况。论文工况以 30° 为上限。
     crit_deg = math.degrees(math.asin(cs1 / cp1))  # 基岩 SV 临界角（度）
     if angle >= crit_deg - 1e-6:  # 入射角达到/超过临界角
@@ -2741,12 +2741,10 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                      sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
                      validation_geometry='slope'):  # 写出统一工况元数据（含验证几何模式）
     """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
-    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、自由场配置及同侧一维场地放大基准等参数，
+    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、自由场配置及一维理论台阶等参数，
     供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
     返回：
-        同侧一维自由场场地放大基准(ff_theory)字典（计算成功时），否则返回 None。
-        为兼容既有后处理，字典中的 taf_h/taf_v 键名保持不变；其物理含义为
-        相对于基岩半空间露头运动的 AF_1D，而非已经剔除场地效应的纯地形 TAF。
+        一维解析自由场理论台阶(ff_theory)字典（计算成功时），否则返回 None。
     """
     try:  # 元数据写出不应影响建模主流程
         bedrock = _meta_material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料字典
@@ -2805,35 +2803,33 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'extra': {},  # 附加自定义键值
             'folder': os.path.basename(out_dir.rstrip('/\\')),  # 工况文件夹名（来源标识）
         }
-        # ── v6：AF 解析分母（基岩半空间自由地表运动，论文式(5) 口径） ─────────────
+        # ── v6：TAF 解析分母（基岩半空间自由地表运动，论文式(5) 口径） ────────────
         ang_deg = float(material_cfg['angle'])  # SV 入射角（度）
         alpha_r = math.radians(ang_deg if abs(ang_deg) > 1e-12 else 1e-10)  # 入射角弧度（零角用极小值）
         mat_b = _compute_material_params(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 基岩派生参数
         fs = _compute_free_surface_sv_coeff(alpha_r, mat_b['cp'], mat_b['cs'])  # 基岩自由面 SV 反射/转换系数
         factor_h = (1.0 - fs['A1']) * math.cos(alpha_r) + fs['A2'] * math.sin(fs['beta'])  # 水平分量放大系数（0°时=2）
         factor_v = -((1.0 + fs['A1']) * math.sin(alpha_r) + fs['A2'] * math.cos(fs['beta']))  # 竖向分量系数（0°时=0）
-        meta['ff_normalization'] = {  # AF/TAF 归一化说明（Postprocess_All_surface_v2.py 读取）
+        meta['ff_normalization'] = {  # TAF 解析分母块（Compute_TAF_v2.py 读取）
             'method': 'bedrock_halfspace_free_surface',  # 分母口径：基岩半空间自由地表运动
             'A1': _meta_f(fs['A1']), 'A2': _meta_f(fs['A2']),  # 自由面 SV->SV 反射 / SV->P 转换系数
             'beta_deg': _meta_f(math.degrees(fs['beta'])),  # 自由面 P 波角（度）
             'factor_h': _meta_f(factor_h),  # PGA_ff_h = factor_h × max|输入加速度|
             'factor_v': _meta_f(factor_v),  # 竖向自由场系数（仅记录；论文式(5) 统一除以水平分母）
-            'af_h_definition': 'AF_h=PGA_h/(factor_h*PGA_in)',  # 总放大：成层场地效应+地形效应
-            'taf_h_definition': 'TAF_h=AF_h/AF_h_1D_same_side=PGA_h/PGA_h_1D_same_side',  # 纯地形放大
-            'note': 'ff_theory.left/right.taf_h/taf_v are legacy keys storing same-side AF_1D references',
+            'note': 'TAF_h=PGA_h/(factor_h*PGA_in); TAF_v=PGA_v/(factor_h*PGA_in)',
         }
         meta['freefield'] = {  # v6 自由场引擎信息（追溯用）
             'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
             'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
             'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
         }
-        # ── v7：同侧一维场地放大基准 ff_theory（自动 QA 锚点） ──────────────────────
+        # ── v7：远场一维理论台阶 ff_theory（自动 QA 锚点） ──────────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
-        # 按 AF_1D = PGA_1D / (factor_h × PGA_in) 得一维基准；兼容字段名仍为 taf_h/taf_v。
-        # FE 远场 AF 应与之一致(±5%)，由 Postprocess_All_surface_v2.py 自动核对。
-        ff_theory = None  # 同侧一维场地放大基准块初始化
+        # 按 TAF = PGA / (factor_h × PGA_in) 口径得理论台阶；FE 远场平台值应与之一致(±5%)，
+        # 由 Compute_TAF_v3 自动核对——任何网格/阻尼/引擎回归当场暴露。
+        ff_theory = None  # 理论台阶块初始化
         if acc_path and os.path.isfile(acc_path):  # 提供了输入记录时才计算
-            try:  # 一维基准计算失败不影响元数据主体
+            try:  # 理论台阶计算失败不影响元数据主体
                 rec = np.loadtxt(acc_path)
                 acc0 = rec[:, 1]  # 加速度列
                 dt0 = float(rec[1, 0] - rec[0, 0])  # 时间步长
@@ -2851,9 +2847,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                 denom0 = factor_h * float(np.max(np.abs(acc0)))  # 解析分母 = factor_h × PGA_in
                 ff_theory = {'fc_used': _meta_f((damping or {}).get('fc')),  # 瑞利拟合主频
                              'damped': bool(damping and damping.get('enable') and incl),  # 理论值是否含阻尼
-                             'quantity': 'AF_1D relative to bedrock outcrop motion',  # 一维场地放大基准
-                             'legacy_keys': 'taf_h/taf_v retained for compatibility',  # 旧字段名不改
-                             'note': 'fd 一维柱 AF_1D；FE 远场 AF 应与之一致(±5%)'}
+                             'note': 'fd 引擎一维柱地表 PGA/(factor_h*PGA_in)；FE 远场台阶应与之一致(±5%)'}
                 for tag, ys in (('left', geom.H_upper), ('right', geom.H_lower)):  # 左(上平台)/右(下平台)两柱
                     col_t = _build_column(strat_t, ys, p0, 0.0)
                     sol_t = _fd_solve_column(col_t, p0, om0, damp_terms, incl)  # 频域求解（单位入射）
@@ -2864,15 +2858,15 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                     spec_t = np.zeros(len(freqs0), dtype=complex)  # y 向加速度全频谱容器
                     spec_t[idx0] = fld['uy'] * A0[idx0]  # y 向加速度谱
                     ay0 = np.fft.irfft(spec_t, n=Nfft)  # y 向加速度时程
-                    ff_theory[tag] = {'taf_h': _meta_f(float(np.max(np.abs(ax0))) / denom0),  # 兼容键：该柱水平 AF_1D
-                                      'taf_v': _meta_f(float(np.max(np.abs(ay0))) / denom0),  # 兼容键：该柱竖向 AF_1D
+                    ff_theory[tag] = {'taf_h': _meta_f(float(np.max(np.abs(ax0))) / denom0),  # 该柱水平理论台阶
+                                      'taf_v': _meta_f(float(np.max(np.abs(ay0))) / denom0),  # 该柱竖向理论台阶
                                       'surface_y': _meta_f(ys),  # 该柱地表高程
                                       'layers': [seg['name'] for seg in col_t]}  # 该柱层组成（自检用）
-            except Exception as _fe:  # 一维基准计算异常
+            except Exception as _fe:  # 理论台阶计算异常
                 if logger:
                     log_step(logger, 'ff_theory 计算失败(不影响建模): %s', str(_fe))
                 ff_theory = None  # 置空
-        meta['ff_theory'] = ff_theory  # v7：同侧一维场地放大基准块（可能为 None）
+        meta['ff_theory'] = ff_theory  # v7：理论台阶块（可能为 None）
         meta['selfcheck'] = selfcheck  # v8：fd 引擎自检误差（halfspace_err/single_layer_err）
         text = json.dumps(meta, ensure_ascii=False, indent=2, default=_meta_f)  # 序列化为字符串（保留中文，default 兜底 numpy 标量）
         if isinstance(text, bytes):  # Py2 下 ensure_ascii=False 可能返回 bytes
@@ -2882,11 +2876,11 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             f.write(text)  # 写出序列化文本
         if logger:
             log_step(logger, 'case_meta.json 已写出: %s', path)
-        return ff_theory  # v7：返回同侧一维基准供主流程日志打印
+        return ff_theory  # v7：返回理论台阶块供主流程日志打印
     except Exception as _e:  # 捕获任何写出异常
         if logger:
             log_step(logger, 'case_meta.json 写出失败(不影响建模): %s', str(_e))
-        return None  # v7：失败时无一维基准可返回
+        return None  # v7：失败时无理论台阶可返回
 
 
 # ==========================================================
@@ -4036,14 +4030,14 @@ def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终�
 def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, ffcfg,
                                surface_geometry, acc_info, selfcheck, eql_meta,
                                validation_geometry='slope'):  # 写出工况元数据
-    """写出 case_meta.json，并输出同侧一维场地放大基准 QA 摘要。"""
+    """写出 case_meta.json，并输出远场理论台阶 QA 摘要。"""
     first_rec = acc_info[0][0] if acc_info else None
     ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
                                  damping=damping, ffcfg=ffcfg, sgeom=surface_geometry, acc_path=first_rec,
                                  selfcheck=selfcheck, eql_info=eql_meta,
                                  validation_geometry=validation_geometry)
     if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
-        log_step(logger, '同侧一维场地放大基准(兼容键 taf_h/taf_v): 左(上平台) AF_h=%.3f AF_v=%.3f | 右(下平台) AF_h=%.3f AF_v=%.3f (FE 远场 AF 应与之一致±5%%)',
+        log_step(logger, '远场一维理论台阶: 左(上平台) TAF_h=%.3f TAF_v=%.3f | 右(下平台) TAF_h=%.3f TAF_v=%.3f (FE 远场应与之一致±5%%)',
                  ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],
                  ff_theory['right']['taf_h'], ff_theory['right']['taf_v'])
     return ff_theory
