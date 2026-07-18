@@ -14,16 +14,16 @@ import sys  # 导入命令行模块
 import numpy as np  # 导入 NPZ 验收模块
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 定位仓库根目录
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))  # 定位仓库根目录
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'  # Abaqus 启动器
-DEFAULT_ROOT = os.path.join(REPO_ROOT, 'Run', 'ch3_02_input_boundary')  # 默认 U2 论文运行根目录
+DEFAULT_ROOT = os.path.join(REPO_ROOT, 'test', 'Abaqus', 'ch3_02_input_boundary')  # 默认 U2 测试输出根目录
 CASE_NAME = 'case-oblique-homogeneous-negative'  # U2 反向斜入射诊断工况名
 MAX_STEP_SECONDS = 3600  # 单步最大运行时长
 
-MODEL_SOURCE = os.path.join(REPO_ROOT, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py')  # 建模入口
-POST_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Postprocess_All_surface_v2.py')  # ODB 后处理入口
-COLLECT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Collect_All_results_v2.py')  # NPZ 收集入口
-PLOT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Plot_Hybrid_surface_v2.py')  # 绘图入口
+MODEL_SOURCE = os.path.join(REPO_ROOT, 'Modeling', 'slope_frame_ssi_full_v2.py')  # 建模入口
+POST_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Postprocess_All_surface_v2.py')  # ODB 后处理入口
+COLLECT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Collect_All_results_v2.py')  # NPZ 收集入口
+PLOT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Plot_Hybrid_surface_v2.py')  # 绘图入口
 WAVE_SOURCE = os.path.join(REPO_ROOT, 'Wave', 'Impulse', 'Acceleration', 'ricker_wavelet_4Hz.txt')  # 输入波
 INCIDENT_ANGLE = -15.0  # U2 单因素回归：反转 SV 入射方向，判别方向效应与固定侧边界误差
 

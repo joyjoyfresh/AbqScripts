@@ -15,7 +15,7 @@ import Autorun_ch3_03_mesh_convergence_v1 as base  # 复用已验证的四脚本
 
 
 REPO_ROOT = base.REPO_ROOT  # 仓库根目录
-DEFAULT_ROOT = os.path.join(REPO_ROOT, 'Run', 'ch3_03_numerical_convergence')  # U3 论文运行根目录
+DEFAULT_ROOT = os.path.join(REPO_ROOT, 'test', 'Abaqus', 'ch3_03_numerical_convergence')  # U3 测试输出根目录
 BASELINE_DIR = os.path.join(DEFAULT_ROOT, 'run-001', 'case-mesh-8m')  # U3a 的1.0 ms基准工况
 DT_LEVELS = (0.002, 0.0005)  # 仅新增粗、细两级；中间1.0 ms复用 U3a 结果
 

@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(ROOT, 'Batch'))
+sys.path.insert(0, os.path.join(ROOT, 'Run', 'Auto_ch3'))
 import Autorun_ch3_F1_frequency_theory_v1 as f1
 
 

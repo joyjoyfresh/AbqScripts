@@ -10,14 +10,14 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-BATCH_DIR = os.path.join(REPO, 'Batch')
+BATCH_DIR = os.path.join(REPO, 'test', 'Batch')
 if BATCH_DIR not in sys.path:
     sys.path.insert(0, BATCH_DIR)
 import Autorun_ch3_F0_07_manifest_hash_v1 as gate
 
 
 def main():
-    source = os.path.join(REPO, 'Modeling', 'Hybrid', 'reference_layered_psv_v1.py')
+    source = os.path.join(REPO, 'Modeling', 'Archived', 'Hybrid', 'reference_layered_psv_v1.py')
     with tempfile.TemporaryDirectory() as folder:
         run_dir = os.path.join(folder, 'run-001')
         os.makedirs(run_dir)

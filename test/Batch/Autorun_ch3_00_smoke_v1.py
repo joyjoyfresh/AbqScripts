@@ -13,16 +13,16 @@ import subprocess  # 导入外部命令执行模块
 import sys  # 导入解释器和命令行参数模块
 
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 定位仓库根目录
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))  # 定位仓库根目录
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'  # 优先使用环境变量指定的 Abaqus 启动器
-DEFAULT_ROOT = os.path.join(REPO_ROOT, 'Run', 'ch3_00_smoke')  # 默认 U0 论文运行根目录
+DEFAULT_ROOT = os.path.join(REPO_ROOT, 'test', 'Abaqus', 'ch3_00_smoke')  # 默认 U0 测试输出根目录
 CASE_NAME = 'case-homogeneous-freefield'  # 最小均质自由场工况名
 MAX_STEP_SECONDS = 3600  # 每个外部步骤的最长运行时间（秒）
 
-MODEL_SOURCE = os.path.join(REPO_ROOT, 'Modeling', 'Hybrid', 'slope_frame_ssi_full_v2.py')  # 唯一建模入口
-POSTPROCESS_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Postprocess_All_surface_v2.py')  # 单工况 ODB 后处理入口
-COLLECT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Collect_All_results_v2.py')  # 跨工况 NPZ 收集入口
-PLOT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Hybrid', 'Plot_Hybrid_surface_v2.py')  # 集中结果绘图入口
+MODEL_SOURCE = os.path.join(REPO_ROOT, 'Modeling', 'slope_frame_ssi_full_v2.py')  # 唯一建模入口
+POSTPROCESS_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Postprocess_All_surface_v2.py')  # 单工况 ODB 后处理入口
+COLLECT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Collect_All_results_v2.py')  # 跨工况 NPZ 收集入口
+PLOT_SOURCE = os.path.join(REPO_ROOT, 'Postprocess', 'Plot_Hybrid_surface_v2.py')  # 集中结果绘图入口
 WAVE_SOURCE = os.path.join(REPO_ROOT, 'Wave', 'Impulse', 'Acceleration', 'ricker_wavelet_4Hz.txt')  # 宽频最小输入波
 
 CASE_CONFIG = {
