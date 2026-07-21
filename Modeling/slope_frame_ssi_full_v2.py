@@ -108,6 +108,7 @@ freefield_cfg = {
     'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
     'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
     'bottom_ymax_mode': 'local',         # 底边界自由场柱高：local=按 x 上方地表/upper=上平台柱/lower=下平台柱
+    'initial_state_mode': 'raw',         # fd 初态：raw=保留频域绝对基线/incremental=转为 t=0 起算的增量场
 }
 
 # 运行控制配置
@@ -117,6 +118,7 @@ run_cfg = {
     'wave_files': None,                 #! 地震波文件路径：None=扫工况目录全部.txt(旧行为)/字符串或列表=指定文件(绝对路径或相对工况目录)
     'validation_geometry': 'slope',     # 验证几何模式：slope=生产坡地(默认) / flat=显式平场验证(仅freefield)
     'submit_jobs': True,                # 是否提交 Abaqus 作业：False=只建模并写几何审计（F0 基础设施检查）
+    'job_progress_interval_seconds': 360.0,  # 作业进度写入建模日志的间隔(s)；默认6min/<=0=关闭定时进度
 }
 
 # 人工边界配置
@@ -1404,13 +1406,26 @@ def _fd_freefield_at_node(boundary, x0, y0, ymax_col, ctx):  # fd 引擎单节�
         spec = np.zeros(inp['nfreq'], dtype=complex)  # 全频带谱（未求解频点为零）
         spec[inp['idx']] = fields[name] * scale
         out[name] = np.fft.irfft(spec, n=inp['Nfft'])[:inp['Nout']]  # 逆 FFT 并截断回原时长
+    t_out = np.arange(inp['Nout']) * inp['dt']
+    initial_state_mode = str((ctx.ffcfg or {}).get('initial_state_mode', 'raw')).lower()
+    if initial_state_mode not in ('raw', 'incremental'):
+        raise ValueError("freefield_cfg.initial_state_mode 必须为 'raw'/'incremental'，当前为 %s" % initial_state_mode)
+    if initial_state_mode == 'incremental':
+        # 频域两次积分的位移零点和匀速参考系不唯一。Abaqus 动力步从 u=v=0 起算时，
+        # 需把自由场改写为相对 t=0 的增量场，否则边界弹簧会把任意位移常数解释成瞬时外力。
+        for dis_name, vel_name in (('ux', 'vx'), ('uy', 'vy')):
+            dis0 = float(out[dis_name][0])
+            vel0 = float(out[vel_name][0])
+            out[dis_name] = out[dis_name] - dis0 - vel0 * t_out
+            out[vel_name] = out[vel_name] - vel0
+        for stress_name in ('sxx', 'syy', 'sxy'):
+            out[stress_name] = out[stress_name] - float(out[stress_name][0])
     if boundary == 'l':  # 左边界外法向 n=(−1,0)：面力 = −σxx, −σxy
         sigmax = -out['sxx']; sigmay = -out['sxy']  # 嵌入外法向符号
     elif boundary == 'r':  # 右边界外法向 n=(+1,0)：面力 = +σxx, +σxy
         sigmax = out['sxx']; sigmay = out['sxy']  # 嵌入外法向符号
     else:  # 底边界外法向 n=(0,−1)：面力 = −σxy, −σyy
         sigmax = -out['sxy']; sigmay = -out['syy']  # 嵌入外法向符号
-    t_out = np.arange(inp['Nout']) * inp['dt']
     return {'time': t_out, 'ux': out['ux'], 'uy': out['uy'],
             'dotux': out['vx'], 'dotuy': out['vy'], 'sigmax': sigmax, 'sigmay': sigmay}  # 速度与应力
 
@@ -2381,9 +2396,9 @@ def VAB_oblique(site, geom, angle,
         ffcfg_used.update(ffcfg)  # 覆盖默认
     ffcfg_used['tail_seconds'] = float((tcfg or {}).get('tail_seconds', 0.0) or 0.0)  # v8：静默尾段（fd 自由场时窗延长）
     damp_terms = _band_damping_terms(strat, damping)  # v6：各材料带瑞利系数表（fd 自由场衰减一致化）
-    log_step(logger, '%s 自由场引擎=%s(阻尼一致化=%s): 入射角=%.4f°, 水平慢度 p=%.6e, 层数(含基岩)=%d',
+    log_step(logger, '%s 自由场引擎=%s(阻尼一致化=%s, 初态=%s): 入射角=%.4f°, 水平慢度 p=%.6e, 层数(含基岩)=%d',
              model_name, ffcfg_used.get('engine'), ffcfg_used.get('include_damping'),  # 引擎与阻尼开关
-             angle, p_horiz, len(strat))
+             ffcfg_used.get('initial_state_mode', 'raw'), angle, p_horiz, len(strat))
 
     # ============ 读取加速度时程并积分（保留 v7 基线校正）============
     # [输入幅值约定（#5）] 加速度记录积分得到的速度被当作"基底入射上行 SV 波"幅值 E；
@@ -2539,8 +2554,58 @@ def build_models(acc_info, base_model, part_name, inst_name,
     return model_names
 
 
-def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None):
-    """创建并提交Abaqus作业"""
+def _read_sta_step_progress(sta_path, target_step_number):
+    """从Abaqus/Standard状态文件尾部读取目标分析步的最新步时间。"""
+    if not os.path.isfile(sta_path):
+        return None
+    try:
+        with open(sta_path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 262144), os.SEEK_SET)  # 仅读尾部，避免长时程反复扫描整份sta
+            tail = handle.read().decode('ascii', 'ignore')
+        for line in reversed(tail.splitlines()):
+            fields = line.split()
+            if len(fields) < 9:
+                continue
+            try:
+                step_number = int(fields[0])
+                int(fields[1])  # 增量号，排除标题等非数据行
+                step_time = float(fields[7].replace('D', 'E').replace('d', 'e'))
+            except (TypeError, ValueError):
+                continue
+            if step_number == int(target_step_number):
+                return step_time
+    except (IOError, OSError, ValueError):
+        return None
+    return None
+
+
+def _resolve_job_progress_target(model_name, preferred_step_name=DEFAULT_STEP_NAME):
+    """返回sta中的分析步序号、步名和目标时长。"""
+    model = mdb.models[model_name]
+    step_names = [str(name) for name in model.steps.keys() if str(name) != 'Initial']
+    if not step_names:
+        return None, None, None
+    step_name = preferred_step_name if preferred_step_name in step_names else step_names[-1]
+    step_number = step_names.index(step_name) + 1
+    total_seconds = float(model.steps[step_name].timePeriod)
+    return step_number, step_name, total_seconds
+
+
+def _log_job_progress(logger, job_name, step_name, current_seconds, total_seconds, note=None):
+    """按统一格式写入单条作业分析时间进度。"""
+    current = max(0.0, float(current_seconds or 0.0))
+    total = max(0.0, float(total_seconds or 0.0))
+    percent = min(100.0, 100.0 * current / total) if total > 0.0 else 0.0
+    suffix = '，%s' % note if note else ''
+    log_step(logger, '作业进度: %s，已算到 %.3f 秒/共 %.3f 秒（%.1f%%，%s）%s',
+             job_name, current, total, percent, step_name or 'unknown-step', suffix)
+
+
+def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None,
+               progress_interval_seconds=360.0):
+    """创建并提交Abaqus作业，并按sta中的分析步时间定期记录进度。"""
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
     t0 = time.time()
     job_name = 'job-' + model_name
@@ -2562,9 +2627,38 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None)
 
     mdb.save()
     log_step(logger, '%s作业已提交，正在等待完成...', job_name)
-    mdb.jobs[job_name].submit(consistencyChecking=OFF)
-    mdb.jobs[job_name].waitForCompletion()
-    log_step(logger, '%s已完成: 耗时=%.2fs', job_name, time.time() - t0)
+    step_number, step_name, total_seconds = _resolve_job_progress_target(model_name)
+    interval = max(0.0, float(progress_interval_seconds or 0.0))
+    sta_path = os.path.join(os.getcwd(), job_name + '.sta')
+    job = mdb.jobs[job_name]
+    job.submit(consistencyChecking=OFF)
+    if step_number is not None and interval > 0.0:
+        _log_job_progress(logger, job_name, step_name, 0.0, total_seconds,
+                          '监控已启动，每%.0f秒更新' % interval)
+    next_report = time.time() + interval if interval > 0.0 else None
+    terminal_statuses = tuple(
+        value for value in (
+            globals().get('COMPLETED'), globals().get('ABORTED'),
+            globals().get('TERMINATED'), globals().get('CHECK_COMPLETED'),
+        ) if value is not None
+    )
+    while terminal_statuses and job.status not in terminal_statuses:
+        now = time.time()
+        if next_report is not None and now >= next_report:
+            current_seconds = _read_sta_step_progress(sta_path, step_number)
+            note = None if current_seconds is not None else 'sta尚未产生目标步增量'
+            _log_job_progress(logger, job_name, step_name, current_seconds,
+                              total_seconds, note)
+            next_report = now + interval
+        time.sleep(min(5.0, interval) if interval > 0.0 else 5.0)
+    job.waitForCompletion()
+    if step_number is not None and interval > 0.0:
+        current_seconds = _read_sta_step_progress(sta_path, step_number)
+        _log_job_progress(logger, job_name, step_name,
+                          total_seconds if current_seconds is None else current_seconds,
+                          total_seconds, '状态=%s' % str(job.status))
+    log_step(logger, '%s已结束: 状态=%s, 耗时=%.2fs',
+             job_name, str(job.status), time.time() - t0)
 
 
 # ==========================================================
@@ -2826,6 +2920,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
             'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
             'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
+            'initial_state_mode': (ffcfg or {}).get('initial_state_mode', 'raw'),  # fd 初态参考口径
         }
         # ── v7：同侧一维场地放大基准 ff_theory（自动 QA 锚点） ──────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
@@ -3155,7 +3250,8 @@ def _run_2d_element_eql(base_model, part_name, inst_name, site, geom, eql_cfg, d
     prev = None
     for outer in range(n_out):  # 外迭代
         submit_job(num_cpus=job_cfg['num_cpus'], memory_percent=job_cfg['memory_percent'],
-                   model_name=model_name, logger=logger)
+                   model_name=model_name, logger=logger,
+                   progress_interval_seconds=float((run_cfg or {}).get('job_progress_interval_seconds', 360.0)))
         odb_path = 'job-%s.odb' % model_name
         gmax = _read_element_max_shear_strain(odb_path, inst_name, soil_labels)  # 读应变
         geff = {e: ratio * g for e, g in gmax.items()}  # 有效应变
@@ -4062,14 +4158,15 @@ def _apply_scene_mode(scene, logger):  # 校验并应用 TSSI 场景开关
         log_step(logger, '[ssi] 已强制 tssi_cfg.enable=True（全耦合模型）')
 
 
-def _submit_models(model_names, logger):  # 批量提交作业
+def _submit_models(model_names, logger, progress_interval_seconds=360.0):  # 批量提交作业
     """按全局 job_cfg 提交模型列表。"""
     log_step(logger, '====== 阶段: 提交作业(共 %d 个模型) ======', len(model_names))
     for model_name in model_names:
         submit_job(num_cpus=job_cfg['num_cpus'],
                    memory_percent=job_cfg['memory_percent'],
                    model_name=model_name,
-                   logger=logger)
+                   logger=logger,
+                   progress_interval_seconds=progress_interval_seconds)
 
 
 def _write_geometry_validation_audit(model_name, part_name, inst_name, geom,
@@ -4202,7 +4299,8 @@ def main():
             write_tssi_meta(logger)  # 写 tssi_meta（含 scene='fixed'）
             model_names = build_fixed_model(logger)  # 建模 + 钢筋注入
 
-            _submit_models(model_names, logger)  # fixed 场景提交固定基础模型
+            _submit_models(model_names, logger,
+                           float(_run_cfg.get('job_progress_interval_seconds', 360.0)))  # fixed 场景提交固定基础模型
 
             log_step(logger, '所有作业已完成，总耗时=%.2fs', time.time() - total_start)
             return  # fixed 场景提前返回，不走坡地建模流程
@@ -4263,7 +4361,8 @@ def main():
                 _add_freefield_crest_outputs(_mn, inst_name, logger)
 
         if bool(_run_cfg.get('submit_jobs', True)):
-            _submit_models(model_names, logger)  # 统一提交所有待运行模型
+            _submit_models(model_names, logger,
+                           float(_run_cfg.get('job_progress_interval_seconds', 360.0)))  # 统一提交所有待运行模型
         else:
             log_step(logger, 'submit_jobs=False：仅保留建模与几何审计，不提交 Abaqus 求解')
 

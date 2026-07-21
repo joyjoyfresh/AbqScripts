@@ -7,6 +7,7 @@
 3. 散列计算一致性：配置字典散列与文件散列正确无误。
 4. 解释器分发模拟：Modeling与后处理脚本准确映射到 Abaqus Python 与普通 Python。
 5. 清理逻辑有效性：仅在 QA 通过且最终数据包存在时才执行清理，失败时完整保留。
+6. 作业进度日志可增量读取，且不会重复输出旧进度。
 """
 
 from __future__ import print_function
@@ -122,6 +123,35 @@ class TestBatchTemplate(unittest.TestCase):
         # 验证汇总与绘图脚本不在里面
         self.assertNotIn('Collect_All_results_v2.py', runner.ABAQUS_SCRIPTS)
         self.assertNotIn('Plot_Hybrid_surface_v2.py', runner.ABAQUS_SCRIPTS)
+
+    def test_incremental_progress_log_reading(self):
+        """测试建模进度日志的增量读取与旧日志拦截。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            log_path = os.path.join(temp_dir, 'slope_frame_ssi_full_v2.log')
+            with open(log_path, 'wb') as handle:
+                handle.write('2026-01-01 作业进度: job-old，已算到 1.000 秒/共 2.000 秒\n'.encode('utf-8'))
+            old_time = 1000.0
+            os.utime(log_path, (old_time, old_time))
+            offset, messages = runner._read_new_job_progress(log_path, 0, old_time + 10.0)
+            self.assertEqual(messages, [], "旧运行遗留日志不应转发到终端")
+
+            with open(log_path, 'wb') as handle:
+                handle.write('普通日志\n作业进度: job-a，已算到 2.000 秒/共 10.000 秒\n'.encode('utf-8'))
+            current_time = old_time + 20.0
+            os.utime(log_path, (current_time, current_time))
+            offset, messages = runner._read_new_job_progress(log_path, 0, current_time)
+            self.assertEqual(len(messages), 1)
+            self.assertIn('job-a', messages[0])
+
+            with open(log_path, 'ab') as handle:
+                handle.write('作业进度: job-a，已算到 4.000 秒/共 10.000 秒\n'.encode('utf-8'))
+            new_offset, messages = runner._read_new_job_progress(log_path, offset, current_time)
+            self.assertGreater(new_offset, offset)
+            self.assertEqual(len(messages), 1)
+            self.assertIn('4.000', messages[0])
+        finally:
+            shutil.rmtree(temp_dir)
 
     def test_conditional_cleanup(self):
         """测试条件大文件清理规则。"""

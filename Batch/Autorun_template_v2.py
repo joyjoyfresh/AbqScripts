@@ -8,6 +8,7 @@
   3. 多线程并行执行。
   4. 自动清理指定的中间大文件（如 odb/inp 等）。
   5. 执行全局汇总与出图的后处理脚本。
+  6. 将建模脚本写出的Abaqus分析时间进度实时转发到终端。
 """
 
 import os  # 导入操作系统相关路径与目录操作模块
@@ -19,12 +20,17 @@ import concurrent.futures  # 导入并发模块以实现多工况文件夹并行
 import hashlib  # 导入哈希模块用于计算配置与源文件散列
 import datetime  # 导入时间模块用于清单追踪
 import math  # 导入数学模块用于临界角计算
+import time  # 导入时间模块用于轮询子进程与进度日志
+import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl", "com"]  # 执行后自动删除的中间文件类型，留空则不删除
 MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
+TERMINAL_PROGRESS_POLL_SECONDS = 300.0  # autorun每5min读取建模进度日志并转发到终端
+PROCESS_STATUS_POLL_SECONDS = 5.0  # 轻量检查子进程是否结束，避免低频进度轮询阻塞后续步骤
+_PROGRESS_PRINT_LOCK = threading.Lock()  # 并发工况共用终端输出锁
 
 # Abaqus 启动路径与需要由 Abaqus Python 运行的脚本名单
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'
@@ -313,6 +319,41 @@ def create_and_fill_folder(folder_path, source_files, config):  # 创建目录�
         json.dump(config or {}, f, ensure_ascii=False, indent=2)  # 序列化配置为 JSON 文件
 
 
+def _read_new_job_progress(log_path, offset, not_before):
+    """增量读取建模日志中的作业进度行，返回新偏移和消息列表。"""
+    if not os.path.isfile(log_path):
+        return offset, []
+    try:
+        if os.path.getmtime(log_path) + 1.0 < not_before:
+            return offset, []  # 忽略同目录上一次运行遗留的旧日志
+        size = os.path.getsize(log_path)
+        if size < offset:
+            offset = 0  # 建模脚本以写模式重建日志后，从文件头重新读取
+        with open(log_path, 'rb') as handle:
+            handle.seek(offset)
+            data = handle.read()
+            new_offset = handle.tell()
+        text = data.decode('utf-8', 'replace')
+        messages = []
+        for line in text.splitlines():
+            marker = '作业进度:'
+            if marker in line:
+                messages.append(line[line.index(marker):].strip())
+        return new_offset, messages
+    except (IOError, OSError, ValueError):
+        return offset, []
+
+
+def _print_job_progress(folder_path, messages):
+    """按整行输出进度，防止多工况并发时字符交叉。"""
+    if not messages:
+        return
+    case_name = os.path.basename(os.path.normpath(folder_path))
+    with _PROGRESS_PRINT_LOCK:
+        for message in messages:
+            print("[运行状态][{}] {}".format(case_name, message), flush=True)
+
+
 def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按顺序执行指定的脚本
     """在工况文件夹内按顺序执行指定的脚本，自动分发 Abaqus cae 和普通 Python 解释器。
 
@@ -348,8 +389,29 @@ def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按�
             handle.write("命令: {}\n工作目录: {}\n\n".format(' '.join(cmd), folder_path).encode('utf-8'))
             handle.flush()
             try:
-                result = subprocess.run(cmd, cwd=folder_path, stdout=handle, stderr=subprocess.STDOUT, check=False, env=env)
-                returncode = result.returncode
+                started_at = time.time()
+                process = subprocess.Popen(cmd, cwd=folder_path, stdout=handle,
+                                           stderr=subprocess.STDOUT, env=env)
+                progress_offset = 0
+                progress_log = os.path.join(
+                    folder_path, os.path.splitext(script_name)[0] + '.log',
+                ) if script_name == 'slope_frame_ssi_full_v2.py' else None
+                next_progress_poll = started_at + float(TERMINAL_PROGRESS_POLL_SECONDS)
+                while process.poll() is None:
+                    now = time.time()
+                    if progress_log and now >= next_progress_poll:
+                        progress_offset, messages = _read_new_job_progress(
+                            progress_log, progress_offset, started_at,
+                        )
+                        _print_job_progress(folder_path, messages)
+                        next_progress_poll = now + float(TERMINAL_PROGRESS_POLL_SECONDS)
+                    time.sleep(max(0.5, float(PROCESS_STATUS_POLL_SECONDS)))
+                if progress_log:
+                    progress_offset, messages = _read_new_job_progress(
+                        progress_log, progress_offset, started_at,
+                    )
+                    _print_job_progress(folder_path, messages)
+                returncode = process.returncode
             except Exception as e:
                 handle.write("\n子进程启动异常: {}\n".format(str(e)).encode('utf-8'))
                 returncode = -999

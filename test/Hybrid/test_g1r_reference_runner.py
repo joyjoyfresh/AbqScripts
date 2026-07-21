@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import importlib.util
 import os
+import tempfile
 
 import numpy as np
 
@@ -17,6 +18,16 @@ SPEC.loader.exec_module(RUNNER)
 
 
 def main():
+    fd, progress_path = tempfile.mkstemp(suffix='.log')
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write('作业进度: job-test，已算到 1.000 秒/共 2.000 秒\n'.encode('utf-8'))
+        started_at = os.path.getmtime(progress_path)
+        offset, messages = RUNNER._read_new_job_progress(progress_path, 0, started_at)
+        assert offset > 0 and len(messages) == 1 and 'job-test' in messages[0]
+    finally:
+        os.remove(progress_path)
+
     cases = RUNNER.build_case_plan()
     assert len(cases) == 12
     assert len(set(item['case_id'] for item in cases)) == 12
@@ -27,6 +38,14 @@ def main():
     assert diagnostic['stage'] == 'diagnostic'
     assert diagnostic['config']['mesh_cfg']['elems_per_wavelength'] == 20
     assert next(item for item in cases if item['case_id'] == 'case-G1r-S2-broadband')['config']['mesh_cfg']['elems_per_wavelength'] == 10
+    init_diagnostics = RUNNER.build_real_initialization_diagnostic_cases()
+    assert len(init_diagnostics) == 2
+    assert all(item['stage'] == 'diagnostic' for item in init_diagnostics)
+    assert all(item['profile']['id'] == 'H1' for item in init_diagnostics)
+    assert all(
+        item['config']['freefield_cfg']['initial_state_mode'] == 'incremental'
+        for item in init_diagnostics
+    )
     assert all(
         item['config']['mesh_cfg']['elems_per_wavelength'] == 20
         for item in cases
@@ -43,6 +62,8 @@ def main():
         assert config['tssi_cfg'] == {'enable': False, 'scene': 'freefield'}
         assert config['run_cfg']['qa_cfg']['required'] == ['frf', 'response_spectrum']
         assert 'job_cfg' not in config
+        expected_initial_state = 'incremental' if item['stage'] == 'real' else 'raw'
+        assert config['freefield_cfg']['initial_state_mode'] == expected_initial_state
         RUNNER.validate_config(config)
 
     frequencies = np.asarray([0.5, 2.0, 4.0, 8.0, 10.0])
