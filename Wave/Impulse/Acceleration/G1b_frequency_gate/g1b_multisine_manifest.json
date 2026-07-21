@@ -1,0 +1,110 @@
+{
+  "acceptance": {
+    "maximum_abs_velocity_residual_m_s": 1e-05,
+    "maximum_abs_velocity_trend_intercept_m_s": 1e-08,
+    "maximum_abs_velocity_trend_slope_m_s2": 1e-08,
+    "maximum_crest_factor": 5.0,
+    "maximum_effective_input_log_magnitude_rmse": 1e-06,
+    "maximum_effective_input_phase_rmse_rad": 1e-06,
+    "maximum_phase_coherence": 0.35,
+    "minimum_valid_fraction_0p5_10hz": 0.95
+  },
+  "generation_parameters": {
+    "dt_s": 0.001,
+    "passband_hz": [
+      0.5,
+      12.0
+    ],
+    "phase_b_seed": 20260719,
+    "ramp_seconds": 0.75,
+    "sample_count": 8192,
+    "shoulder_hz": [
+      0.35,
+      12.5
+    ],
+    "target_pga_m_s2": 0.9810000000000001,
+    "velocity_trend_correction": "two_zero_integral_endpoint_zero_basis_functions"
+  },
+  "generator": "generate_g1b_multisine.py",
+  "passed": true,
+  "phase_coherence_0p5_10hz": 0.04860079374973925,
+  "provenance_note": "schema 1 inputs were used only for SYS-S2 tail convergence in Run/ch4_G1b_frequency_gate/run-001; schema 2 closes the model velocity-trend gate",
+  "purpose": "G1b 0.5-10 Hz complex-FRF full-band gate",
+  "schema_version": 2,
+  "signals": [
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 2.1391470123445718e-12,
+      "crest_factor": 1.7769780304511609,
+      "dt_s": 0.001,
+      "duration_s": 8.191,
+      "effective_input_log_magnitude_rmse": 8.552759314981879e-10,
+      "effective_input_phase_rmse_rad": 1.1081581329738766e-09,
+      "endpoint_abs_max_m_s2": 0.0,
+      "filename": "g1b_multisine_phase_a.txt",
+      "label": "A",
+      "mean_m_s2": -2.1387663307059768e-09,
+      "pga_m_s2": 0.9810000000000001,
+      "phase_mode": "schroeder",
+      "pilot_signal_sha256": "6b98cfdfd449e0d01b99ee5922e557fa856a66040af6cd193afc4bc400ec0844",
+      "pre_normalization_velocity_trend_correction_coefficients": [
+        -0.0010629218233095018,
+        8.946694795894021e-05
+      ],
+      "rms_m_s2": 0.5520608489182794,
+      "sample_count": 8192,
+      "sha256": "c92b02ff201c957ced9569914fc0db1ca74e5d4f5e6483b21348db31298e8bf5",
+      "spectrum_mask_ratio": 0.05,
+      "validation_band_hz": [
+        0.5,
+        10.0
+      ],
+      "validation_candidate_bin_count": 311,
+      "validation_valid_bin_count": 311,
+      "validation_valid_fraction": 1.0,
+      "validation_valid_frequency_range_hz": [
+        0.518798828125,
+        9.979248046875
+      ],
+      "velocity_residual_m_s": -1.7520773679113866e-08,
+      "velocity_trend_intercept_m_s": 7.689185935293217e-17,
+      "velocity_trend_slope_m_s2": 2.1583685300559505e-17
+    },
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 2.065424986903572e-13,
+      "crest_factor": 3.3092903137621663,
+      "dt_s": 0.001,
+      "duration_s": 8.191,
+      "effective_input_log_magnitude_rmse": 1.7983481455751153e-10,
+      "effective_input_phase_rmse_rad": 1.16834035250266e-10,
+      "endpoint_abs_max_m_s2": 0.0,
+      "filename": "g1b_multisine_phase_b.txt",
+      "label": "B",
+      "mean_m_s2": -2.0656071297864287e-10,
+      "pga_m_s2": 0.9810000000000001,
+      "phase_mode": "random",
+      "pilot_signal_sha256": "65dcdc06fe28261b0012843aad768e31bb36b81d1fbf86295eb7c6819f71a9e6",
+      "pre_normalization_velocity_trend_correction_coefficients": [
+        -0.0001868339466322261,
+        -7.068383805110926e-05
+      ],
+      "rms_m_s2": 0.2964381806940203,
+      "sample_count": 8192,
+      "sha256": "6931e7c2ba987dd6f30e8ab4c09daf3faed60be0c171d30e7db6b07b2168af14",
+      "spectrum_mask_ratio": 0.05,
+      "validation_band_hz": [
+        0.5,
+        10.0
+      ],
+      "validation_candidate_bin_count": 311,
+      "validation_valid_bin_count": 311,
+      "validation_valid_fraction": 1.0,
+      "validation_valid_frequency_range_hz": [
+        0.518798828125,
+        9.979248046875
+      ],
+      "velocity_residual_m_s": -1.6921450907148028e-09,
+      "velocity_trend_intercept_m_s": -2.324851993749524e-17,
+      "velocity_trend_slope_m_s2": 1.1447082473128713e-18
+    }
+  ]
+}

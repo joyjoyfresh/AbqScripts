@@ -20,10 +20,10 @@ v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的�
      同侧规则：x ≤ x_toe（坡顶平台+坡面）用 left 柱，x > x_toe（坡脚平台）用 right 柱。
   3. 复频响与傅里叶谱放大：规范 NPZ 保存复数 H、相位所需信息和显式 valid_mask；
      FSAF=|H| 只作为确定性派生视图；真实一维参考齐全时另算 FSAF_1D。
-     同侧端点分母另记 station_ratio，禁止误称匹配均质坡 H_topo。
+     同侧端点分母另记 station_ratio，禁止误称匹配均质坡 H_topo；qa_cfg.frf_fmax_hz 可独立冻结论文频带。
   4. 反应谱：计算 5% 阻尼弹性伪加速度谱 PSA；只有配置了同一记录的真实 rock/1D 参考时才计算
      RSAF_rock、RSAF_1D 和 URSAF_z，缺参考或分母过小时写 NaN+valid_mask，不以 epsilon 造峰。
-  5. QA：垂直入射检查两端；斜入射检查传播上游端，并独立记录频响与反应谱协议状态。
+  5. QA：垂直入射检查两端；斜入射检查传播上游端，记录末段残振，并独立记录频响与反应谱协议状态。
 
 输入：job-*.odb + case_meta.json + 输入波 txt（路径优先取 case_config.json 的 run_cfg.wave_files，
       按文件名主干与记录名匹配；缺省回退工况目录下同名 .txt）。
@@ -70,7 +70,7 @@ except Exception:
 
 SPEC_MASK_RATIO = 0.05   # 输入谱幅值掩码比例：低于峰值 5% 的频点剔除（0/0 噪声带）
 F_LO = 0.3               # 传函可靠带下限(Hz)：更低频段脉冲能量太薄
-FMAX_FACTOR = 2.5        # 可靠带上限 = FMAX_FACTOR×fc（网格 K-L 判据同口径），fc 缺失则不截
+FMAX_FACTOR = 2.5        # 未显式配置 frf_fmax_hz 时，兼容旧工况的上限 = FMAX_FACTOR×fc
 PAD_FACTOR = 4           # FFT 补零倍数（防卷绕，与建模脚本 fd 引擎同口径）
 QA_TOL = 0.05            # 远场 AF_h 对拍一维理论台阶的相对误差阈值（±5%）
 TAFV_GUARD = 0.05        # taf_v 低于该值视为"竖向自由场≈0"（垂直入射），TAF_v 置 NaN 防除零
@@ -191,12 +191,25 @@ def _padded_fft_length(n):  # 统一计算补零后的 FFT 长度
     return nfft
 
 
-def compute_complex_H(a_out_mat, a_ref, dt, fc=None):
+def resolve_frf_fmax_hz(fc=None, fmax_hz=None):
+    """解析复频响频带上限，显式上限优先于阻尼主频派生值。"""
+    if fmax_hz is not None:
+        value = float(fmax_hz)
+        if not np.isfinite(value) or value <= F_LO:
+            raise ValueError('frf_fmax_hz 必须大于 %.3f Hz' % F_LO)
+        return value
+    if fc is not None and float(fc) > 0.0:
+        return FMAX_FACTOR * float(fc)
+    return None
+
+
+def compute_complex_H(a_out_mat, a_ref, dt, fc=None, fmax_hz=None):
     """计算候选物理频带上的复频响并显式返回输入谱有效掩码。
 
-    返回 ``(freqs, H_complex, valid_mask, A_ref)``。候选轴先按 ``F_LO`` 和可选网格上限裁剪，
+    返回 ``(freqs, H_complex, valid_mask, A_ref)``。候选轴先按 ``F_LO`` 和可选频带上限裁剪，
     再按候选带内参考谱峰值执行幅值掩码；无效频点写复 NaN。这样既保留显式无效点，
-    又避免把整个 Nyquist 高频区的 NaN 矩阵写入规范数据包。
+    又避免把整个 Nyquist 高频区的 NaN 矩阵写入规范数据包。``fmax_hz`` 用于把论文频带
+    与材料阻尼主频 ``fc`` 解耦；未显式提供时保留旧的 ``FMAX_FACTOR*fc`` 行为。
     """
     a_out_mat = np.atleast_2d(np.asarray(a_out_mat, dtype=float))
     a_ref = np.asarray(a_ref, dtype=float).reshape(-1)
@@ -210,8 +223,9 @@ def compute_complex_H(a_out_mat, a_ref, dt, fc=None):
     A_out_full = np.fft.rfft(a_out_mat, n=nfft, axis=1)  # 各节点单边谱
     freqs_full = np.fft.rfftfreq(nfft, dt)  # 完整频率轴
     candidate = freqs_full >= F_LO
-    if fc is not None and float(fc) > 0.0:
-        candidate &= freqs_full <= FMAX_FACTOR * float(fc)
+    effective_fmax = resolve_frf_fmax_hz(fc=fc, fmax_hz=fmax_hz)
+    if effective_fmax is not None:
+        candidate &= freqs_full <= effective_fmax
     freqs = freqs_full[candidate]
     A_ref = A_ref_full[candidate]
     A_out = A_out_full[:, candidate]
@@ -228,9 +242,10 @@ def compute_complex_H(a_out_mat, a_ref, dt, fc=None):
     return freqs, H_complex, keep, A_ref
 
 
-def compute_H(a_out_mat, a_in, dt, fc=None):
+def compute_H(a_out_mat, a_in, dt, fc=None, fmax_hz=None):
     """兼容旧调用的 FSAF 视图：返回可靠频点及 ``|H_complex|``。"""
-    freqs, H_complex, valid_mask, _unused_ref = compute_complex_H(a_out_mat, a_in, dt, fc=fc)
+    freqs, H_complex, valid_mask, _unused_ref = compute_complex_H(
+        a_out_mat, a_in, dt, fc=fc, fmax_hz=fmax_hz)
     return freqs[valid_mask], np.abs(H_complex[:, valid_mask])
 
 
@@ -326,7 +341,8 @@ def compute_psa(acc_mat, dt, periods, damping=RSA_DAMPING):
     return stiffness * max_abs_disp
 
 
-def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs, excitation_valid, fc=None):
+def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs,
+                             excitation_valid, fc=None, fmax_hz=None):
     """计算相对同侧真实一维参考时程的复谱比及二维有效掩码。
 
     结果仅在入射波与对应一维参考谱同时有效时保留；缺少任一侧参考时，该侧保持复NaN。
@@ -343,7 +359,7 @@ def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs, e
         if reference is None or not np.any(node_mask):
             continue
         side_freqs, side_transfer, side_valid, _unused = compute_complex_H(
-            acc_h[node_mask], reference, dt, fc=fc)
+            acc_h[node_mask], reference, dt, fc=fc, fmax_hz=fmax_hz)
         if side_freqs.shape != freqs.shape or not np.allclose(side_freqs, freqs):
             raise RuntimeError('%s 一维参考谱比频轴与入射频响不一致' % side)
         shared = excitation_valid & side_valid
@@ -496,6 +512,32 @@ def _qa_config(case_cfg):  # 兼容旧顶层并优先使用生产规范中的 ru
     merged = dict(((case_cfg.get('run_cfg') or {}).get('qa_cfg') or {}))
     merged.update(case_cfg.get('qa_cfg') or {})
     return merged
+
+
+def tail_rms_ratio_stats(signal_mat, tail_fraction=0.10):
+    """返回末段 RMS/全程峰值的节点统计，用于识别未衰减即截断的时程。"""
+    values = np.atleast_2d(np.asarray(signal_mat, dtype=float))
+    fraction = float(tail_fraction)
+    if not np.isfinite(fraction) or fraction <= 0.0 or fraction > 0.5:
+        raise ValueError('frf_tail_fraction 必须位于 (0, 0.5]')
+    if values.shape[1] < 2:
+        return {'median': None, 'p95': None, 'max': None, 'valid_count': 0}
+    tail_count = max(1, int(math.ceil(fraction * values.shape[1])))
+    peaks = np.max(np.abs(values), axis=1)
+    valid = np.isfinite(peaks) & (peaks > SAFE_DENOM_EPS)
+    if not np.any(valid):
+        return {'median': None, 'p95': None, 'max': None, 'valid_count': 0}
+    tail_rms = np.sqrt(np.mean(values[:, -tail_count:] ** 2, axis=1))
+    ratios = tail_rms[valid] / peaks[valid]
+    ratios = ratios[np.isfinite(ratios)]
+    if ratios.size == 0:
+        return {'median': None, 'p95': None, 'max': None, 'valid_count': 0}
+    return {
+        'median': float(np.median(ratios)),
+        'p95': float(np.percentile(ratios, 95.0)),
+        'max': float(np.max(ratios)),
+        'valid_count': int(ratios.size),
+    }
 
 
 def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取各类 QA 门槛
@@ -1294,6 +1336,9 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     logger = logger or log_step()
     record = strip_record_name(odb_path)
     factor_h, factor_v, taf_lr, x_toe, fc = meta_pieces(meta)
+    qa_cfg = _qa_config(case_cfg)
+    explicit_fmax = qa_cfg.get('frf_fmax_hz')
+    frf_fmax_hz = resolve_frf_fmax_hz(fc=fc, fmax_hz=explicit_fmax)
     wave = find_wave_file(record, case_cfg)  # 定位输入波（PGA_in 与 H 分母）
     if wave is None:
         log_step(logger, '警告: %s 找不到匹配输入波 txt，AF/TAF/H 跳过，仅输出 PGA', record)
@@ -1336,8 +1381,10 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         a_in_pad = np.zeros(n_len)  # 输入补零到地表时程长度（尾段静默）
         m = min(n_len, a_in.size)
         a_in_pad[:m] = a_in[:m]
-        freqs, H_h_complex, input_valid, input_spectrum = compute_complex_H(a1_mat, a_in_pad, dt, fc=fc)
-        freqs_v, H_v_complex, input_valid_v, _unused_input_v = compute_complex_H(a2_mat, a_in_pad, dt, fc=fc)
+        freqs, H_h_complex, input_valid, input_spectrum = compute_complex_H(
+            a1_mat, a_in_pad, dt, fc=fc, fmax_hz=frf_fmax_hz)
+        freqs_v, H_v_complex, input_valid_v, _unused_input_v = compute_complex_H(
+            a2_mat, a_in_pad, dt, fc=fc, fmax_hz=frf_fmax_hz)
         if freqs_v.shape != freqs.shape or not np.allclose(freqs_v, freqs) or not np.array_equal(input_valid_v, input_valid):
             raise RuntimeError('水平/竖向复频响的频轴或输入有效掩码不一致')
 
@@ -1346,7 +1393,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         H_station = np.empty(H_h_complex.shape, dtype=np.complex128)
         H_station[:] = complex(float('nan'), float('nan'))
         station_valid = np.zeros(H_h_complex.shape, dtype=bool)
-        f_l, H_l, valid_l, _unused_l = compute_complex_H(a1_mat[left_mask], a1_mat[0], dt, fc=fc)
+        f_l, H_l, valid_l, _unused_l = compute_complex_H(
+            a1_mat[left_mask], a1_mat[0], dt, fc=fc, fmax_hz=frf_fmax_hz)
         if f_l.shape != freqs.shape or not np.allclose(f_l, freqs):
             raise RuntimeError('左参考台站谱比频轴与入射频响不一致')
         shared_l = input_valid & valid_l
@@ -1354,7 +1402,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
             H_station[global_index, shared_l] = H_l[local_index, shared_l]
             station_valid[global_index, shared_l] = True
         if np.any(~left_mask):
-            f_r, H_r, valid_r, _unused_r = compute_complex_H(a1_mat[~left_mask], a1_mat[-1], dt, fc=fc)
+            f_r, H_r, valid_r, _unused_r = compute_complex_H(
+                a1_mat[~left_mask], a1_mat[-1], dt, fc=fc, fmax_hz=frf_fmax_hz)
             if f_r.shape != freqs.shape or not np.allclose(f_r, freqs):
                 raise RuntimeError('右参考台站谱比频轴与入射频响不一致')
             shared_r = input_valid & valid_r
@@ -1378,16 +1427,23 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
             if np.any(finite):
                 scale = np.maximum(np.abs(fsaf_h[finite]), SAFE_DENOM_EPS)
                 identity_error = float(np.max(np.abs(check_fsaf[finite] - fsaf_h[finite]) / scale))
-        band = freqs >= F_LO
-        if fc is not None and float(fc) > 0.0:
-            band &= freqs <= FMAX_FACTOR * float(fc)
-        if band.size:
-            band[0] = False
         valid_count = int(np.sum(input_valid))
-        candidate_count = int(np.sum(band))
+        candidate_count = int(freqs.size)
         valid_fraction = float(valid_count) / float(candidate_count) if candidate_count else 0.0
-        min_valid_bins = int(_qa_config(case_cfg).get('min_frf_valid_bins', 8))
-        frf_pass = bool(valid_count >= min_valid_bins and identity_error is not None and identity_error <= 1.0e-8)
+        min_valid_bins = int(qa_cfg.get('min_frf_valid_bins', 8))
+        tail_fraction = float(qa_cfg.get('frf_tail_fraction', 0.10))
+        surface_tail = tail_rms_ratio_stats(a1_mat, tail_fraction=tail_fraction)
+        input_tail = tail_rms_ratio_stats(a_in_pad, tail_fraction=tail_fraction)
+        tail_limit_raw = qa_cfg.get('max_frf_tail_rms_ratio')
+        tail_limit = float(tail_limit_raw) if tail_limit_raw is not None else None
+        tail_pass = None
+        if tail_limit is not None:
+            surface_p95 = surface_tail.get('p95')
+            input_max = input_tail.get('max')
+            tail_pass = bool(surface_p95 is not None and input_max is not None and
+                             surface_p95 <= tail_limit and input_max <= tail_limit)
+        frf_pass = bool(valid_count >= min_valid_bins and identity_error is not None and
+                        identity_error <= 1.0e-8 and tail_pass is not False)
         frf_quality = {
             'status': 'passed' if frf_pass else 'failed', 'passed': frf_pass,
             'reference': 'incident_base_acceleration',
@@ -1395,11 +1451,18 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
             'valid_bin_count': valid_count, 'candidate_bin_count': candidate_count,
             'valid_fraction': valid_fraction, 'min_valid_bins': min_valid_bins,
             'spectrum_mask_ratio': SPEC_MASK_RATIO, 'frequency_lower_hz': F_LO,
-            'frequency_upper_hz': FMAX_FACTOR * float(fc) if fc is not None and float(fc) > 0.0 else None,
+            'frequency_upper_hz': frf_fmax_hz,
+            'frequency_upper_source': ('run_cfg.qa_cfg.frf_fmax_hz' if explicit_fmax is not None
+                                       else ('damping_fc_factor' if frf_fmax_hz is not None else 'nyquist')),
             'zero_padding_factor': PAD_FACTOR,
             'fft_length': _padded_fft_length(max(a1_mat.shape[1], a_in_pad.size)),
             'window': 'full_odb_time_history_no_taper', 'detrend': 'none',
             'fsaf_identity_max_relative_error': identity_error,
+            'tail_window_fraction': tail_fraction,
+            'surface_tail_rms_ratio': surface_tail,
+            'input_tail_rms_ratio': input_tail,
+            'tail_quietness_threshold': tail_limit,
+            'tail_quietness_passed': tail_pass,
             'station_ratio_definition': 'same_side_endpoint_reference_not_matched_homogeneous_slope',
         }
         frf_payload = {
@@ -1426,7 +1489,8 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         ref_left = rsa_payload.get('reference_1D_left_acc_h') if rsa_payload is not None else None
         ref_right = rsa_payload.get('reference_1D_right_acc_h') if rsa_payload is not None else None
         H_over_1d, valid_over_1d = compute_side_reference_H(
-            a1_mat, xs, x_toe, ref_left, ref_right, dt, freqs, input_valid, fc=fc)
+            a1_mat, xs, x_toe, ref_left, ref_right, dt, freqs, input_valid,
+            fc=fc, fmax_hz=frf_fmax_hz)
         frf_payload['H_surface_over_1D_h'] = H_over_1d
         frf_payload['one_d_valid_mask'] = valid_over_1d
         write_H_csv('FSAF_1D_h_%s.csv' % record, freqs[input_valid], xs,

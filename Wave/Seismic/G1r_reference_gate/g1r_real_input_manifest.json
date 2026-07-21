@@ -1,0 +1,73 @@
+{
+  "acceptance": {
+    "maximum_abs_velocity_trend_intercept_m_s": 1e-08,
+    "maximum_abs_velocity_trend_slope_m_s2": 1e-08,
+    "maximum_energy_fraction_above_15hz": 0.0001,
+    "stopband_check_hz": 15.0
+  },
+  "generation_parameters": {
+    "filter": "sixth_order_zero_phase_butterworth_before_polyphase_resampling",
+    "lowpass_hz": 12.0,
+    "taper_seconds": 0.5,
+    "target_dt_s": 0.001,
+    "target_pga_g": 0.3,
+    "target_pga_m_s2": 2.943,
+    "velocity_trend_correction": "two_zero_integral_endpoint_zero_basis_functions"
+  },
+  "generator": "generate_g1r_real_inputs.py",
+  "passed": true,
+  "purpose": "G1r flat-field reference validation and real-wave closure inputs",
+  "schema_version": 1,
+  "signals": [
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 3.68708632887302e-07,
+      "dt_s": 0.001,
+      "duration_s": 31.18,
+      "endpoint_abs_max_m_s2": 0.0,
+      "energy_fraction_above_15hz": 9.38531747995059e-08,
+      "filename": "g1r_el_centro_0p3g_dt1ms.txt",
+      "label": "el_centro",
+      "mean_m_s2": 0.00036870863275339735,
+      "output_acceleration_unit": "m/s^2",
+      "pga_g": 0.3,
+      "pga_m_s2": 2.943,
+      "sample_count": 31181,
+      "sha256": "b4d475a18ccb5e44d198cf6d279b92f45e03557c02272cd79aee0201fb2403e4",
+      "source_acceleration_unit": "g",
+      "source_dt_s": 0.019999999999999574,
+      "source_path": "Wave/Seismic/Scaled/El_Centro_scaled.txt",
+      "source_sha256": "e8c4b85324f14b68385f840609810b628bf74adbcff6292815ce3f1610da4599",
+      "velocity_trend_correction_coefficients": [
+        0.07804619387490128,
+        -0.014783158013376735
+      ],
+      "velocity_trend_intercept_m_s": -1.0343497920912245e-15,
+      "velocity_trend_slope_m_s2": 2.1685217496283046e-18
+    },
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 1.331454132650109e-07,
+      "dt_s": 0.001,
+      "duration_s": 39.9,
+      "endpoint_abs_max_m_s2": 0.0,
+      "energy_fraction_above_15hz": 7.210831101117392e-07,
+      "filename": "g1r_loma_prieta_0p3g_dt1ms.txt",
+      "label": "loma_prieta",
+      "mean_m_s2": 0.00013314541401647967,
+      "output_acceleration_unit": "m/s^2",
+      "pga_g": 0.3,
+      "pga_m_s2": 2.943,
+      "sample_count": 39901,
+      "sha256": "a56f7a4238f1a6e7b69b432957bab65738c821b72d3efe27a2ece9751c6e424a",
+      "source_acceleration_unit": "g",
+      "source_dt_s": 0.009999999999999787,
+      "source_path": "Wave/Seismic/Scaled/Loma_Prieta_scaled.txt",
+      "source_sha256": "45b8b23c73c59e15db28372313faee40c71975fcd0aa7a25714f19594173c48d",
+      "velocity_trend_correction_coefficients": [
+        0.015114179963604405,
+        -0.004232847798445868
+      ],
+      "velocity_trend_intercept_m_s": 3.8913617931222047e-16,
+      "velocity_trend_slope_m_s2": 2.4061541496050098e-17
+    }
+  ]
+}

@@ -13,7 +13,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-from Modeling.Hybrid import reference_layered_psv_v1 as ref
+from Modeling.Archived.Hybrid import reference_layered_psv_v1 as ref
 
 
 HALFSPACE = {'vs': 2000.0, 'rho': 2500.0, 'nu': 0.3}
@@ -75,7 +75,21 @@ def main():
     depth25 = ref.homogeneous_halfspace_transfer(4.0, 25.0, HALFSPACE, incident_angle_deg=0.0)
     assert abs(depth0['ux'] - 2.0) < 1.0e-10
     assert np.isfinite(depth25['ux'].real) and np.isfinite(depth25['uy'].real)
-    print('test_reference_layered_psv_v1: 7/7 ok')
+    damped_halfspace = dict(HALFSPACE, rayleigh_alpha=0.02, rayleigh_beta=0.001)
+    damped_same = [dict(HALFSPACE, thickness=80.0, rayleigh_alpha=0.02, rayleigh_beta=0.001)]
+    damped_layer = ref.surface_response(4.0, damped_same, damped_halfspace, incident_angle_deg=15.0)
+    damped_base = ref.surface_response(4.0, [], damped_halfspace, incident_angle_deg=15.0)
+    omega = 2.0 * np.pi * 4.0
+    mat = ref._material(2000.0, 2500.0, 0.3, omega=omega,
+                        rayleigh_alpha=0.02, rayleigh_beta=0.001)
+    p = np.sin(np.radians(15.0)) / 2000.0
+    qs = ref._vertical_slowness(mat['vs'], p)
+    expected_decay = abs(np.exp(-1j * omega * qs * 80.0))
+    actual_decay = abs(damped_layer['ux']) / abs(damped_base['ux'])
+    assert expected_decay < 1.0
+    assert abs(actual_decay - expected_decay) < 1.0e-10
+    assert damped_layer['traction_residual'] < 1.0e-10
+    print('test_reference_layered_psv_v1: 8/8 ok')
 
 
 if __name__ == '__main__':

@@ -52,6 +52,37 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
         self.assertTrue(np.all(np.isnan(transfer.real)))
         self.assertTrue(np.all(np.isnan(transfer.imag)))
 
+    def test_explicit_frf_upper_bound_is_independent_from_damping_fc(self):
+        """论文频带显式设为 10 Hz 时，不应再被 2 Hz 阻尼主频截到 5 Hz。"""
+        dt = 1.0 / 128.0
+        time = np.arange(512, dtype=float) * dt
+        input_acc = np.cos(2.0 * np.pi * 8.0 * time)
+        output_acc = 1.5 * input_acc
+
+        legacy_freqs, _legacy_h, legacy_valid, _ = MODULE.compute_complex_H(
+            output_acc, input_acc, dt, fc=2.0
+        )
+        freqs, transfer, valid, _ = MODULE.compute_complex_H(
+            output_acc, input_acc, dt, fc=2.0, fmax_hz=10.0
+        )
+
+        self.assertLessEqual(float(np.max(legacy_freqs)), 5.0)
+        self.assertGreater(float(np.max(freqs)), 9.5)
+        index = int(np.argmin(np.abs(freqs - 8.0)))
+        self.assertTrue(valid[index])
+        self.assertAlmostEqual(abs(transfer[0, index]), 1.5, places=12)
+        self.assertFalse(np.any(legacy_valid[np.abs(legacy_freqs - 8.0) < 0.1]))
+
+    def test_tail_rms_ratio_exposes_unfinished_ringdown(self):
+        quiet = np.r_[np.ones(90), np.zeros(10)]
+        ringing = np.ones(100)
+
+        quiet_stats = MODULE.tail_rms_ratio_stats(quiet, tail_fraction=0.10)
+        ringing_stats = MODULE.tail_rms_ratio_stats(ringing, tail_fraction=0.10)
+
+        self.assertAlmostEqual(quiet_stats["p95"], 0.0)
+        self.assertAlmostEqual(ringing_stats["p95"], 1.0)
+
     def test_complex_frf_resamples_real_and_imaginary_parts(self):
         transfer = np.array([[1.0 + 0.0j], [3.0 + 2.0j]])
         aligned = MODULE.resample_H_matrix(

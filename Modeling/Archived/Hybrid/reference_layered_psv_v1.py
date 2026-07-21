@@ -14,38 +14,63 @@ import math
 import numpy as np
 
 
-def _material(vs, density, poisson_ratio=0.3):
-    """由剪切波速、密度和泊松比计算弹性常数。"""
+def _material(vs, density, poisson_ratio=0.3, omega=None,
+              rayleigh_alpha=0.0, rayleigh_beta=0.0):
+    """由波速、密度和泊松比计算实数或瑞利阻尼复材料参数。"""
     vs = float(vs)
     rho = float(density)
     nu = float(poisson_ratio)
     if vs <= 0.0 or rho <= 0.0 or not (-1.0 < nu < 0.5):
         raise ValueError('材料参数非法: Vs=%r rho=%r nu=%r' % (vs, rho, nu))
-    mu = rho * vs ** 2
-    lam = 2.0 * mu * nu / (1.0 - 2.0 * nu)
-    cp = math.sqrt((lam + 2.0 * mu) / rho)
-    return {'vs': vs, 'rho': rho, 'nu': nu, 'mu': mu, 'lam': lam, 'cp': cp}
+    mu0 = rho * vs ** 2
+    lam0 = 2.0 * mu0 * nu / (1.0 - 2.0 * nu)
+    cp0 = math.sqrt((lam0 + 2.0 * mu0) / rho)
+    alpha = float(rayleigh_alpha or 0.0)
+    beta = float(rayleigh_beta or 0.0)
+    if omega is not None and (alpha != 0.0 or beta != 0.0):
+        rho_used = rho * (1.0 - 1j * alpha / float(omega))
+        stiffness_factor = 1.0 + 1j * float(omega) * beta
+        mu = mu0 * stiffness_factor
+        lam = lam0 * stiffness_factor
+        vs_used = np.sqrt(mu / rho_used)
+        cp_used = np.sqrt((lam + 2.0 * mu) / rho_used)
+    else:
+        rho_used, mu, lam = rho, mu0, lam0
+        vs_used, cp_used = vs, cp0
+    return {
+        'vs': vs_used, 'vs0': vs, 'rho': rho_used, 'rho0': rho,
+        'nu': nu, 'mu': mu, 'lam': lam, 'cp': cp_used, 'cp0': cp0,
+        'rayleigh_alpha': alpha, 'rayleigh_beta': beta,
+    }
 
 
-def _validate_layers(layers_top_down, halfspace):
+def _validate_layers(layers_top_down, halfspace, omega=None):
     """校验层状介质输入并转换为统一材料字典。"""
-    hs = _material(halfspace['vs'], halfspace['rho'], halfspace.get('nu', 0.3))
+    hs = _material(
+        halfspace['vs'], halfspace['rho'], halfspace.get('nu', 0.3), omega=omega,
+        rayleigh_alpha=halfspace.get('rayleigh_alpha', 0.0),
+        rayleigh_beta=halfspace.get('rayleigh_beta', 0.0),
+    )
     layers = []
     for idx, layer in enumerate(layers_top_down or []):
         thickness = float(layer['thickness'])
         if thickness <= 0.0:
             raise ValueError('有限层%d厚度必须>0' % idx)
-        mat = _material(layer['vs'], layer['rho'], layer.get('nu', 0.3))
+        mat = _material(
+            layer['vs'], layer['rho'], layer.get('nu', 0.3), omega=omega,
+            rayleigh_alpha=layer.get('rayleigh_alpha', 0.0),
+            rayleigh_beta=layer.get('rayleigh_beta', 0.0),
+        )
         mat['thickness'] = thickness
         layers.append(mat)
     return layers, hs
 
 
 def _vertical_slowness(speed, p):
-    """返回满足向上传播支路的复垂向慢度。"""
+    """返回实数时正向、复数时满足衰减方向的垂向慢度。"""
     value = complex(1.0 / speed ** 2 - p ** 2)
     q = np.sqrt(value + 0j)
-    if q.real < 0.0:
+    if q.imag > 0.0 or (abs(q.imag) <= 1.0e-15 and q.real < 0.0):
         q = -q
     return q
 
@@ -80,10 +105,10 @@ def _layer_transfer(mat, thickness, p, omega):
     qp = _vertical_slowness(mat['cp'], p)
     qs = _vertical_slowness(mat['vs'], p)
     phase = np.diag([
-        np.exp(1j * omega * qp * thickness),
-        np.exp(1j * omega * qs * thickness),
         np.exp(-1j * omega * qp * thickness),
         np.exp(-1j * omega * qs * thickness),
+        np.exp(1j * omega * qp * thickness),
+        np.exp(1j * omega * qs * thickness),
     ])
     return np.dot(np.dot(matrix, phase), np.linalg.inv(matrix))
 
@@ -112,10 +137,10 @@ def surface_response(freq_hz, layers_top_down, halfspace, incident_angle_deg=0.0
     angle = float(incident_angle_deg)
     if freq <= 0.0 or not (-89.9 < angle < 89.9):
         raise ValueError('频率或入射角非法: f=%r angle=%r' % (freq_hz, incident_angle_deg))
-    layers, hs = _validate_layers(layers_top_down, halfspace)
     omega = 2.0 * math.pi * freq
+    layers, hs = _validate_layers(layers_top_down, halfspace, omega=omega)
     alpha = math.radians(angle)
-    p = math.sin(alpha) / hs['vs']
+    p = math.sin(alpha) / hs['vs0']
 
     propagation = np.eye(4, dtype=complex)
     for layer in reversed(layers):  # 从半空间界面向上依次穿过底层到顶层
@@ -169,9 +194,13 @@ def homogeneous_halfspace_transfer(freq_hz, depth, halfspace, incident_angle_deg
     angle = float(incident_angle_deg)
     if freq <= 0.0:
         raise ValueError('频率非法: f=%r' % freq_hz)
-    mat = _material(halfspace['vs'], halfspace['rho'], halfspace.get('nu', 0.3))
     omega = 2.0 * math.pi * freq
-    p = math.sin(math.radians(angle)) / mat['vs']
+    mat = _material(
+        halfspace['vs'], halfspace['rho'], halfspace.get('nu', 0.3), omega=omega,
+        rayleigh_alpha=halfspace.get('rayleigh_alpha', 0.0),
+        rayleigh_beta=halfspace.get('rayleigh_beta', 0.0),
+    )
+    p = math.sin(math.radians(angle)) / mat['vs0']
     matrix = _state_matrix(mat, p)
     incident = matrix[:, 1]
     reflected = matrix[:, 2:4]
@@ -179,10 +208,10 @@ def homogeneous_halfspace_transfer(freq_hz, depth, halfspace, incident_angle_deg
     amplitudes = np.array([0.0 + 0j, 1.0 + 0j, coeff[0], coeff[1]], dtype=complex)
     qp = _vertical_slowness(mat['cp'], p)
     qs = _vertical_slowness(mat['vs'], p)
-    phases = np.array([np.exp(-1j * omega * qp * depth), np.exp(-1j * omega * qs * depth),
-                       np.exp(1j * omega * qp * depth), np.exp(1j * omega * qs * depth)], dtype=complex)
+    phases = np.array([np.exp(1j * omega * qp * depth), np.exp(1j * omega * qs * depth),
+                       np.exp(-1j * omega * qp * depth), np.exp(-1j * omega * qs * depth)], dtype=complex)
     field = np.dot(matrix, amplitudes * phases)
-    denom = -1.0 / mat['vs']  # 以入射 SV 粒子位移幅值归一化，而非仅取水平分量
+    denom = -1.0 / mat['vs0']  # 以入射 SV 粒子位移幅值归一化，而非仅取水平分量
     return {'ux': complex(field[0] / denom), 'uy': complex(field[1] / denom),
             'traction_residual': float(np.max(np.abs(field[2:])) / max(1.0, float(np.max(np.abs(field[:2])))))}
 
