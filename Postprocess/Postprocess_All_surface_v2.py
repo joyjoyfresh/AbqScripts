@@ -2189,6 +2189,17 @@ def s_to_x(s, x_crest, x_toe, h_slope):  # 三段归一坐标反算物理 x
     return x_toe + (s - 1.0) * h_slope  # 段C：距坡脚棱 (s-1)·h
 
 
+def _parse_matrix_float(value):
+    """解析矩阵CSV数值，并把Windows非有限数标记统一还原为NaN。"""
+    text = str(value).strip()
+    normalized = text.lower().replace(' ', '')
+    nonfinite_markers = ('nan', 'ind', 'qnan', 'snan', '#inf', 'infinity')
+    if any(marker in normalized for marker in nonfinite_markers) or normalized in ('inf', '+inf', '-inf'):
+        return float('nan')
+    number = float(text)
+    return number if np.isfinite(number) else float('nan')
+
+
 def read_H_csv_local(path):  # 读回 write_H_csv 产物
     """解析频率/周期—空间矩阵CSV，返回(轴坐标, xs, 节点×轴点矩阵)。"""
     if not os.path.isfile(path):  # 文件不存在（如该波未生成 H）
@@ -2206,7 +2217,7 @@ def read_H_csv_local(path):  # 读回 write_H_csv 产物
             if not row:  # 空行
                 continue  # 跳过
             freqs.append(float(row[0]))  # 频率或周期
-            rows.append([float(v) for v in row[1:]])  # 各节点值
+            rows.append([_parse_matrix_float(v) for v in row[1:]])  # 非有限频点保留为NaN，不使整张矩阵失效
         fh.close()  # 关闭句柄
         return np.array(freqs, dtype=float), np.array(xs, dtype=float), np.array(rows, dtype=float).T  # 转 节点×频点
     except Exception as e:  # 解析失败

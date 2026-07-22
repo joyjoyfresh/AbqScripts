@@ -7,7 +7,8 @@
 3. 散列计算一致性：配置字典散列与文件散列正确无误。
 4. 解释器分发模拟：Modeling与后处理脚本准确映射到 Abaqus Python 与普通 Python。
 5. 清理逻辑有效性：仅在 QA 通过且最终数据包存在时才执行清理，失败时完整保留。
-6. 作业进度日志可增量读取，且不会重复输出旧进度。
+6. 作业进度可直接从sta读取，建模日志仍作为回退来源。
+7. 建模与单工况后处理使用独立线程池并发生重叠。
 """
 
 from __future__ import print_function
@@ -16,6 +17,7 @@ import os
 import sys
 import shutil
 import tempfile
+import threading
 import unittest
 
 # 将 Batch 目录加入 sys.path
@@ -116,10 +118,9 @@ class TestBatchTemplate(unittest.TestCase):
 
     def test_interpreter_dispatch(self):
         """测试 Abaqus 脚本与普通 Python 脚本的分发规则。"""
-        # 验证 modeling 脚本在 ABAQUS_SCRIPTS 中
-        self.assertIn('slope_frame_ssi_full_v2.py', runner.ABAQUS_SCRIPTS)
-        # 验证后处理提取脚本在 ABAQUS_SCRIPTS 中
-        self.assertIn('Postprocess_All_surface_v2.py', runner.ABAQUS_SCRIPTS)
+        # 建模使用完整 CAE 内核，ODB 后处理使用轻量 Abaqus Python
+        self.assertIn('slope_frame_ssi_full_v2.py', runner.ABAQUS_CAE_SCRIPTS)
+        self.assertIn('Postprocess_All_surface_v2.py', runner.ABAQUS_PYTHON_SCRIPTS)
         # 验证汇总与绘图脚本不在里面
         self.assertNotIn('Collect_All_results_v2.py', runner.ABAQUS_SCRIPTS)
         self.assertNotIn('Plot_Hybrid_surface_v2.py', runner.ABAQUS_SCRIPTS)
@@ -153,6 +154,32 @@ class TestBatchTemplate(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_direct_sta_progress_reading(self):
+        """测试Autorun不依赖建模日志进度行即可读取当前分析时间。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            log_path = os.path.join(temp_dir, 'slope_frame_ssi_full_v2.log')
+            with open(log_path, 'wb') as handle:
+                handle.write(
+                    '2026-01-01 [INFO] model-a 分析步已创建, 时长=10.00(含尾段 2.00)\n'.encode('utf-8')
+                )
+            with open(os.path.join(temp_dir, runner.CONFIG_FILENAME), 'w', encoding='utf-8') as handle:
+                handle.write('{"tssi_cfg": {"enable": false}}')
+            sta_path = os.path.join(temp_dir, 'job-model-a.sta')
+            with open(sta_path, 'wb') as handle:
+                handle.write(
+                    b'   1     1   1     0     1     1  1.00       1.00       0.100000\n'
+                    b'   1     2   1     0     1     1  2.50       2.50       0.100000\n'
+                )
+            started_at = os.path.getmtime(sta_path)
+            messages = runner._read_sta_job_progress(temp_dir, started_at, log_path)
+            self.assertEqual(len(messages), 1)
+            self.assertIn('job-model-a', messages[0])
+            self.assertIn('2.500 秒/共 10.000 秒', messages[0])
+            self.assertIn('25.0%', messages[0])
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_conditional_cleanup(self):
         """测试条件大文件清理规则。"""
         temp_dir = tempfile.mkdtemp()
@@ -179,6 +206,61 @@ class TestBatchTemplate(unittest.TestCase):
             self.assertTrue(os.path.exists(odb_file), "缺失最终产物时应当保留 odb 文件")
 
         finally:
+            shutil.rmtree(temp_dir)
+
+    def test_model_postprocess_pipeline_overlap(self):
+        """测试下一工况建模与前一工况后处理能够重叠。"""
+        temp_dir = tempfile.mkdtemp()
+        originals = {
+            'MAX_WORKERS': runner.MAX_WORKERS,
+            'POSTPROCESS_WORKERS': runner.POSTPROCESS_WORKERS,
+            'create_and_fill_folder': runner.create_and_fill_folder,
+            'run_scripts_in_folder': runner.run_scripts_in_folder,
+            '_write_run_manifest': runner._write_run_manifest,
+            'delete_files_by_type': runner.delete_files_by_type,
+        }
+        post_started = threading.Event()
+        stage_calls = []
+        calls_lock = threading.Lock()
+
+        def fake_create(folder_path, _source_files, _config):
+            os.makedirs(folder_path, exist_ok=True)
+
+        def fake_run(folder_path, _run_order, step_offset=0,
+                     stage_label='stage'):
+            case_name = os.path.basename(folder_path)
+            with calls_lock:
+                stage_calls.append((case_name, stage_label, step_offset))
+            if stage_label == 'model' and case_name == 'case-b':
+                return post_started.wait(2.0)
+            if stage_label == 'postprocess' and case_name == 'case-a':
+                post_started.set()
+            return True
+
+        try:
+            runner.MAX_WORKERS = 1
+            runner.POSTPROCESS_WORKERS = 1
+            runner.create_and_fill_folder = fake_create
+            runner.run_scripts_in_folder = fake_run
+            runner._write_run_manifest = lambda *args, **kwargs: None
+            runner.delete_files_by_type = lambda *args, **kwargs: None
+            folder_plan = [('case-a', {}), ('case-b', {})]
+            statuses = dict((name, 'planned') for name, _ in folder_plan)
+            failed = runner.run_folder_pipeline(
+                temp_dir, folder_plan, {}, statuses,
+                ['model.py'], ['post.py'], [],
+            )
+            self.assertEqual(failed, [])
+            self.assertTrue(post_started.is_set())
+            self.assertEqual(statuses, {'case-a': 'passed', 'case-b': 'passed'})
+            self.assertIn(('case-a', 'postprocess', 1), stage_calls)
+        finally:
+            runner.MAX_WORKERS = originals['MAX_WORKERS']
+            runner.POSTPROCESS_WORKERS = originals['POSTPROCESS_WORKERS']
+            runner.create_and_fill_folder = originals['create_and_fill_folder']
+            runner.run_scripts_in_folder = originals['run_scripts_in_folder']
+            runner._write_run_manifest = originals['_write_run_manifest']
+            runner.delete_files_by_type = originals['delete_files_by_type']
             shutil.rmtree(temp_dir)
 
 

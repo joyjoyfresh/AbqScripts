@@ -94,6 +94,26 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
         self.assertAlmostEqual(aligned[1, 0].imag, 1.0)
         self.assertTrue(np.isnan(aligned[2, 0].real))
 
+    def test_matrix_csv_accepts_windows_nan_markers(self):
+        """Windows写出的-nan(ind)等标记应保留为NaN，不能使整张FSAF矩阵读取失败。"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "FSAF_1D_h_demo.csv"
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["f_Hz", "x=0.0", "x=1.0"])
+                writer.writerow([0.5, "1.25", "-nan(ind)"])
+                writer.writerow([1.0, "1.#QNAN", "2.5"])
+
+            axis, xs, values = MODULE.read_H_csv_local(str(path))
+
+        np.testing.assert_allclose(axis, [0.5, 1.0])
+        np.testing.assert_allclose(xs, [0.0, 1.0])
+        self.assertEqual(values.shape, (2, 2))
+        self.assertAlmostEqual(values[0, 0], 1.25)
+        self.assertTrue(np.isnan(values[0, 1]))
+        self.assertTrue(np.isnan(values[1, 0]))
+        self.assertAlmostEqual(values[1, 1], 2.5)
+
     def test_psa_and_rsaf_use_exact_reference_time_histories(self):
         """PSA 应保持线性缩放；RSAF 只使用配置的真实 rock/1D 参考。"""
         dt = 0.005

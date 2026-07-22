@@ -13,6 +13,7 @@ import io
 import json
 import time
 import logging
+import threading
 import traceback
 from collections import namedtuple
 
@@ -2603,6 +2604,25 @@ def _log_job_progress(logger, job_name, step_name, current_seconds, total_second
              job_name, current, total, percent, step_name or 'unknown-step', suffix)
 
 
+def _monitor_job_progress(logger, job_name, step_name, step_number, total_seconds,
+                          sta_path, interval, stop_event, ready_event):
+    """在作业提交阻塞主线程时，由后台线程定期读取sta并写入建模日志。"""
+    _log_job_progress(logger, job_name, step_name, 0.0, total_seconds,
+                      '监控已启动，每%.0f秒更新' % interval)
+    ready_event.set()
+    next_report = time.time() + interval
+    while not stop_event.is_set():
+        remaining = next_report - time.time()
+        if remaining > 0.0:
+            stop_event.wait(min(5.0, remaining))
+            continue
+        current_seconds = _read_sta_step_progress(sta_path, step_number)
+        note = None if current_seconds is not None else 'sta尚未产生目标步增量'
+        _log_job_progress(logger, job_name, step_name, current_seconds,
+                          total_seconds, note)
+        next_report = time.time() + interval
+
+
 def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None,
                progress_interval_seconds=360.0):
     """创建并提交Abaqus作业，并按sta中的分析步时间定期记录进度。"""
@@ -2626,32 +2646,32 @@ def submit_job(num_cpus=7, memory_percent=90, model_name='Model-1', logger=None,
             multiprocessingMode=DEFAULT, numGPUs=0)
 
     mdb.save()
-    log_step(logger, '%s作业已提交，正在等待完成...', job_name)
+    log_step(logger, '%s作业对象已创建，开始提交并等待完成...', job_name)
     step_number, step_name, total_seconds = _resolve_job_progress_target(model_name)
     interval = max(0.0, float(progress_interval_seconds or 0.0))
     sta_path = os.path.join(os.getcwd(), job_name + '.sta')
     job = mdb.jobs[job_name]
-    job.submit(consistencyChecking=OFF)
+    progress_stop = None
+    progress_thread = None
     if step_number is not None and interval > 0.0:
-        _log_job_progress(logger, job_name, step_name, 0.0, total_seconds,
-                          '监控已启动，每%.0f秒更新' % interval)
-    next_report = time.time() + interval if interval > 0.0 else None
-    terminal_statuses = tuple(
-        value for value in (
-            globals().get('COMPLETED'), globals().get('ABORTED'),
-            globals().get('TERMINATED'), globals().get('CHECK_COMPLETED'),
-        ) if value is not None
-    )
-    while terminal_statuses and job.status not in terminal_statuses:
-        now = time.time()
-        if next_report is not None and now >= next_report:
-            current_seconds = _read_sta_step_progress(sta_path, step_number)
-            note = None if current_seconds is not None else 'sta尚未产生目标步增量'
-            _log_job_progress(logger, job_name, step_name, current_seconds,
-                              total_seconds, note)
-            next_report = now + interval
-        time.sleep(min(5.0, interval) if interval > 0.0 else 5.0)
-    job.waitForCompletion()
+        progress_stop = threading.Event()
+        progress_ready = threading.Event()
+        progress_thread = threading.Thread(
+            target=_monitor_job_progress,
+            args=(logger, job_name, step_name, step_number, total_seconds,
+                  sta_path, interval, progress_stop, progress_ready),
+        )
+        progress_thread.daemon = True
+        progress_thread.start()  # 必须早于submit，避免Abaqus提交调用占住主线程后监控无法启动
+        progress_ready.wait(5.0)  # 主线程主动让出执行权，确保监控线程已进入循环
+    try:
+        job.submit(consistencyChecking=OFF)
+        job.waitForCompletion()
+    finally:
+        if progress_stop is not None:
+            progress_stop.set()
+        if progress_thread is not None:
+            progress_thread.join(10.0)
     if step_number is not None and interval > 0.0:
         current_seconds = _read_sta_step_progress(sta_path, step_number)
         _log_job_progress(logger, job_name, step_name,

@@ -3,12 +3,12 @@
 
 用户可直接复制此模板并修改工况配置列表与路径，用于各类有限元参数扫描。
 支持：
-  1. 脚本的顺序执行（在各工况目录下独立运行）。
+  1. 建模与单工况后处理采用独立线程池流水执行。
   2. 通过 json 配置注入参数，避免正则修改脚本。
   3. 多线程并行执行。
   4. 自动清理指定的中间大文件（如 odb/inp 等）。
   5. 执行全局汇总与出图的后处理脚本。
-  6. 将建模脚本写出的Abaqus分析时间进度实时转发到终端。
+  6. 直接读取Abaqus状态文件，将分析时间进度定期输出到终端。
 """
 
 import os  # 导入操作系统相关路径与目录操作模块
@@ -26,18 +26,18 @@ import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl", "com"]  # 执行后自动删除的中间文件类型，留空则不删除
-MAX_WORKERS = 2  # 并行处理工况文件夹的最大线程数
+MAX_WORKERS = 2  # 同时运行建模脚本的最大工况数
+POSTPROCESS_WORKERS = 1  # 单工况后处理并发数，默认1以减少与求解争用内存
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
-TERMINAL_PROGRESS_POLL_SECONDS = 300.0  # autorun每5min读取建模进度日志并转发到终端
+TERMINAL_PROGRESS_POLL_SECONDS = 300.0  # autorun每5min直读sta，建模进度日志仅作回退
 PROCESS_STATUS_POLL_SECONDS = 5.0  # 轻量检查子进程是否结束，避免低频进度轮询阻塞后续步骤
 _PROGRESS_PRINT_LOCK = threading.Lock()  # 并发工况共用终端输出锁
 
 # Abaqus 启动路径与需要由 Abaqus Python 运行的脚本名单
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'
-ABAQUS_SCRIPTS = {
-    'slope_frame_ssi_full_v2.py',
-    'Postprocess_All_surface_v2.py',
-}
+ABAQUS_CAE_SCRIPTS = {'slope_frame_ssi_full_v2.py'}
+ABAQUS_PYTHON_SCRIPTS = {'Postprocess_All_surface_v2.py'}
+ABAQUS_SCRIPTS = ABAQUS_CAE_SCRIPTS | ABAQUS_PYTHON_SCRIPTS  # 兼容既有检查
 
 # 注入配置的顶层键白名单
 ALLOWED_CONFIG_KEYS = {
@@ -45,10 +45,15 @@ ALLOWED_CONFIG_KEYS = {
     'time_cfg', 'freefield_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
 }
 
-SCRIPT_SEQUENCE = [  # 每个工况文件夹内按顺序执行的脚本绝对路径
+MODEL_SCRIPT_SEQUENCE = [  # 建模线程池连续执行的脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\slope_frame_ssi_full_v2.py",  # 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
+]
+
+CASE_POSTPROCESS_SCRIPT_SEQUENCE = [  # 建模完成后进入独立线程池的单工况后处理脚本
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_All_surface_v2.py",  # 后处理提取脚本路径 / 提取单工况数据
 ]
+
+SCRIPT_SEQUENCE = MODEL_SCRIPT_SEQUENCE + CASE_POSTPROCESS_SCRIPT_SEQUENCE  # 兼容源文件复制与散列清单
 
 POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行的全局后处理脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
@@ -159,6 +164,12 @@ def _write_run_manifest(root_dir, folder_plan, source_files, status_dict=None):
         'updated_at': datetime.datetime.now().isoformat(),
         'git_commit': get_git_commit(),
         'source_files': script_hashes,
+        'execution_policy': {
+            'pipeline_mode': 'model_then_async_case_postprocess',
+            'model_workers': MAX_WORKERS,
+            'case_postprocess_workers': POSTPROCESS_WORKERS,
+            'global_postprocess_after_all_cases': True,
+        },
     })
 
     cases = manifest_data.get('cases', {})
@@ -344,6 +355,114 @@ def _read_new_job_progress(log_path, offset, not_before):
         return offset, []
 
 
+def _read_model_step_totals(log_path):
+    """从建模日志读取模型名与地震动力步总时长的对应关系。"""
+    totals = {}
+    if not log_path or not os.path.isfile(log_path):
+        return totals
+    marker = ' 分析步已创建, 时长='
+    try:
+        with open(log_path, 'rb') as handle:
+            lines = handle.read().decode('utf-8', 'replace').splitlines()
+        for line in lines:
+            if marker not in line:
+                continue
+            prefix, value_text = line.split(marker, 1)
+            prefix_fields = prefix.split()
+            if not prefix_fields:
+                continue
+            try:
+                totals[prefix_fields[-1]] = float(value_text.split('(', 1)[0])
+            except (TypeError, ValueError):
+                continue
+    except (IOError, OSError, ValueError):
+        return {}
+    return totals
+
+
+def _target_dynamic_step_number(folder_path):
+    """依据工况配置返回Step-earthquake在sta中的步序号。"""
+    config_path = os.path.join(folder_path, CONFIG_FILENAME)
+    try:
+        with open(config_path, 'r', encoding='utf-8') as handle:
+            config = json.load(handle)
+    except (IOError, OSError, ValueError, TypeError):
+        return 1
+    tssi = config.get('tssi_cfg') or {}
+    gravity_enabled = (
+        bool(tssi.get('enable'))
+        and str(tssi.get('scene', 'ssi')).lower() != 'freefield'
+        and str(tssi.get('gravity', 'off')).lower() != 'off'
+    )
+    return 2 if gravity_enabled else 1
+
+
+def _read_sta_step_progress(sta_path, target_step_number):
+    """从Abaqus/Standard状态文件尾部读取目标分析步最新步时间。"""
+    try:
+        with open(sta_path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 262144), os.SEEK_SET)
+            tail = handle.read().decode('ascii', 'ignore')
+        for line in reversed(tail.splitlines()):
+            fields = line.split()
+            if len(fields) < 9:
+                continue
+            try:
+                step_number = int(fields[0])
+                int(fields[1])
+                step_time = float(fields[7].replace('D', 'E').replace('d', 'e'))
+            except (TypeError, ValueError):
+                continue
+            if step_number == int(target_step_number):
+                return step_time
+    except (IOError, OSError, ValueError):
+        return None
+    return None
+
+
+def _read_sta_job_progress(folder_path, not_before, progress_log):
+    """直接读取本次运行最新sta，返回一条可供终端打印的进度消息。"""
+    candidates = []
+    try:
+        for name in os.listdir(folder_path):
+            if not name.lower().endswith('.sta'):
+                continue
+            path = os.path.join(folder_path, name)
+            if not os.path.isfile(path):
+                continue
+            modified = os.path.getmtime(path)
+            if modified + 1.0 >= not_before:
+                candidates.append((modified, os.path.getsize(path), path))
+    except (IOError, OSError, ValueError):
+        return []
+    if not candidates:
+        return []
+    sta_path = max(candidates)[2]
+    job_name = os.path.splitext(os.path.basename(sta_path))[0]
+    model_name = job_name[4:] if job_name.startswith('job-') else job_name
+    totals = _read_model_step_totals(progress_log)
+    total_seconds = totals.get(model_name)
+    if total_seconds is None and len(totals) == 1:
+        total_seconds = next(iter(totals.values()))
+    if total_seconds is None or total_seconds <= 0.0:
+        return []
+    target_step = _target_dynamic_step_number(folder_path)
+    current_seconds = _read_sta_step_progress(sta_path, target_step)
+    note = ''
+    if current_seconds is None:
+        current_seconds = 0.0
+        note = '，目标动力步尚未开始'
+    current_seconds = max(0.0, float(current_seconds))
+    percent = min(100.0, 100.0 * current_seconds / total_seconds)
+    return [
+        '作业进度: {}，已算到 {:.3f} 秒/共 {:.3f} 秒（{:.1f}%，Step-earthquake{}）'.format(
+            job_name, current_seconds, total_seconds, percent, note,
+        )
+    ]
+
+
 def _print_job_progress(folder_path, messages):
     """按整行输出进度，防止多工况并发时字符交叉。"""
     if not messages:
@@ -354,26 +473,37 @@ def _print_job_progress(folder_path, messages):
             print("[运行状态][{}] {}".format(case_name, message), flush=True)
 
 
-def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按顺序执行指定的脚本
+def run_scripts_in_folder(folder_path, run_order, step_offset=0,
+                          stage_label='stage'):  # 在工况文件夹内按顺序执行指定阶段脚本
     """在工况文件夹内按顺序执行指定的脚本，自动分发 Abaqus cae 和普通 Python 解释器。
 
     参数说明:
         folder_path (str): 工况文件夹绝对路径。
-        run_order (list): 执行脚本文件名（不含路径）顺序列表。
+        run_order (list): 当前阶段脚本文件名（不含路径）顺序列表。
+        step_offset (int): 当前阶段之前已有的脚本数量。
+        stage_label (str): 日志中的阶段标签。
 
     返回值:
         bool: 若全部顺利执行返回 True，任意脚本执行失败则返回 False。
     """
-    for idx, script_name in enumerate(run_order, start=1):  # 遍历待执行的脚本
+    for local_idx, script_name in enumerate(run_order, start=1):  # 遍历待执行的脚本
+        idx = int(step_offset) + local_idx  # 保持拆分流水线后的全流程步骤编号
         script_path = os.path.join(folder_path, script_name)  # 拼接绝对路径
         if not os.path.isfile(script_path):  # 若物理文件不存在
             print("错误：脚本不存在 -> {}".format(script_path))  # 打印不存在 of 错误提示
             return False  # 返回失败
 
         # 判断执行命令
-        if script_name in ABAQUS_SCRIPTS:
+        if script_name in ABAQUS_CAE_SCRIPTS:
             cmd = [ABAQUS_CMD, 'cae', 'noGUI=' + script_name]
-            log_filename = "autorun_step{:02d}_model_{}.log".format(idx, os.path.splitext(script_name)[0])
+            log_filename = "autorun_step{:02d}_{}_{}.log".format(
+                idx, stage_label, os.path.splitext(script_name)[0],
+            )
+        elif script_name in ABAQUS_PYTHON_SCRIPTS:
+            cmd = [ABAQUS_CMD, 'python', script_name]
+            log_filename = "autorun_step{:02d}_{}_{}.log".format(
+                idx, stage_label, os.path.splitext(script_name)[0],
+            )
         else:
             cmd = [sys.executable, script_name]
             log_filename = "autorun_step{:02d}_post_{}.log".format(idx, os.path.splitext(script_name)[0])
@@ -403,6 +533,11 @@ def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按�
                         progress_offset, messages = _read_new_job_progress(
                             progress_log, progress_offset, started_at,
                         )
+                        sta_messages = _read_sta_job_progress(
+                            folder_path, started_at, progress_log,
+                        )
+                        if sta_messages:
+                            messages = sta_messages  # sta是求解器当前状态，优先于可能滞后的建模日志
                         _print_job_progress(folder_path, messages)
                         next_progress_poll = now + float(TERMINAL_PROGRESS_POLL_SECONDS)
                     time.sleep(max(0.5, float(PROCESS_STATUS_POLL_SECONDS)))
@@ -410,6 +545,11 @@ def run_scripts_in_folder(folder_path, run_order):  # 在工况文件夹内按�
                     progress_offset, messages = _read_new_job_progress(
                         progress_log, progress_offset, started_at,
                     )
+                    sta_messages = _read_sta_job_progress(
+                        folder_path, started_at, progress_log,
+                    )
+                    if sta_messages:
+                        messages = sta_messages
                     _print_job_progress(folder_path, messages)
                 returncode = process.returncode
             except Exception as e:
@@ -465,6 +605,87 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
             print("  - {} -> {}".format(fp, err))  # 打印失败的物理路径与错误信息
 
 
+def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
+                        model_run_order, case_post_run_order,
+                        types_to_delete):
+    """用独立线程池衔接建模与单工况后处理，返回失败目录。"""
+    failed_folders = []
+    manifest_lock = threading.Lock()
+
+    def update_status(folder_name, status):
+        with manifest_lock:
+            status_dict[folder_name] = status
+            _write_run_manifest(
+                root_dir, folder_plan, source_files, status_dict,
+            )
+
+    def run_model(item):
+        folder_name, config = item
+        folder_path = os.path.join(root_dir, folder_name)
+        print("\n==============================")
+        print("开始建模：{}".format(folder_path))
+        update_status(folder_name, 'model_running')
+        try:
+            create_and_fill_folder(folder_path, source_files, config)
+            ok = run_scripts_in_folder(
+                folder_path, model_run_order, step_offset=0,
+                stage_label='model',
+            )
+        except Exception as err:
+            print("异常：建模阶段失败 -> {}".format(str(err)))
+            ok = False
+        update_status(folder_name, 'model_passed' if ok else 'model_failed')
+        return item, folder_path, ok
+
+    def run_case_postprocess(item, folder_path):
+        folder_name, _config = item
+        update_status(folder_name, 'postprocess_running')
+        print("开始单工况后处理：{}".format(folder_path))
+        try:
+            ok = run_scripts_in_folder(
+                folder_path, case_post_run_order,
+                step_offset=len(model_run_order),
+                stage_label='postprocess',
+            )
+        except Exception as err:
+            print("异常：单工况后处理失败 -> {}".format(str(err)))
+            ok = False
+        update_status(folder_name, 'passed' if ok else 'postprocess_failed')
+        if types_to_delete:
+            delete_files_by_type(folder_path, types_to_delete, ok)
+        else:
+            print("已跳过文件删除（没有指定要删除的文件类型）。")
+        return folder_path, ok
+
+    print(
+        "开始流水线批处理：建模并发={}，单工况后处理并发={}".format(
+            MAX_WORKERS, POSTPROCESS_WORKERS,
+        )
+    )
+    post_futures = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_WORKERS,
+    ) as model_executor, concurrent.futures.ThreadPoolExecutor(
+        max_workers=POSTPROCESS_WORKERS,
+    ) as post_executor:
+        model_futures = [
+            model_executor.submit(run_model, item) for item in folder_plan
+        ]
+        for future in concurrent.futures.as_completed(model_futures):
+            item, folder_path, ok = future.result()
+            if ok:
+                post_futures.append(post_executor.submit(
+                    run_case_postprocess, item, folder_path,
+                ))
+            else:
+                failed_folders.append(folder_path)
+        for future in concurrent.futures.as_completed(post_futures):
+            folder_path, ok = future.result()
+            if not ok:
+                failed_folders.append(folder_path)
+    return failed_folders
+
+
 def main():  # 批处理主控制流程
     """批处理主控制流程。"""
     root_dir = sys.argv[1] if len(sys.argv) >= 2 else ROOT_DIR  # 支持从命令行参数接收保存目录，否则使用默认值
@@ -472,7 +693,8 @@ def main():  # 批处理主控制流程
     print("目标根目录：{}".format(root_dir))  # 打印目标根目录
     print("自动删除文件类型：{}".format(types_to_delete if types_to_delete else "无"))  # 打印待删除类型
     source_files, missing_items, duplicate_items = build_source_files(SCRIPT_SEQUENCE)  # 构建复制文件字典并查错
-    run_order = [os.path.basename(p) for p in SCRIPT_SEQUENCE]  # 整理得到工况目录下需顺序执行的文件名列表
+    model_run_order = [os.path.basename(p) for p in MODEL_SCRIPT_SEQUENCE]  # 建模阶段脚本顺序
+    case_post_run_order = [os.path.basename(p) for p in CASE_POSTPROCESS_SCRIPT_SEQUENCE]  # 单工况后处理顺序
     if not ensure_sources_exist(missing_items):  # 校验并处理源文件缺失
         sys.exit(1)  # 异常退出
     if not ensure_no_duplicate_targets(duplicate_items):  # 校验并处理复制文件名冲突
@@ -480,6 +702,12 @@ def main():  # 批处理主控制流程
     if not PARAMETER_CASES:  # 若工况列表为空
         print("错误：PARAMETER_CASES 为空，请至少配置一组工况。")  # 打印工况缺失提示
         sys.exit(1)  # 异常退出
+    if not model_run_order:
+        print("错误：MODEL_SCRIPT_SEQUENCE 为空，流水线没有建模阶段。")
+        sys.exit(1)
+    if MAX_WORKERS < 1 or POSTPROCESS_WORKERS < 1:
+        print("错误：建模和单工况后处理并发数必须均不小于1。")
+        sys.exit(1)
 
     folder_plan = []  # 初始化工况目录计划列表
     seen = set()  # 初始化工况文件夹去重名字集合
@@ -502,57 +730,16 @@ def main():  # 批处理主控制流程
     # 写入初始 planned 清单
     _write_run_manifest(root_dir, folder_plan, source_files, status_dict)
 
-    failed_folders = []  # 初始化保存失败的工况目录列表
-
-    def process_folder(item):  # 处理单个工况任务的核心闭包函数
-        """处理单个工况任务的核心闭包函数。
-
-        参数说明:
-            item (tuple): (工况文件夹名, 参数覆盖字典)。
-
-        返回值:
-            tuple: (工况绝对路径, 执行是否成功标志)。
-        """
-        folder_name, config = item  # 解包工况名与配置字典
-        folder_path = os.path.join(root_dir, folder_name)  # 拼接工况绝对路径
-        print("\n==============================")  # 打印工况分隔符
-        print("开始处理文件夹：{}".format(folder_path))  # 打印开始处理的工况路径
-
-        # 更新清单为 running 状态
-        status_dict[folder_name] = 'running'
-        _write_run_manifest(root_dir, folder_plan, source_files, status_dict)
-
-        try:
-            create_and_fill_folder(folder_path, source_files, config)  # 建立工况文件夹并注入配置与物理源文件
-            ok = run_scripts_in_folder(folder_path, run_order)  # 顺序在目录下启动指定运行脚本
-        except Exception as err:
-            print("异常：创建或执行工况失败 -> {}".format(str(err)))
-            ok = False
-
-        if ok:
-            status_dict[folder_name] = 'passed'
-        else:
-            status_dict[folder_name] = 'failed'
-        _write_run_manifest(root_dir, folder_plan, source_files, status_dict)
-
-        if types_to_delete:  # 若设置了需要清理的中间格式文件
-            delete_files_by_type(folder_path, types_to_delete, ok)  # 清理中间大文件
-        else:  # 若不清理
-            print("已跳过文件删除（没有指定要删除的文件类型）。")  # 打印跳过提示
-
-        return folder_path, ok  # 返回工况绝对路径与执行结果
-
-    print("开始并行批处理，最大并发任务数：{}".format(MAX_WORKERS))  # 打印批处理启动信息
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:  # 开启并发线程池
-        for folder_path, ok in executor.map(process_folder, folder_plan):  # 并行分发并阻塞收集返回状态
-            if not ok:  # 若该工况执行失败
-                failed_folders.append(folder_path)  # 记录该失败工况的绝对路径
+    failed_folders = run_folder_pipeline(
+        root_dir, folder_plan, source_files, status_dict,
+        model_run_order, case_post_run_order, types_to_delete,
+    )
     print("\n==============================")  # 打印批处理结束分隔符
     if failed_folders:  # 若存在执行失败的工况
         print("批处理结束：存在失败文件夹（{}个）。".format(len(failed_folders)))  # 打印失败总数统计
         for path in failed_folders:  # 遍历失败的路径列表
             print("  - {}".format(path))  # 打印失败详情
-            sys.exit(2)  # 返回状态码2退出系统
+        sys.exit(2)  # 返回状态码2退出系统
     print("批处理结束：全部 {} 个工况文件夹处理完成。".format(len(folder_plan)))  # 打印全部成功提示
 
     # 全局后处理汇总阶段
