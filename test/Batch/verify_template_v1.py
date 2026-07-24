@@ -9,16 +9,20 @@
 5. 清理逻辑有效性：仅在 QA 通过且最终数据包存在时才执行清理，失败时完整保留。
 6. 作业进度可直接从sta读取，建模日志仍作为回退来源。
 7. 建模与单工况后处理使用独立线程池并发生重叠。
+8. 终端状态包含当前工况计划序号和总工况数。
 """
 
 from __future__ import print_function
 
 import os
 import sys
+import io
+import json
 import shutil
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 
 # 将 Batch 目录加入 sys.path
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -186,27 +190,59 @@ class TestBatchTemplate(unittest.TestCase):
         try:
             # 模拟工况目录
             odb_file = os.path.join(temp_dir, 'job-test.odb')
+            inp_file = os.path.join(temp_dir, 'job-test.inp')
+            cae_file = os.path.join(temp_dir, 'model-test.cae')
             npz_file = os.path.join(temp_dir, 'surface_results.npz')
+            xlsx_file = os.path.join(temp_dir, 'surface_results.xlsx')
 
-            # 1. 成功运行且存在 NPZ：应被清理
+            # 1. 成功运行且规范产物齐全：过程文件清理，CAE与数据保留
             with open(odb_file, 'wb') as f: f.write(b"odb content")
+            with open(inp_file, 'wb') as f: f.write(b"inp content")
+            with open(cae_file, 'wb') as f: f.write(b"cae content")
             with open(npz_file, 'wb') as f: f.write(b"npz content")
-            runner.delete_files_by_type(temp_dir, ['.odb'], run_ok=True)
+            with open(xlsx_file, 'wb') as f: f.write(b"xlsx content")
+            cleanup_ok = runner.delete_files_by_type(
+                temp_dir, runner.DELETE_FILE_TYPES, run_ok=True,
+            )
+            self.assertTrue(cleanup_ok)
             self.assertFalse(os.path.exists(odb_file), "运行成功且产物存在时，中间 odb 文件应当被删除")
+            self.assertFalse(os.path.exists(inp_file), "运行成功且产物存在时，中间 inp 文件应当被删除")
+            self.assertTrue(os.path.exists(cae_file), "CAE模型数据库应按当前存储策略保留")
             self.assertTrue(os.path.exists(npz_file), "最终 NPZ 产物应当被保留")
+            self.assertTrue(os.path.exists(xlsx_file), "最终 Excel 产物应当被保留")
+            audit_path = os.path.join(temp_dir, 'cleanup_audit.json')
+            self.assertTrue(os.path.exists(audit_path), "清理后必须写出审计文件")
+            with open(audit_path, 'r', encoding='utf-8') as handle:
+                audit = json.load(handle)
+            self.assertEqual(audit['status'], 'completed')
+            self.assertTrue(audit['retained_cae'])
+            self.assertEqual(audit['deleted_file_count'], 2)
 
             # 2. 执行失败 (run_ok=False)：即使有 ODB，应被保留
             with open(odb_file, 'wb') as f: f.write(b"odb content")
             runner.delete_files_by_type(temp_dir, ['.odb'], run_ok=False)
             self.assertTrue(os.path.exists(odb_file), "运行失败时应当保留 odb 文件供诊断")
 
-            # 3. 产物缺失：即使 run_ok=True，也应该被保留以供诊断
-            os.remove(npz_file)  # 删去 NPZ
+            # 3. 任一规范产物缺失：即使 run_ok=True，也应该保留过程文件
+            os.remove(xlsx_file)
             runner.delete_files_by_type(temp_dir, ['.odb'], run_ok=True)
             self.assertTrue(os.path.exists(odb_file), "缺失最终产物时应当保留 odb 文件")
 
         finally:
             shutil.rmtree(temp_dir)
+
+    def test_progress_prefix_contains_case_position(self):
+        """测试终端进度含计划序号、总工况数和工况名。"""
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            runner._print_job_progress(
+                os.path.join('root', 'case-H1-000003'),
+                ['作业进度: job-a，已算到 2.000 秒/共 10.000 秒'],
+                case_index=3, case_total=51,
+            )
+        text = stream.getvalue()
+        self.assertIn('[工况 3/51][case-H1-000003]', text)
+        self.assertIn('job-a', text)
 
     def test_model_postprocess_pipeline_overlap(self):
         """测试下一工况建模与前一工况后处理能够重叠。"""
@@ -227,10 +263,13 @@ class TestBatchTemplate(unittest.TestCase):
             os.makedirs(folder_path, exist_ok=True)
 
         def fake_run(folder_path, _run_order, step_offset=0,
-                     stage_label='stage'):
+                     stage_label='stage', case_index=None, case_total=None):
             case_name = os.path.basename(folder_path)
             with calls_lock:
-                stage_calls.append((case_name, stage_label, step_offset))
+                stage_calls.append((
+                    case_name, stage_label, step_offset,
+                    case_index, case_total,
+                ))
             if stage_label == 'model' and case_name == 'case-b':
                 return post_started.wait(2.0)
             if stage_label == 'postprocess' and case_name == 'case-a':
@@ -252,8 +291,11 @@ class TestBatchTemplate(unittest.TestCase):
             )
             self.assertEqual(failed, [])
             self.assertTrue(post_started.is_set())
-            self.assertEqual(statuses, {'case-a': 'passed', 'case-b': 'passed'})
-            self.assertIn(('case-a', 'postprocess', 1), stage_calls)
+            self.assertEqual(statuses, {
+                'case-a': 'pipeline_passed',
+                'case-b': 'pipeline_passed',
+            })
+            self.assertIn(('case-a', 'postprocess', 1, 1, 2), stage_calls)
         finally:
             runner.MAX_WORKERS = originals['MAX_WORKERS']
             runner.POSTPROCESS_WORKERS = originals['POSTPROCESS_WORKERS']

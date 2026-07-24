@@ -179,6 +179,22 @@ def main():
     summary = RUNNER._metric_summary([0.01, 0.02, 0.03])
     assert summary['count'] == 3 and summary['median'] == 0.02
 
+    with tempfile.TemporaryDirectory() as manifest_root:
+        case = next(item for item in cases if item['case_id'] == 'case-G1r-H1-el-centro')
+        case_folder = os.path.join(manifest_root, case['case_id'])
+        os.makedirs(case_folder)
+        for source in RUNNER.SOURCE_FILES:
+            target = os.path.join(case_folder, os.path.basename(source))
+            with open(target, 'wb') as handle:
+                handle.write(os.path.basename(source).encode('utf-8'))
+        statuses = {case['case_id']: 'planned'}
+        RUNNER.write_run_manifest(manifest_root, [case], statuses, {})
+        with open(os.path.join(manifest_root, 'run_manifest.json'), 'r', encoding='utf-8') as handle:
+            manifest = json.load(handle)
+        recorded = manifest['cases'][case['case_id']]['case_source_file_sha256']
+        assert set(recorded) == set(os.path.basename(path) for path in RUNNER.SOURCE_FILES)
+        assert all(len(value) == 64 for value in recorded.values())
+
     with tempfile.TemporaryDirectory() as pipeline_root:
         originals = {
             'MAX_WORKERS': RUNNER.MAX_WORKERS,

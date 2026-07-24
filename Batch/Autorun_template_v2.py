@@ -6,7 +6,7 @@
   1. 建模与单工况后处理采用独立线程池流水执行。
   2. 通过 json 配置注入参数，避免正则修改脚本。
   3. 多线程并行执行。
-  4. 自动清理指定的中间大文件（如 odb/inp 等）。
+  4. 数据提取完成后自动清理指定的中间大文件，并保留清理审计。
   5. 执行全局汇总与出图的后处理脚本。
   6. 直接读取Abaqus状态文件，将分析时间进度定期输出到终端。
 """
@@ -25,8 +25,9 @@ import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
-DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", "jnl", "com"]  # 执行后自动删除的中间文件类型，留空则不删除
-MAX_WORKERS = 2  # 同时运行建模脚本的最大工况数
+DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留
+REQUIRED_RESULT_FILES = ["surface_results.npz", "surface_results.xlsx"]  # 清理前必须同时存在且非空的规范数据产物
+MAX_WORKERS = 4  # 单机最多同时运行4个建模/求解工况，已由G1r正式批次验证
 POSTPROCESS_WORKERS = 1  # 单工况后处理并发数，默认1以减少与求解争用内存
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
 TERMINAL_PROGRESS_POLL_SECONDS = 300.0  # autorun每5min直读sta，建模进度日志仅作回退
@@ -169,6 +170,10 @@ def _write_run_manifest(root_dir, folder_plan, source_files, status_dict=None):
             'model_workers': MAX_WORKERS,
             'case_postprocess_workers': POSTPROCESS_WORKERS,
             'global_postprocess_after_all_cases': True,
+            'cleanup_after_required_results': bool(DELETE_FILE_TYPES),
+            'cleanup_file_types': list(DELETE_FILE_TYPES),
+            'cleanup_required_results': list(REQUIRED_RESULT_FILES),
+            'retain_cae': True,
         },
     })
 
@@ -463,18 +468,42 @@ def _read_sta_job_progress(folder_path, not_before, progress_log):
     ]
 
 
-def _print_job_progress(folder_path, messages):
+def _case_terminal_prefix(folder_path, case_index=None, case_total=None):
+    """生成包含计划序号、总数和工况名的终端前缀。"""
+    case_name = os.path.basename(os.path.normpath(folder_path))
+    if case_index is not None and case_total is not None:
+        return "[工况 {}/{}][{}]".format(
+            int(case_index), int(case_total), case_name,
+        )
+    return "[{}]".format(case_name)
+
+
+def _print_case_message(folder_path, message, case_index=None,
+                        case_total=None):
+    """按整行输出工况消息，防止多工况并发时字符交叉。"""
+    prefix = _case_terminal_prefix(
+        folder_path, case_index=case_index, case_total=case_total,
+    )
+    with _PROGRESS_PRINT_LOCK:
+        print("{} {}".format(prefix, message), flush=True)
+
+
+def _print_job_progress(folder_path, messages, case_index=None,
+                        case_total=None):
     """按整行输出进度，防止多工况并发时字符交叉。"""
     if not messages:
         return
-    case_name = os.path.basename(os.path.normpath(folder_path))
+    prefix = _case_terminal_prefix(
+        folder_path, case_index=case_index, case_total=case_total,
+    )
     with _PROGRESS_PRINT_LOCK:
         for message in messages:
-            print("[运行状态][{}] {}".format(case_name, message), flush=True)
+            print("[运行状态]{} {}".format(prefix, message), flush=True)
 
 
 def run_scripts_in_folder(folder_path, run_order, step_offset=0,
-                          stage_label='stage'):  # 在工况文件夹内按顺序执行指定阶段脚本
+                          stage_label='stage', case_index=None,
+                          case_total=None):  # 在工况文件夹内按顺序执行指定阶段脚本
     """在工况文件夹内按顺序执行指定的脚本，自动分发 Abaqus cae 和普通 Python 解释器。
 
     参数说明:
@@ -482,6 +511,8 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
         run_order (list): 当前阶段脚本文件名（不含路径）顺序列表。
         step_offset (int): 当前阶段之前已有的脚本数量。
         stage_label (str): 日志中的阶段标签。
+        case_index (int): 工况在冻结计划中的序号。
+        case_total (int): 本批次工况总数。
 
     返回值:
         bool: 若全部顺利执行返回 True，任意脚本执行失败则返回 False。
@@ -509,7 +540,11 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
             log_filename = "autorun_step{:02d}_post_{}.log".format(idx, os.path.splitext(script_name)[0])
 
         log_path = os.path.join(folder_path, log_filename)
-        print("开始执行: {} (命令: {})".format(script_name, ' '.join(cmd)))  # 打印启动执行提示
+        _print_case_message(
+            folder_path,
+            "开始执行: {} (命令: {})".format(script_name, ' '.join(cmd)),
+            case_index=case_index, case_total=case_total,
+        )
 
         env = os.environ.copy()
         if script_name not in ABAQUS_SCRIPTS:
@@ -538,7 +573,10 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
                         )
                         if sta_messages:
                             messages = sta_messages  # sta是求解器当前状态，优先于可能滞后的建模日志
-                        _print_job_progress(folder_path, messages)
+                        _print_job_progress(
+                            folder_path, messages,
+                            case_index=case_index, case_total=case_total,
+                        )
                         next_progress_poll = now + float(TERMINAL_PROGRESS_POLL_SECONDS)
                     time.sleep(max(0.5, float(PROCESS_STATUS_POLL_SECONDS)))
                 if progress_log:
@@ -550,7 +588,10 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
                     )
                     if sta_messages:
                         messages = sta_messages
-                    _print_job_progress(folder_path, messages)
+                    _print_job_progress(
+                        folder_path, messages,
+                        case_index=case_index, case_total=case_total,
+                    )
                 returncode = process.returncode
             except Exception as e:
                 handle.write("\n子进程启动异常: {}\n".format(str(e)).encode('utf-8'))
@@ -559,32 +600,52 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
         if returncode != 0:  # 若执行退出码不为 0
             print("错误：{} 执行失败，返回码={}，详情见日志：{}".format(script_name, returncode, log_path))  # 打印执行失败提示
             return False  # 返回失败
-        print("完成执行：{}".format(script_name))  # 打印执行成功提示
+        _print_case_message(
+            folder_path, "完成执行：{}".format(script_name),
+            case_index=case_index, case_total=case_total,
+        )
     return True  # 返回成功
 
 
 def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定后缀的中间文件以节省空间
-    """在 QA 通过（run_ok 为 True 且存在数据产物）时清理大文件，否则完整保留以便诊断。
+    """在流水线通过且规范数据产物完整时清理过程文件，并写出审计。
 
     参数说明:
         folder_path (str): 工况文件夹绝对路径。
         file_types (list): 待删除的文件后缀名列表。
         run_ok (bool): 工况步骤是否顺利运行完成。
+
+    返回值:
+        bool: 全部目标文件删除成功时返回 True；跳过或存在失败时返回 False。
     """
     if not file_types:  # 若未配置删除类型
-        return  # 直接返回
+        return True  # 直接返回
 
-    # QA与产物检查：如果没有成功运行，或者没有最终 NPZ 产物，跳过删除大文件
-    npz_path = os.path.join(folder_path, 'surface_results.npz')
-    has_npz = os.path.isfile(npz_path)
-
-    if not (run_ok and has_npz):
-        print("警告：由于工况执行失败或缺失最终 NPZ 产物，跳过中间大文件清理，完整保留以便诊断。")
-        return
+    required_paths = [
+        os.path.join(folder_path, name) for name in REQUIRED_RESULT_FILES
+    ]
+    results_ready = all(
+        os.path.isfile(path) and os.path.getsize(path) > 0
+        for path in required_paths
+    )
+    if not (run_ok and results_ready):
+        print(
+            "警告：由于工况执行失败或规范数据产物不完整，"
+            "跳过过程文件清理并完整保留以便诊断。"
+        )
+        return False
 
     normalized = {t.lower() if t.startswith(".") else "." + t.lower() for t in file_types}  # 规范化文件后缀名为小写格式
     deleted = {t: 0 for t in normalized}  # 初始化各类型删除文件数计数器
+    deleted_files = []
     failed = []  # 初始化删除失败文件记录列表
+    retained_results = []
+    for path in required_paths:
+        retained_results.append({
+            'name': os.path.basename(path),
+            'size_bytes': os.path.getsize(path),
+            'sha256': compute_file_sha256(path),
+        })
     for name in sorted(os.listdir(folder_path)):  # 遍历工况目录下的所有文件名
         fp = os.path.join(folder_path, name)  # 拼接绝对路径
         if not os.path.isfile(fp):  # 若非文件结构
@@ -592,9 +653,13 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
         ext = os.path.splitext(name)[1].lower()  # 提取文件后缀名并转换为小写
         if ext not in normalized:  # 若不在待删除列表中
             continue  # 跳过处理
+        size_bytes = os.path.getsize(fp)
         try:  # 尝试删除物理文件
             os.remove(fp)  # 永久删除文件
             deleted[ext] += 1  # 计数器加一
+            deleted_files.append({
+                'name': name, 'extension': ext, 'size_bytes': size_bytes,
+            })
         except OSError as exc:  # 若触发系统错误
             failed.append((fp, str(exc)))  # 记录错误信息
     for ext, n in sorted(deleted.items()):  # 遍历打印删除结果统计
@@ -603,6 +668,31 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
         print("警告：以下文件删除失败：")  # 打印警告标题
         for fp, err in failed:  # 遍历打印失败记录
             print("  - {} -> {}".format(fp, err))  # 打印失败的物理路径与错误信息
+    released_bytes = sum(item['size_bytes'] for item in deleted_files)
+    audit = {
+        'schema_version': 1,
+        'cleaned_at': datetime.datetime.now().isoformat(),
+        'case_dir': os.path.abspath(folder_path),
+        'status': 'partial' if failed else 'completed',
+        'cleanup_file_types': sorted(normalized),
+        'retained_cae': True,
+        'retained_results': retained_results,
+        'deleted_file_count': len(deleted_files),
+        'released_bytes': released_bytes,
+        'deleted_files': deleted_files,
+        'failed_files': [
+            {'path': path, 'error': error} for path, error in failed
+        ],
+    }
+    audit_path = os.path.join(folder_path, 'cleanup_audit.json')
+    with open(audit_path, 'w', encoding='utf-8') as handle:
+        json.dump(audit, handle, ensure_ascii=False, indent=2, sort_keys=True)
+    print(
+        "过程文件清理完成：删除{}个文件，释放{:.2f} GiB；审计={}".format(
+            len(deleted_files), released_bytes / float(1024 ** 3), audit_path,
+        )
+    )
+    return not failed
 
 
 def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
@@ -611,6 +701,11 @@ def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
     """用独立线程池衔接建模与单工况后处理，返回失败目录。"""
     failed_folders = []
     manifest_lock = threading.Lock()
+    total_cases = len(folder_plan)
+    case_positions = dict(
+        (folder_name, index)
+        for index, (folder_name, _config) in enumerate(folder_plan, start=1)
+    )
 
     def update_status(folder_name, status):
         with manifest_lock:
@@ -622,14 +717,18 @@ def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
     def run_model(item):
         folder_name, config = item
         folder_path = os.path.join(root_dir, folder_name)
-        print("\n==============================")
-        print("开始建模：{}".format(folder_path))
+        case_index = case_positions[folder_name]
+        _print_case_message(
+            folder_path, "开始建模：{}".format(folder_path),
+            case_index=case_index, case_total=total_cases,
+        )
         update_status(folder_name, 'model_running')
         try:
             create_and_fill_folder(folder_path, source_files, config)
             ok = run_scripts_in_folder(
                 folder_path, model_run_order, step_offset=0,
-                stage_label='model',
+                stage_label='model', case_index=case_index,
+                case_total=total_cases,
             )
         except Exception as err:
             print("异常：建模阶段失败 -> {}".format(str(err)))
@@ -639,27 +738,39 @@ def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
 
     def run_case_postprocess(item, folder_path):
         folder_name, _config = item
+        case_index = case_positions[folder_name]
         update_status(folder_name, 'postprocess_running')
-        print("开始单工况后处理：{}".format(folder_path))
+        _print_case_message(
+            folder_path, "开始单工况后处理：{}".format(folder_path),
+            case_index=case_index, case_total=total_cases,
+        )
         try:
             ok = run_scripts_in_folder(
                 folder_path, case_post_run_order,
                 step_offset=len(model_run_order),
-                stage_label='postprocess',
+                stage_label='postprocess', case_index=case_index,
+                case_total=total_cases,
             )
         except Exception as err:
             print("异常：单工况后处理失败 -> {}".format(str(err)))
             ok = False
-        update_status(folder_name, 'passed' if ok else 'postprocess_failed')
+        update_status(
+            folder_name, 'pipeline_passed' if ok else 'postprocess_failed',
+        )
         if types_to_delete:
             delete_files_by_type(folder_path, types_to_delete, ok)
         else:
             print("已跳过文件删除（没有指定要删除的文件类型）。")
+        if ok:
+            _print_case_message(
+                folder_path, "流水线完成",
+                case_index=case_index, case_total=total_cases,
+            )
         return folder_path, ok
 
     print(
-        "开始流水线批处理：建模并发={}，单工况后处理并发={}".format(
-            MAX_WORKERS, POSTPROCESS_WORKERS,
+        "开始流水线批处理：总工况={}，建模并发={}，单工况后处理并发={}".format(
+            total_cases, MAX_WORKERS, POSTPROCESS_WORKERS,
         )
     )
     post_futures = []
