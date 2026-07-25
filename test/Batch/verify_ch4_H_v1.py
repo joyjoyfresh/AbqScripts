@@ -67,10 +67,22 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
                 config['run_cfg']['qa_cfg']['frf_fmax_hz'], 12.0,
             )
             self.assertEqual(
+                config['geometry_cfg']['side_clearance'],
+                RUNNER.PRODUCTION_SIDE_CLEARANCE,
+            )
+            self.assertIn('energy', config['run_cfg']['qa_cfg']['required'])
+            self.assertEqual(
                 config['run_cfg']['wave_files'], [RUNNER.WAVE_FILENAME],
             )
             self.assertFalse(config['eql_cfg']['enable'])
             self.assertEqual(config['tssi_cfg']['scene'], 'freefield')
+            if case['case_id'] in RUNNER.PILOT_CASE_IDS:
+                qa_cfg = config['run_cfg']['qa_cfg']
+                self.assertIn('domain', qa_cfg['required'])
+                self.assertEqual(qa_cfg['mode'], 'window_convergence')
+                self.assertEqual(qa_cfg['tol'], 0.02)
+                self.assertEqual(qa_cfg['min_points'], 790)
+                self.assertIn('run-001', qa_cfg['reference_npz'])
 
     def test_h2_prototypes_are_in_h1(self):
         """验证H2尺度原型均来自H1几何库。"""

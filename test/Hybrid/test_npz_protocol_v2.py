@@ -128,6 +128,9 @@ def main():
     all_gate_result = post.evaluate_qa_gates(base_summary, {}, raw_not_ready)
     assert all_gate_result['qa_gates']['theory'] is True
     assert all_gate_result['qa_gates']['reflection'] is False
+    assert all_gate_result['qa_gate_status']['theory'] == 'passed'
+    assert all_gate_result['qa_gate_status']['reflection'] == 'not_evaluated'
+    assert all_gate_result['qa_gate_status']['energy'] == 'not_evaluated'
     assert all_gate_result['overall_pass'] is False
 
     theory_only = post.evaluate_qa_gates(base_summary, {'qa_cfg': {'required': ['theory']}}, raw_not_ready)
@@ -140,6 +143,8 @@ def main():
     window_fail = post.evaluate_qa_gates(base_summary, {'qa_cfg': {'required': ['theory', 'time']}}, raw_not_ready)
     assert window_fail['qa_gates']['theory'] is False
     assert window_fail['qa_gates']['time'] is True
+    assert window_fail['qa_gate_status']['theory'] == 'failed'
+    assert window_fail['qa_gate_status']['time'] == 'passed'
     assert window_fail['overall_pass'] is False
     print('test_npz_protocol_v2: 10/10 ok')
 

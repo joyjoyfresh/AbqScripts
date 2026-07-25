@@ -544,7 +544,7 @@ def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取
     """根据单条记录和原始时程返回可审计的并列 QA 状态。
 
     `suspect` 只表示远场端点诊断，不再作为所有质量问题的代理变量；
-    未提供证据的门槛一律返回 False，只有显式 required 列表才可缩小强制门槛范围。
+    未提供证据的门槛一律返回 False 并标记 not_evaluated，只有显式 required 列表才可缩小强制门槛范围。
     """
     summary = summary or {}
     case_cfg = case_cfg or {}
@@ -565,36 +565,59 @@ def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取
 
     reflection_payload = _qa_json_payload(raw_data, 'qa_reflection_json')
     energy_payload = _qa_json_payload(raw_data, 'qa_energy_json')
-    reflection_pass = str(reflection_payload.get('status', '')).lower() == 'passed'
-    energy_pass = str(energy_payload.get('status', '')).lower() == 'passed'
+    reflection_status = str(reflection_payload.get('status', '')).lower()
+    energy_status = str(energy_payload.get('status', '')).lower()
+    reflection_pass = reflection_status == 'passed'
+    energy_pass = energy_status == 'passed'
+    reflection_evidence = reflection_status in ('passed', 'failed')
+    energy_evidence = energy_status in ('passed', 'failed')
 
-    window_payload = summary.get('qa_window_convergence') or {}
-    time_value = window_payload.get('passed') if isinstance(window_payload, dict) else None
-    if time_value is None:
-        for key in ('qa_time_pass', 'qa_time', 'time_pass'):
-            if key in summary:
-                time_value = summary.get(key)
-                break
+    time_value = None
+    time_evidence = False
+    for key in ('qa_time_pass', 'qa_time', 'time_pass'):
+        if key in summary:
+            time_value = summary.get(key)
+            time_evidence = True
+            break
     time_pass = bool(_qa_bool(time_value))
 
-    def summary_gate(name):  # 读取配置/汇总中的显式门槛，不把缺失当作通过
+    def summary_gate(name):  # 读取配置/汇总中的显式门槛，同时返回证据是否存在
         for key in ('qa_%s_pass' % name, 'qa_%s' % name, '%s_pass' % name):
             if key in summary:
                 parsed = _qa_bool(summary.get(key))
                 if parsed is not None:
-                    return parsed
-        return False
+                    return parsed, True
+        return False, False
+
+    mesh_pass, mesh_evidence = summary_gate('mesh')
+    domain_pass, domain_evidence = summary_gate('domain')
+    external_pass, external_evidence = summary_gate('external')
+    frf_pass, frf_evidence = summary_gate('frf')
+    response_pass, response_evidence = summary_gate('response_spectrum')
+    if str(summary.get('response_spectrum_status') or '').lower() == 'disabled':
+        response_evidence = False
 
     gates = {
         'theory': theory_pass,
         'reflection': reflection_pass,
-        'mesh': summary_gate('mesh'),
+        'mesh': mesh_pass,
         'time': time_pass,
-        'domain': summary_gate('domain'),
+        'domain': domain_pass,
         'energy': energy_pass,
-        'external': summary_gate('external'),
-        'frf': summary_gate('frf'),
-        'response_spectrum': summary_gate('response_spectrum'),
+        'external': external_pass,
+        'frf': frf_pass,
+        'response_spectrum': response_pass,
+    }
+    evidence = {
+        'theory': theory_evidence,
+        'reflection': reflection_evidence,
+        'mesh': mesh_evidence,
+        'time': time_evidence,
+        'domain': domain_evidence,
+        'energy': energy_evidence,
+        'external': external_evidence,
+        'frf': frf_evidence,
+        'response_spectrum': response_evidence,
     }
     qa_cfg = _qa_config(case_cfg)
     required = qa_cfg.get('required')
@@ -604,10 +627,15 @@ def evaluate_qa_gates(summary, case_cfg=None, raw_data=None):  # 分离并合取
         required = [required]
     required = [str(name) for name in required if str(name) in QA_GATE_NAMES]
     overall_pass = bool(all(gates[name] for name in required))
-    statuses = dict((name, 'passed' if gates[name] else 'failed') for name in QA_GATE_NAMES)
+    statuses = dict(
+        (name, ('not_evaluated' if not evidence[name] else
+                ('passed' if gates[name] else 'failed')))
+        for name in QA_GATE_NAMES
+    )
     return {
         'qa_required': required,
         'qa_gates': gates,
+        'qa_gate_evidence': evidence,
         'qa_gate_status': statuses,
         'overall_pass': overall_pass,
         'qa_status': 'passed' if overall_pass else 'failed',
@@ -2144,10 +2172,33 @@ def fill_short_internal_gaps(out, s_nodes, y_nodes, s_grid, max_gap=SGRID_MAX_GA
     return out  # 返回补齐后曲线
 
 
-def resample_H_matrix(H, s_nodes, s_grid, seg_labels):  # H 曲面空间维三段重采样
+def fill_short_internal_gaps_matrix(out, H, s_nodes, s_grid,
+                                    max_gap=SGRID_MAX_GAPFILL):  # 补曲面的短内部缺口
+    """逐频补齐连续谱曲面在几何棱附近的短缺口；不补端外或宽缺口。"""
+    result = np.asarray(out).copy()
+    source = np.atleast_2d(np.asarray(H))
+    is_complex = np.iscomplexobj(source)
+    for j in range(source.shape[1]):
+        if is_complex:
+            real = fill_short_internal_gaps(
+                result[:, j].real, s_nodes, source[:, j].real, s_grid, max_gap)
+            imag = fill_short_internal_gaps(
+                result[:, j].imag, s_nodes, source[:, j].imag, s_grid, max_gap)
+            missing = ~np.isfinite(result[:, j].real) | ~np.isfinite(result[:, j].imag)
+            fill = missing & np.isfinite(real) & np.isfinite(imag)
+            result[fill, j] = real[fill] + 1j * imag[fill]
+        else:
+            result[:, j] = fill_short_internal_gaps(
+                result[:, j], s_nodes, source[:, j], s_grid, max_gap)
+    return result
+
+
+def resample_H_matrix(H, s_nodes, s_grid, seg_labels,
+                      fill_short_gaps=False):  # H 曲面空间维三段重采样
     """把实数或复数矩阵沿空间维逐段插值到统一 s 子网格。
 
     复数频响分别插值实部和虚部，避免直接插值包裹相位；每个频点只使用有限节点。
+    对物理连续的地表响应可显式补齐几何棱附近不超过阈值的短内部缺口。
     """
     H = np.atleast_2d(np.asarray(H))  # 节点×频点
     is_complex = np.iscomplexobj(H)
@@ -2177,6 +2228,8 @@ def resample_H_matrix(H, s_nodes, s_grid, seg_labels):  # H 曲面空间维三�
                 out[gm, j] = real + 1j * imag
             else:
                 out[gm, j] = np.interp(grid[gm], s_nodes[nm], H[nm, j], left=np.nan, right=np.nan)
+    if fill_short_gaps:
+        out = fill_short_internal_gaps_matrix(out, H, s_nodes, s_grid)
     return out  # 返回对齐曲面
 
 
@@ -2305,7 +2358,7 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
     """可选 QA：仅在 case_config.qa_cfg.mode='window_convergence' 时启用。
 
     端点仍保留一维自由场误差作为诊断量；若同一观测窗相对显式参考 NPZ 已收敛，
-    则以窗口收敛替代端点一维对拍作为最终 suspect 门槛，避免把散射尾波误判为边界反射。
+    则把窗口收敛作为独立计算域门，避免把散射尾波端点诊断误写成边界收敛结论。
     """
     logger = logger or log_step()
     qa_cfg = _qa_config(case_cfg)  # 读取可选 QA 配置
@@ -2355,7 +2408,7 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
             rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field,
                                             'n_points': len(diffs), 'max_rel_diff': float(max_diff),
                                             'max_rel_diff_s': float(max_s), 'tol': float(tol), 'passed': passed}  # 写可审计证据
-            rec['qa_time_pass'] = passed  # 仅更新时间/观测窗门槛，不覆盖理论或端点诊断
+            rec['qa_domain_pass'] = passed  # 窗口收敛属于计算域门槛，不覆盖时间或端点诊断
             refreshed = evaluate_qa_gates(rec, case_cfg, RAW_TIMESERIES.get(record))  # 重新合取全部门槛
             rec.update(refreshed)
             rec['qa_status'] = 'passed' if refreshed['overall_pass'] else 'failed'  # 机器可读整体状态
@@ -2365,12 +2418,12 @@ def apply_window_convergence_qa(case_cfg, logger=None):  # 用已验证的不同
                      '通过' if passed else '失败', 'SUSPECT' if endpoint_suspect else 'PASS')
         except Exception as e:  # 配置或参考包异常必须保留原严格判定
             rec['qa_window_convergence'] = {'reference_npz': ref_path, 'field': field, 'passed': False, 'error': str(e)}
-            rec['qa_time_pass'] = False  # 窗口收敛失败只影响时间门槛
+            rec['qa_domain_pass'] = False  # 窗口收敛失败只影响计算域门槛
             refreshed = evaluate_qa_gates(rec, case_cfg, RAW_TIMESERIES.get(record))
             rec.update(refreshed)
             rec['qa_status'] = 'failed'
             changed = True
-            log_step(logger, '[qa] %s: 窗口收敛 QA 失败，已保留端点 suspect=%s 并单独置 qa_time=false：%s', str(record), str(rec.get('suspect', False)), str(e))
+            log_step(logger, '[qa] %s: 窗口收敛 QA 失败，已保留端点 suspect=%s 并单独置 qa_domain=false：%s', str(record), str(rec.get('suspect', False)), str(e))
     if changed:  # 仅在明确执行后写回
         with open(summary_path, 'w') as fh:
             json.dump(summary_data, fh, indent=2)  # 写回最终 QA 状态与审计证据
@@ -2430,17 +2483,17 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
                                'AR_window': [-float(a_max), 1.0 + float(c_max)]}  # 暂存回写项
         n_matrix = 0  # 幅值曲面成功计数
         matrix_specs = (
-            (('FSAF_inc_h_%s.csv', 'H_surface_h_%s.csv'), 'sgrid_FSAF_inc_h_%s.csv', 'f_Hz'),
-            (('FSAF_inc_v_%s.csv', 'H_surface_v_%s.csv'), 'sgrid_FSAF_inc_v_%s.csv', 'f_Hz'),
-            (('FSAF_1D_h_%s.csv',), 'sgrid_FSAF_1D_h_%s.csv', 'f_Hz'),
-            (('FSAF_station_h_%s.csv', 'H_topo_h_%s.csv'), 'sgrid_FSAF_station_h_%s.csv', 'f_Hz'),
-            (('PSA_surface_h_%s.csv',), 'sgrid_PSA_surface_h_%s.csv', 'T_s'),
-            (('PSA_surface_v_%s.csv',), 'sgrid_PSA_surface_v_%s.csv', 'T_s'),
-            (('RSAF_rock_h_%s.csv',), 'sgrid_RSAF_rock_h_%s.csv', 'T_s'),
-            (('RSAF_1D_h_%s.csv',), 'sgrid_RSAF_1D_h_%s.csv', 'T_s'),
-            (('URSAF_z_%s.csv',), 'sgrid_URSAF_z_%s.csv', 'T_s'),
+            (('FSAF_inc_h_%s.csv', 'H_surface_h_%s.csv'), 'sgrid_FSAF_inc_h_%s.csv', 'f_Hz', True),
+            (('FSAF_inc_v_%s.csv', 'H_surface_v_%s.csv'), 'sgrid_FSAF_inc_v_%s.csv', 'f_Hz', True),
+            (('FSAF_1D_h_%s.csv',), 'sgrid_FSAF_1D_h_%s.csv', 'f_Hz', False),
+            (('FSAF_station_h_%s.csv', 'H_topo_h_%s.csv'), 'sgrid_FSAF_station_h_%s.csv', 'f_Hz', False),
+            (('PSA_surface_h_%s.csv',), 'sgrid_PSA_surface_h_%s.csv', 'T_s', True),
+            (('PSA_surface_v_%s.csv',), 'sgrid_PSA_surface_v_%s.csv', 'T_s', True),
+            (('RSAF_rock_h_%s.csv',), 'sgrid_RSAF_rock_h_%s.csv', 'T_s', False),
+            (('RSAF_1D_h_%s.csv',), 'sgrid_RSAF_1D_h_%s.csv', 'T_s', False),
+            (('URSAF_z_%s.csv',), 'sgrid_URSAF_z_%s.csv', 'T_s', False),
         )
-        for source_formats, dst_fmt, axis_name in matrix_specs:
+        for source_formats, dst_fmt, axis_name, fill_short_gaps in matrix_specs:
             source_path = None
             for source_format in source_formats:
                 candidate = source_format % record
@@ -2453,7 +2506,9 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             if matrix_axis is None:
                 continue
             s_h = calc_s_coords(xs_h, x_crest, x_toe, h_slope)  # H 列坐标转 s
-            H_s = resample_H_matrix(H, s_h, s_grid, seg_labels)  # 空间维对齐
+            H_s = resample_H_matrix(
+                H, s_h, s_grid, seg_labels,
+                fill_short_gaps=fill_short_gaps)  # 空间维对齐
             write_sgrid_matrix_csv(dst_fmt % record, axis_name, matrix_axis, s_grid, seg_labels, H_s)
             n_matrix += 1
 
@@ -2467,12 +2522,14 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             frf['sgrid_x'] = np.asarray(x_phys, dtype=float)
             frf['sgrid_segment'] = segment_array
             for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'):
-                aligned = resample_H_matrix(frf[field], frf_s, s_grid, seg_labels)
+                aligned = resample_H_matrix(
+                    frf[field], frf_s, s_grid, seg_labels,
+                    fill_short_gaps=field in ('H_surface_h', 'H_surface_v'))
                 frf['sgrid_%s' % field] = aligned
                 frf['sgrid_%s_valid_mask' % field] = np.isfinite(aligned.real) & np.isfinite(aligned.imag)
             frf_quality = frf.get('quality') or {}
             frf_quality['sgrid_point_count'] = int(len(s_grid))
-            frf_quality['sgrid_complex_interpolation'] = 'real_imag_segmentwise'
+            frf_quality['sgrid_complex_interpolation'] = 'real_imag_segmentwise_short_gap_fill_surface'
             frf['quality_json'] = json.dumps(frf_quality, ensure_ascii=True, sort_keys=True)
         rsa = groups.get('rsa') or {}
         if rsa:
@@ -2483,7 +2540,11 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             for field in ('PSA_surface_h', 'PSA_surface_v', 'RSAF_rock_h', 'RSAF_1D_h', 'URSAF_z',
                           'key_PSA_surface_h', 'key_PSA_surface_v', 'key_RSAF_rock_h',
                           'key_RSAF_1D_h', 'key_URSAF_z'):
-                aligned = resample_H_matrix(rsa[field], rsa_s, s_grid, seg_labels)
+                aligned = resample_H_matrix(
+                    rsa[field], rsa_s, s_grid, seg_labels,
+                    fill_short_gaps=field in (
+                        'PSA_surface_h', 'PSA_surface_v',
+                        'key_PSA_surface_h', 'key_PSA_surface_v'))
                 rsa['sgrid_%s' % field] = aligned
                 if 'RSAF' in field or 'URSAF' in field:
                     rsa['sgrid_%s_valid_mask' % field] = np.isfinite(aligned)
@@ -2552,10 +2613,20 @@ def main():  # 主入口函数
     resample_outputs(meta, case_cfg, logger=logger)  # §4.0 第②步重采样（并回写 AR_max 段号/归一坐标）
     apply_window_convergence_qa(case_cfg, logger=logger)  # 可选：用不同净空参考验证研究窗口收敛
     plot_results(meta, case_cfg, logger=logger)  # 提取数据后自动画图
+    final_summary = _load_json('surface_summary.json') or {}  # 打包删除运行期JSON前冻结最终QA状态
     n_items = write_surface_npz(meta, case_cfg, RAW_TIMESERIES, SPECTRAL_RESULTS)  # 所有规范数组收敛为单一 NPZ 包
     n_sheets = write_surface_xlsx_from_npz()  # 再由 NPZ 导出研究者查阅用 Excel 工作簿
     log_step(logger, '完成: 已写入 %s（%d 个数值项）与 %s（%d 个工作表）；运行期 CSV/JSON 已清理。',
              NPZ_FILENAME, n_items, XLSX_FILENAME, n_sheets)
+    qa_failed = [
+        str(item.get('record') or 'unknown')
+        for item in (final_summary.get('records') or [])
+        if not bool(item.get('overall_pass', False))
+    ]
+    if qa_failed:  # 非零退出使批处理保留 ODB，避免质量失败后仍自动清理
+        log_step(logger, '错误: 必需 QA 未通过（%s）；规范结果已保留，ODB 不得自动清理。',
+                 ', '.join(qa_failed))
+        sys.exit(3)
 
 
 if __name__ == '__main__':  # 程序入口

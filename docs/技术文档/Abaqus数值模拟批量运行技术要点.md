@@ -137,23 +137,25 @@ G1r专用入口`Run/Auto_ch4/Autorun_ch4_G1r.py`采用相同的`.sta`直读逻�
 
 ### 5.3 数据提取后的自动清理
 
-通用模板在单工况后处理正常退出后立即检查`surface_results.npz`和`surface_results.xlsx`是否同时存在且非空。只有流水线成功且两项规范产物齐全时，才删除`.odb/.inp/.msg/.prt/.dat/.sta/.sim/.jnl/.com/.rpy/.rec`；任一步失败或任一规范产物缺失时均跳过清理，保留完整现场用于诊断。
+通用模板在单工况后处理正常退出后立即检查`surface_results.npz`和`surface_results.xlsx`是否同时存在且非空。后处理v2会在两项规范结果写出后再次读取`surface_summary.json`；任一显式`qa_cfg.required`门未通过时以非零状态退出，使流水线保留ODB。只有必需QA通过、后处理正常退出且两项规范产物齐全时，才删除`.odb/.inp/.msg/.prt/.dat/.sta/.sim/.jnl/.com/.rpy/.rec`；任一步失败或任一规范产物缺失时均跳过清理，保留完整现场用于诊断。
 
 当前存储策略明确保留`.cae`，同时保留配置、元数据、输入、脚本、日志、质量JSON、NPZ、Excel和图表。每次成功清理都在工况目录写入`cleanup_audit.json`，记录规范产物的大小与SHA-256、删除文件名、删除失败项和实际释放字节数。清理是永久删除，不进入回收站；若后续需要从ODB提取新增变量，只能重新求解，因此正式后处理字段必须在批跑前冻结。
 
 G1r正式`run-003`已按该口径完成删除前散列冻结和清理：84个过程文件被永久删除，释放`29.795 GiB`，目标过程文件残留数为0；8个CAE、8个NPZ、8个Excel和8份清理审计保留。根目录的`G1r正式冻结清单.json`另外记录删除前ODB散列、恢复前后脚本变体和科学门文件散列。
 
-H1—H3正式入口`Run/Auto_ch4/Autorun_ch4_H_v1.py`已继承上述进度、流水线和清理规则。`run-001`预生产已生成51个正式工况并保持`planned`；首批固定选择`H1-000035/H2-000006/H3-000006`，并使用3个建模/求解槽同时运行，命令为：
+H1—H3正式入口`Run/Auto_ch4/Autorun_ch4_H_v1.py`已继承上述进度、流水线和清理规则。`run-001`的`H1-000035/H2-000006/H3-000006`已使用3槽完成，0.5—10 Hz覆盖、尾段、能量、初态和结果散列均正常，但`side_clearance=0.1h`没有既有收敛证据，传播上游端点相对一维误差达到23.83%—53.69%；统一复频响网格还在坡脚缺1—2个点。因此`run-001/H1_H3预生产放行门.json`冻结为`passed=false`，剩余48个工况不得继续。
+
+当前入口已在原文件上整改：侧向净空改为`1.0h`，能量加入所有正式工况必需门，3个首批工况另外要求计算域门；统一复频响只对物理连续的地表场补齐几何棱附近短缺口。未配置门显示为`not_evaluated`，不再与真实`failed`混写。新配置写入`run-002`，首批仍由用户运行：
 
 ```powershell
-python "Run\Auto_ch4\Autorun_ch4_H_v1.py" "Run\ch4_H_homogeneous_baseline\run-001" --run-pilot
+python "Run\Auto_ch4\Autorun_ch4_H_v1.py" "Run\ch4_H_homogeneous_baseline\run-002" --run-pilot
 ```
 
-该命令结束后不会自动启动其余48个工况。必须先检查3个工况的求解、频带、末段、复频响、规范数据和清理审计，并生成`H1_H3预生产放行门.json`；正式入口在该门不存在、内容未通过或工况ID不一致时会拒绝`--run-remaining`。首批通过后，`--run-remaining`恢复4个建模/求解槽与1个后处理槽。
+`run-002`的3个首批配置逐一引用`run-001`同名NPZ，自动比较相同`s∈[-4,4]`窗口的`TAF_h_comp`；最大同点差不超过2%、有效同点不少于790时计算域门才通过。命令结束后仍不会自动启动其余48个工况，还需离线复核0.5—10 Hz复频响幅相、801点空间完整性、末段、能量、规范数据和清理审计，并生成新的`H1_H3预生产放行门.json`。正式入口在该门不存在、内容未通过或工况ID不一致时会拒绝`--run-remaining`；首批通过后，`--run-remaining`恢复4个建模/求解槽与1个后处理槽。
 
 ### 5.4 FSAF矩阵中的非有限数
 
-Abaqus所带Python/NumPy在Windows下写CSV时，NaN可能表现为`-nan(ind)`、`nan(ind)`或`1.#QNAN`，普通`float()`不能解析其中部分形式。`Postprocess_All_surface_v2.py`现将这些标记统一恢复为NaN，再通过`valid_mask`排除无效频点；未知文本仍使矩阵读取失败，不能被静默替换为零或小量。该兼容只补全统一`s-grid`的`FSAF_1D_h/FSAF_station_h`派生表，不改变复数频响、PGA、RSAF或有效频带门槛。
+Abaqus所带Python/NumPy在Windows下写CSV时，NaN可能表现为`-nan(ind)`、`nan(ind)`或`1.#QNAN`，普通`float()`不能解析其中部分形式。`Postprocess_All_surface_v2.py`现将这些标记统一恢复为NaN，再通过`valid_mask`排除无效频点；未知文本仍使矩阵读取失败，不能被静默替换为零或小量。对物理连续的`H_surface_h/v`、地表`FSAF`和绝对`PSA`，程序允许用两侧真实节点补齐不超过`Δs=0.15`的内部短缺口；端外、宽缺口、一维谱比、台站谱比和反应谱放大比均不补值，避免把真实口径跳变抹平。
 
 ### 5.5 G0—G1b历史工况清理记录
 

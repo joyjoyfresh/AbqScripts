@@ -94,6 +94,29 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
         self.assertAlmostEqual(aligned[1, 0].imag, 1.0)
         self.assertTrue(np.isnan(aligned[2, 0].real))
 
+    def test_continuous_frf_fills_only_short_internal_corner_gap(self):
+        """连续地表频响应补齐坡脚短缺口，但分段谱比默认仍保留缺口。"""
+        transfer = np.array([
+            [1.0 + 0.0j],
+            [2.0 + 1.0j],
+            [3.0 + 2.0j],
+            [4.0 + 3.0j],
+        ])
+        s_nodes = np.array([0.90, 0.98, 1.02, 1.10])
+        s_grid = np.array([0.90, 0.98, 1.00, 1.02, 1.10])
+        segments = ["B", "B", "C", "C", "C"]
+
+        segmented = MODULE.resample_H_matrix(
+            transfer, s_nodes, s_grid, segments,
+        )
+        continuous = MODULE.resample_H_matrix(
+            transfer, s_nodes, s_grid, segments, fill_short_gaps=True,
+        )
+
+        self.assertTrue(np.isnan(segmented[2, 0].real))
+        self.assertAlmostEqual(continuous[2, 0].real, 2.5)
+        self.assertAlmostEqual(continuous[2, 0].imag, 1.5)
+
     def test_matrix_csv_accepts_windows_nan_markers(self):
         """Windows写出的-nan(ind)等标记应保留为NaN，不能使整张FSAF矩阵读取失败。"""
         with tempfile.TemporaryDirectory() as folder:
