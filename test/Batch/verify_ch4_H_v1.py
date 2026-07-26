@@ -39,6 +39,8 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
         )
         self.assertEqual(RUNNER.PILOT_MAX_WORKERS, 3)
         self.assertEqual(RUNNER.PRODUCTION_MAX_WORKERS, 4)
+        self.assertEqual(RUNNER.PRODUCTION_SIDE_CLEARANCE, 4.0)
+        self.assertEqual(RUNNER.DOMAIN_REFERENCE_RUN, 'run-002')
 
     def test_pilot_and_remaining_worker_config(self):
         """验证首批3槽并行、剩余批次4槽并行。"""
@@ -59,9 +61,15 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
             self.assertEqual(config['material_cfg']['layers'], [])
             self.assertLessEqual(config['material_cfg']['angle'], 30.0)
             self.assertEqual(config['damping_cfg']['fc'], 4.0)
+            self.assertIsNone(config['damping_cfg']['constant_xi'])
+            self.assertEqual(config['damping_cfg']['q_bedrock'], 999.0)
+            self.assertIsNone(config['damping_cfg']['bedrock_xi'])
             self.assertEqual(config['time_cfg']['tail_seconds'], 6.0)
             self.assertEqual(
                 config['freefield_cfg']['initial_state_mode'], 'incremental',
+            )
+            self.assertEqual(
+                config['freefield_cfg']['reference_field_mode'], 'global_upper',
             )
             self.assertEqual(
                 config['run_cfg']['qa_cfg']['frf_fmax_hz'], 12.0,
@@ -82,7 +90,7 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
                 self.assertEqual(qa_cfg['mode'], 'window_convergence')
                 self.assertEqual(qa_cfg['tol'], 0.02)
                 self.assertEqual(qa_cfg['min_points'], 790)
-                self.assertIn('run-001', qa_cfg['reference_npz'])
+                self.assertIn('run-002', qa_cfg['reference_npz'])
 
     def test_h2_prototypes_are_in_h1(self):
         """验证H2尺度原型均来自H1几何库。"""

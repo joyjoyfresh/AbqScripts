@@ -27,6 +27,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型�
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留
 REQUIRED_RESULT_FILES = ["surface_results.npz", "surface_results.xlsx"]  # 清理前必须同时存在且非空的规范数据产物
+POSTPROCESS_STATUS_FILENAME = "postprocess_status.json"  # 后处理必需QA状态；不依赖可能吞退出码的Abaqus批处理包装器
 MAX_WORKERS = 4  # 单机最多同时运行4个建模/求解工况，已由G1r正式批次验证
 POSTPROCESS_WORKERS = 1  # 单工况后处理并发数，默认1以减少与求解争用内存
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
@@ -111,6 +112,25 @@ def compute_dict_sha256(d):
     """计算字典的 SHA-256 哈希值。"""
     text = json.dumps(d or {}, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def validate_postprocess_status(folder_path):  # 独立核验后处理必需QA
+    """读取后处理状态文件，返回 ``(通过, 原因)``。"""
+    status_path = os.path.join(folder_path, POSTPROCESS_STATUS_FILENAME)
+    if not os.path.isfile(status_path):
+        return False, "缺少{}".format(POSTPROCESS_STATUS_FILENAME)
+    try:
+        with open(status_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        return False, "{}无法读取: {}".format(
+            POSTPROCESS_STATUS_FILENAME, str(exc),
+        )
+    if not bool(payload.get('passed', False)):
+        return False, "{}报告必需QA未通过: {}".format(
+            POSTPROCESS_STATUS_FILENAME, payload.get('reason') or 'unknown',
+        )
+    return True, "passed"
 
 
 def validate_config(config):
@@ -540,6 +560,14 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
             log_filename = "autorun_step{:02d}_post_{}.log".format(idx, os.path.splitext(script_name)[0])
 
         log_path = os.path.join(folder_path, log_filename)
+        postprocess_status_path = os.path.join(
+            folder_path, POSTPROCESS_STATUS_FILENAME,
+        )
+        if (
+            script_name == 'Postprocess_All_surface_v2.py'
+            and os.path.isfile(postprocess_status_path)
+        ):
+            os.remove(postprocess_status_path)  # 当前进程启动前删除旧状态，禁止误用历史通过证据
         _print_case_message(
             folder_path,
             "开始执行: {} (命令: {})".format(script_name, ' '.join(cmd)),
@@ -600,6 +628,15 @@ def run_scripts_in_folder(folder_path, run_order, step_offset=0,
         if returncode != 0:  # 若执行退出码不为 0
             print("错误：{} 执行失败，返回码={}，详情见日志：{}".format(script_name, returncode, log_path))  # 打印执行失败提示
             return False  # 返回失败
+        if script_name == 'Postprocess_All_surface_v2.py':
+            status_ok, status_reason = validate_postprocess_status(folder_path)
+            if not status_ok:
+                print(
+                    "错误：{} 的必需QA状态未通过，详情={}；保留ODB供诊断。".format(
+                        script_name, status_reason,
+                    )
+                )
+                return False
         _print_case_message(
             folder_path, "完成执行：{}".format(script_name),
             case_index=case_index, case_total=case_total,

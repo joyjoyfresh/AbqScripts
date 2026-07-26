@@ -124,7 +124,7 @@ def log_step(logger=None, message=None, *args):
             datefmt='%Y-%m-%d %H:%M:%S'
         )
 
-        file_handler = logging.FileHandler(log_filename, mode='w')
+        file_handler = logging.FileHandler(log_filename, mode='w', encoding='utf-8')
         file_handler.setFormatter(formatter)
         _logger.addHandler(file_handler)
 
@@ -1106,6 +1106,7 @@ def write_H_csv(path, freqs, xs, H):
 
 NPZ_FILENAME = 'surface_results.npz'  # 单工况唯一数值输出文件名
 XLSX_FILENAME = 'surface_results.xlsx'  # 供研究者查阅的 Excel 工作簿文件名
+POSTPROCESS_STATUS_FILENAME = 'postprocess_status.json'  # 供外层批处理独立核验必需QA，避免Abaqus包装命令吞掉退出码
 RAW_TIMESERIES = {}  # 逐记录原始时程与 QA 扩展字段，最终直接写入 NPZ
 SPECTRAL_RESULTS = {}  # 逐记录复频响、FSAF 派生依据、PSA/RSAF 与有效掩码
 _NPZ_TEMP_PATTERNS = (  # 打包后删除的运行期临时数值文件
@@ -1137,6 +1138,29 @@ def _load_npz_no_pickle(path):  # 兼容 Abaqus NumPy 1.15/Windows 的 NPZ 路�
         return np.load(path, allow_pickle=False)
     except TypeError:  # 极旧 NumPy 不接受 allow_pickle 参数
         return np.load(path)
+
+
+def write_postprocess_status(summary, passed, reason):  # 写外层批处理可直接读取的轻量状态
+    """冻结本次后处理及必需QA状态，避免只依赖Abaqus批处理包装器的退出码。"""
+    records = []
+    for item in (summary or {}).get('records') or []:
+        records.append({
+            'record': item.get('record'),
+            'overall_pass': bool(item.get('overall_pass', False)),
+            'qa_required': list(item.get('qa_required') or []),
+            'qa_gate_status': dict(item.get('qa_gate_status') or {}),
+        })
+    payload = {
+        'schema_version': 1,
+        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'passed': bool(passed),
+        'status': 'passed' if passed else 'failed',
+        'reason': str(reason),
+        'records': records,
+    }
+    with open(POSTPROCESS_STATUS_FILENAME, 'w') as fh:
+        json.dump(payload, fh, indent=2, sort_keys=True)
+    return payload
 
 
 def _read_csv_table_for_npz(path):  # 读取临时 CSV 为表头和文本矩阵
@@ -2572,6 +2596,8 @@ def main():  # 主入口函数
     logger = log_step()  # 自动使用与脚本同名的日志文件
     RAW_TIMESERIES.clear()  # 同一解释器重复执行时不混入上一工况
     SPECTRAL_RESULTS.clear()  # 复频响与反应谱同样按本次工况重新建立
+    if os.path.isfile(POSTPROCESS_STATUS_FILENAME):  # 防止上次运行的通过状态被误复用
+        os.remove(POSTPROCESS_STATUS_FILENAME)
     log_step(logger, '脚本开始执行 (Postprocess_All_surface_v2)')
     meta = _load_json('case_meta.json')  # 读取元数据
     case_cfg = _load_json('case_config.json')  # 读取配置
@@ -2607,6 +2633,10 @@ def main():  # 主入口函数
     log_step(logger, '完成: %d 条 odb，汇总见 surface_summary.json', len(odbs))  # 提示完成
 
     if failed_odbs:  # 任一 ODB 失败时必须显式失败，避免批处理继续清理 ODB 并掩盖根因
+        write_postprocess_status(
+            {'schema_version': 2, 'records': summaries},
+            False, 'odb_extraction_failed',
+        )
         log_step(logger, '错误: %d/%d 条 ODB 后处理失败；已保留 ODB 和错误堆栈，停止重采样/绘图。', len(failed_odbs), len(odbs))  # 汇总提示
         sys.exit(1)  # 让 Autorun 正确标记本工况失败，不执行清理
 
@@ -2624,9 +2654,11 @@ def main():  # 主入口函数
         if not bool(item.get('overall_pass', False))
     ]
     if qa_failed:  # 非零退出使批处理保留 ODB，避免质量失败后仍自动清理
+        write_postprocess_status(final_summary, False, 'required_qa_failed')
         log_step(logger, '错误: 必需 QA 未通过（%s）；规范结果已保留，ODB 不得自动清理。',
                  ', '.join(qa_failed))
         sys.exit(3)
+    write_postprocess_status(final_summary, True, 'required_qa_passed')
 
 
 if __name__ == '__main__':  # 程序入口

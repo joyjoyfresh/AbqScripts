@@ -323,6 +323,32 @@ class PostprocessAllSurfaceTests(unittest.TestCase):
         finally:
             os.chdir(old_cwd)
 
+    def test_postprocess_status_records_required_qa(self):
+        """轻量状态文件必须保留整体结论和逐记录必需QA证据。"""
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                os.chdir(folder)
+                payload = MODULE.write_postprocess_status({
+                    "records": [{
+                        "record": "demo",
+                        "overall_pass": False,
+                        "qa_required": ["frf", "domain"],
+                        "qa_gate_status": {
+                            "frf": "passed", "domain": "failed",
+                        },
+                    }],
+                }, False, "required_qa_failed")
+                self.assertFalse(payload["passed"])
+                self.assertEqual(payload["records"][0]["qa_required"], ["frf", "domain"])
+                with open(MODULE.POSTPROCESS_STATUS_FILENAME, "r", encoding="utf-8") as stream:
+                    stored = json.load(stream)
+                self.assertEqual(stored["status"], "failed")
+                self.assertEqual(stored["records"][0]["qa_gate_status"]["domain"], "failed")
+                os.chdir(old_cwd)
+        finally:
+            os.chdir(old_cwd)
+
     def test_main_fails_loudly_when_odb_extraction_fails(self):
         """任一 ODB 提取失败必须返回非零，避免批处理误清理唯一的诊断 ODB。"""
         old_open_odb = MODULE.openOdb

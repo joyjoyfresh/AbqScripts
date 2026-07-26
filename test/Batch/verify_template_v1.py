@@ -10,6 +10,7 @@
 6. 作业进度可直接从sta读取，建模日志仍作为回退来源。
 7. 建模与单工况后处理使用独立线程池并发生重叠。
 8. 终端状态包含当前工况计划序号和总工况数。
+9. 后处理必需QA状态独立于Abaqus包装命令退出码核验。
 """
 
 from __future__ import print_function
@@ -228,6 +229,39 @@ class TestBatchTemplate(unittest.TestCase):
             runner.delete_files_by_type(temp_dir, ['.odb'], run_ok=True)
             self.assertTrue(os.path.exists(odb_file), "缺失最终产物时应当保留 odb 文件")
 
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_postprocess_status_is_required_and_fail_closed(self):
+        """Abaqus包装命令即使返回0，也必须以轻量状态文件复核必需QA。"""
+        temp_dir = tempfile.mkdtemp()
+        try:
+            ok, reason = runner.validate_postprocess_status(temp_dir)
+            self.assertFalse(ok)
+            self.assertIn('缺少', reason)
+
+            status_path = os.path.join(
+                temp_dir, runner.POSTPROCESS_STATUS_FILENAME,
+            )
+            with open(status_path, 'w', encoding='utf-8') as handle:
+                json.dump({
+                    'schema_version': 1,
+                    'passed': False,
+                    'reason': 'required_qa_failed',
+                }, handle)
+            ok, reason = runner.validate_postprocess_status(temp_dir)
+            self.assertFalse(ok)
+            self.assertIn('required_qa_failed', reason)
+
+            with open(status_path, 'w', encoding='utf-8') as handle:
+                json.dump({
+                    'schema_version': 1,
+                    'passed': True,
+                    'reason': 'required_qa_passed',
+                }, handle)
+            ok, reason = runner.validate_postprocess_status(temp_dir)
+            self.assertTrue(ok)
+            self.assertEqual(reason, 'passed')
         finally:
             shutil.rmtree(temp_dir)
 

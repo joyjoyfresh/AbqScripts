@@ -72,6 +72,7 @@ damping_cfg = {
     'constant_xi': 0.01,                #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
     'qs_factor': 0.05,                  # Qs = qs_factor*cs（coarse-grain 法，cs 单位 m/s）
     'q_bedrock': 999.0,                 # 基岩品质因子(≈无衰减)
+    'bedrock_xi': None,                 #! 基岩阻尼比显式覆盖；None=按 q_bedrock，避免把 finite-layer 的 constant_xi 误用于基岩
     'fc': None,                         # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
     'f1_factor': 0.5,                   # 双频拟合下限 = f1_factor*fc
     'f2_factor': 2.5,                   # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
@@ -108,6 +109,7 @@ freefield_cfg = {
     'spectrum_tol': 1e-7,               # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
     'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
     'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
+    'reference_field_mode': 'global_upper',  #! 参考场：global_upper=三边界统一上平台平场/local_columns=旧局部柱（仅历史复现）
     'bottom_ymax_mode': 'local',         # 底边界自由场柱高：local=按 x 上方地表/upper=上平台柱/lower=下平台柱
     'initial_state_mode': 'raw',         # fd 初态：raw=保留频域绝对基线/incremental=转为 t=0 起算的增量场
 }
@@ -411,25 +413,35 @@ def _estimate_dominant_freq(acc, dt):
 def _damping_ratio_from_q(cs, is_bedrock, dcfg, layer_name=None):  # 由 Q 值换算阻尼比 ξ(支持逐层 ξ 覆盖)
     """根据剪切波速与是否基岩，计算品质因子 Q 与阻尼比 ξ=1/(2Q)。
     
-    支持通过 dcfg['constant_xi'] 指定全场有限土层的统一恒定阻尼比。
-    cs : 该层剪切波速 (m/s)；is_bedrock：是否基岩层；dcfg：阻尼配置（含 qs_factor/q_bedrock/constant_xi）。
+    constant_xi 只控制有限土层；基岩默认由 q_bedrock 控制，也可用 bedrock_xi 显式覆盖。
+    cs : 该层剪切波速 (m/s)；is_bedrock：是否基岩层；dcfg：阻尼配置。
     返回 (Q, xi)。
     """
     if is_bedrock:  # 基岩层
-        Q = dcfg['q_bedrock']  # 基岩 Q≈999（近乎无衰减）
-        xi = 1.0 / (2.0 * Q)
+        bedrock_xi = dcfg.get('bedrock_xi')
+        if bedrock_xi is not None:
+            xi = float(bedrock_xi)  # 显式基岩阻尼比
+            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
+        else:
+            Q = float(dcfg['q_bedrock'])  # 基岩默认按品质因子
+            xi = 1.0 / (2.0 * Q) if Q > 0.0 else -1.0
     else:  # 有限层
         xi_by = dcfg.get('xi_by_layer')  # EQL 注入的逐层 ξ(最优先)
         constant_xi = dcfg.get('constant_xi')
         if xi_by and layer_name in xi_by:
             xi = float(xi_by[layer_name])  # 该层应变相容阻尼比(EQL)
-            Q = 1.0 / (2.0 * xi)
+            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
         elif constant_xi is not None:
             xi = float(constant_xi)  # 使用统一恒定阻尼比
-            Q = 1.0 / (2.0 * xi)
+            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
         else:
             Q = dcfg['qs_factor'] * cs  # Qs = qs_factor*cs（论文 coarse-grain 法）
-            xi = 1.0 / (2.0 * Q)
+            xi = 1.0 / (2.0 * Q) if Q > 0.0 else -1.0
+    if not (0.0 < float(xi) < 0.5):
+        raise ValueError('材料阻尼比必须满足 0<xi<0.5: layer=%s xi=%r Q=%r' %
+                         (layer_name, xi, Q))
+    if not (float(Q) > 0.0):
+        raise ValueError('材料品质因子必须>0: layer=%s Q=%r' % (layer_name, Q))
     return Q, xi
 
 
@@ -2183,6 +2195,46 @@ def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logg
     log_step(logger, '%s 弹簧-阻尼器创建完成: 合计 %d 个元件', model_name, total_created)
 
 
+def _reference_column_surface_y(boundary, x_coord, y_coord, ctx):
+    """返回人工边界节点采用的参考自由场柱顶高程。
+
+    ``global_upper`` 让左、右、底三条人工边界取自同一个以上平台为自由面的平场解；
+    坡面与下平台相对该背景场的反射、转换和散射统一由有限元域产生。
+    ``local_columns`` 保留旧口径：左右侧边分别取当地平台，底边再按
+    ``bottom_ymax_mode`` 选局部/上平台/下平台柱，仅用于历史复现和单因素对照。
+    """
+    geom = ctx.geom
+    ffcfg = ctx.ffcfg or {}
+    mode = str(ffcfg.get('reference_field_mode', 'global_upper')).lower()
+    if mode == 'global_upper':
+        ymax_col = geom.H_upper
+    elif mode == 'global_lower':
+        ymax_col = geom.H_lower
+    elif mode == 'local_columns':
+        bottom_mode = str(ffcfg.get('bottom_ymax_mode', 'local')).lower()
+        if bottom_mode not in ('local', 'upper', 'lower'):
+            raise ValueError("freefield_cfg.bottom_ymax_mode 必须为 'local'/'upper'/'lower'，当前为 %s" %
+                             bottom_mode)
+        if boundary == 'l':
+            ymax_col = ctx.ymax_l
+        elif boundary == 'r':
+            ymax_col = ctx.ymax_r
+        elif bottom_mode == 'upper':
+            ymax_col = geom.H_upper
+        elif bottom_mode == 'lower':
+            ymax_col = geom.H_lower
+        else:
+            ymax_col = _surface_y_at(x_coord, geom.H_upper, geom.H_lower,
+                                     geom.left_flat, geom.w_slope)
+    else:
+        raise ValueError("freefield_cfg.reference_field_mode 必须为 "
+                         "'local_columns'/'global_upper'/'global_lower'，当前为 %s" % mode)
+    if float(y_coord) > float(ymax_col) + 1.0e-6:
+        raise ValueError('参考自由场柱顶低于边界节点: mode=%s boundary=%s node_y=%.6f ymax=%.6f' %
+                         (mode, boundary, y_coord, ymax_col))
+    return float(ymax_col)
+
+
 def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Model-1'):
     """逐边界逐节点用射线法计算自由场并组装等效节点力时程，返回 {'<label>-<边界>-fx/fy': Nx2 数组}。
     等效力 = K·u_ff + C·v̇_ff + A·σ_ff，其中应力 σ_ff 的各边界公式已内嵌外法向符号
@@ -2193,11 +2245,11 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
     时间轴：射线法按到时延迟会延长时程，故各节点力时程取其自身（延长后）时间轴，不截断到原长。
     """  # 说明函数用途与外法向/角点约定
     field_data = {}
-    geom = ctx.geom
     engine = (ctx.ffcfg or {}).get('engine', 'ray')  # 自由场引擎选择（'fd' 或 'ray'）
-    bottom_ymax_mode = (ctx.ffcfg or {}).get('bottom_ymax_mode', 'local')  # 底边界自由场柱高模式
-    if bottom_ymax_mode not in ('local', 'upper', 'lower'):  # 配置错误直接报出，避免静默跑错工况
-        raise ValueError("freefield_cfg.bottom_ymax_mode 必须为 'local'/'upper'/'lower'，当前为 %s" % bottom_ymax_mode)
+    reference_field_mode = str((ctx.ffcfg or {}).get(
+        'reference_field_mode', 'global_upper')).lower()  # 三边界参考自由场口径
+    bottom_ymax_mode = str((ctx.ffcfg or {}).get(
+        'bottom_ymax_mode', 'local')).lower()  # 仅旧局部柱口径使用
     get_vel = None  # 射线法速度延迟缓存（fd 引擎不需要）
     get_dis = None  # 射线法位移延迟缓存（fd 引擎不需要）
     if engine != 'fd':  # 仅射线法路径需要延迟缓存
@@ -2205,24 +2257,14 @@ def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Mo
         get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
     if logger:
         _total_nodes = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
-        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 底边界柱高=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
-                 model_name, engine, bottom_ymax_mode, _total_nodes,  # 引擎/底边界模式与总数
+        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 参考场=%s, 旧底边柱高=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
+                 model_name, engine, reference_field_mode, bottom_ymax_mode, _total_nodes,
                  len(nodes_by_boundary['l']), len(nodes_by_boundary['r']), len(nodes_by_boundary['b']))  # 各边界节点数
     for boundary in BOUNDARY_SEQUENCE:
         _t_b = time.time()  # 该边界计算起始时间
         for bn in nodes_by_boundary[boundary]:
-            # 确定当前节点所在柱子的地表高度 ymax_col（#2：底边按 x 取值）
-            if boundary == 'l':  # 左边界
-                ymax_col = ctx.ymax_l  # 左边界柱地表高度
-            elif boundary == 'r':  # 右边界
-                ymax_col = ctx.ymax_r  # 右边界柱地表高度
-            else:  # 底边界
-                if bottom_ymax_mode == 'upper':  # 测试：底边界统一用上平台柱
-                    ymax_col = geom.H_upper
-                elif bottom_ymax_mode == 'lower':  # 测试：底边界统一用下平台柱
-                    ymax_col = geom.H_lower
-                else:  # 默认：按该底节点正上方地表高度取局部柱
-                    ymax_col = _surface_y_at(bn.x, geom.H_upper, geom.H_lower, geom.left_flat, geom.w_slope)
+            ymax_col = _reference_column_surface_y(
+                boundary, bn.x, bn.y, ctx)  # 从统一或旧局部参考场取柱顶高程
 
             if engine == 'fd':  # v6 默认：频域精确分层自由场
                 ff = _fd_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx)  # fd 引擎自由场时程
@@ -2846,6 +2888,8 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
     return {'enable': True, 'method': damping.get('method'), 'fc': _meta_f(fc),  # 总体配置
             'anchor': damping.get('anchor', 'input'), 'f_site': _meta_f(damping.get('f_site')),  # v8：锚定方式与场地基频
             'harmonics_cover': _meta_f(damping.get('harmonics_cover')),  # v9：perband 拟合上限覆盖的共振谐波次数
+            'constant_xi': _meta_f(damping.get('constant_xi')),  # 有限土层统一阻尼比
+            'bedrock_xi': _meta_f(damping.get('bedrock_xi')),  # 基岩显式阻尼覆盖
             'qs_factor': _meta_f(damping.get('qs_factor')), 'q_bedrock': _meta_f(damping.get('q_bedrock')),  # Q 换算因子
             'f1_factor': _meta_f(damping.get('f1_factor')), 'f2_factor': _meta_f(damping.get('f2_factor')),  # 双频拟合边界
             'layers': per_layer}  # 逐层阻尼明细（基岩在前）
@@ -2939,6 +2983,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
         meta['freefield'] = {  # v6 自由场引擎信息（追溯用）
             'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
             'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
+            'reference_field_mode': (ffcfg or {}).get('reference_field_mode', 'global_upper'),  # 三边界参考场口径
             'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
             'initial_state_mode': (ffcfg or {}).get('initial_state_mode', 'raw'),  # fd 初态参考口径
         }
@@ -4094,6 +4139,16 @@ def _resolve_material_damping(site, geom, damping_cfg, acc_info, surface_geometr
     _log_perband_anchors(logger, site, geom, surface_geometry, damping, fc)
     log_step(logger, '材料阻尼: enable=%s, method=%s, anchor=%s, fc=%s',
              damping.get('enable'), damping.get('method'), damping.get('anchor', 'input'), fc)
+    if damping.get('enable'):
+        if not site.layers and damping.get('constant_xi') is not None and damping.get('bedrock_xi') is None:
+            log_step(logger, '阻尼配置提示: 当前为均质基岩且无有限土层，constant_xi=%s 不生效；基岩按 q_bedrock=%s 计算',
+                     damping.get('constant_xi'), damping.get('q_bedrock'))
+        for mat, is_bedrock in [(site.bedrock, True)] + [(layer, False) for layer in site.layers]:
+            Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping, str(mat.name))
+            f_layer = None if is_bedrock else _material_resonance_freq(mat, site, geom)
+            alpha_ray, beta_ray = _rayleigh_coeffs(xi, damping, fc, f_layer)
+            log_step(logger, '实际材料阻尼: 层=%s, 类型=%s, Q=%.6g, xi=%.6g, alpha=%.6g, beta=%.6g',
+                     mat.name, ('基岩' if is_bedrock else '有限土层'), Q, xi, alpha_ray, beta_ray)
     return damping, fc
 
 
