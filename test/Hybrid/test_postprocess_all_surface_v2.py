@@ -23,6 +23,38 @@ SPEC.loader.exec_module(MODULE)
 
 
 class PostprocessAllSurfaceTests(unittest.TestCase):
+    def test_log_step_writes_utf8_text_without_handler_error(self):
+        """Abaqus Python 2.7下中文消息和字节参数必须先统一为Unicode。"""
+        old_cwd = os.getcwd()
+        logger = None
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                os.chdir(folder)
+                logger = MODULE.log_step("unicode_postprocess.log")
+                MODULE.log_step(
+                    logger,
+                    b"\xe7\x8a\xb6\xe6\x80\x81\xef\xbc\x9a%s",
+                    b"\xe5\xae\x8c\xe6\x88\x90",
+                )
+                for handler in logger.handlers:
+                    handler.flush()
+                with open("unicode_postprocess.log", "r", encoding="utf-8") as stream:
+                    content = stream.read()
+                self.assertIn("状态：完成", content)
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = []
+                os.chdir(old_cwd)
+        finally:
+            os.chdir(old_cwd)
+            if logger is not None:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = []
+            for name in ("_logger", "_start_time", "_log_filename"):
+                if hasattr(MODULE.log_step, name):
+                    delattr(MODULE.log_step, name)
+
     def test_complex_frf_preserves_amplitude_phase_and_mask(self):
         """复频响必须保留相位，旧 compute_H 只能是同掩码下的幅值视图。"""
         dt = 1.0 / 128.0

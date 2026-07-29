@@ -31,23 +31,27 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
         self.assertEqual(len(set(item['case_id'] for item in cases)), 51)
         self.assertEqual(
             RUNNER.PILOT_CASE_IDS,
-            ('H1-000035', 'H2-000006', 'H3-000006'),
+            ('H1-000035', 'H2-000006'),
         )
         self.assertEqual(
             len([item for item in cases if item['case_id'] in RUNNER.PILOT_CASE_IDS]),
-            3,
+            2,
         )
-        self.assertEqual(RUNNER.PILOT_MAX_WORKERS, 3)
+        self.assertEqual(RUNNER.PILOT_MAX_WORKERS, 2)
         self.assertEqual(RUNNER.PRODUCTION_MAX_WORKERS, 4)
-        self.assertEqual(RUNNER.PRODUCTION_SIDE_CLEARANCE, 4.0)
-        self.assertEqual(RUNNER.DOMAIN_REFERENCE_RUN, 'run-002')
+        self.assertEqual(RUNNER.PRODUCTION_SIDE_CLEARANCE, 2.0)
+        self.assertEqual(len(RUNNER.DOMAIN_DECISION_GATE_PATHS), 2)
+        self.assertEqual(
+            set(RUNNER.PILOT_REFERENCE_NPZ),
+            set(RUNNER.PILOT_CASE_IDS),
+        )
 
     def test_pilot_and_remaining_worker_config(self):
-        """验证首批3槽并行、剩余批次4槽并行。"""
+        """验证首批2槽并行、剩余批次4槽并行。"""
         original_workers = RUNNER.pipeline.MAX_WORKERS
         try:
             RUNNER.configure_pipeline(RUNNER.PILOT_MAX_WORKERS)
-            self.assertEqual(RUNNER.pipeline.MAX_WORKERS, 3)
+            self.assertEqual(RUNNER.pipeline.MAX_WORKERS, 2)
             RUNNER.configure_pipeline(RUNNER.PRODUCTION_MAX_WORKERS)
             self.assertEqual(RUNNER.pipeline.MAX_WORKERS, 4)
         finally:
@@ -84,13 +88,10 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
             )
             self.assertFalse(config['eql_cfg']['enable'])
             self.assertEqual(config['tssi_cfg']['scene'], 'freefield')
-            if case['case_id'] in RUNNER.PILOT_CASE_IDS:
-                qa_cfg = config['run_cfg']['qa_cfg']
-                self.assertIn('domain', qa_cfg['required'])
-                self.assertEqual(qa_cfg['mode'], 'window_convergence')
-                self.assertEqual(qa_cfg['tol'], 0.02)
-                self.assertEqual(qa_cfg['min_points'], 790)
-                self.assertIn('run-002', qa_cfg['reference_npz'])
+            qa_cfg = config['run_cfg']['qa_cfg']
+            self.assertEqual(qa_cfg['required'], ['frf', 'energy'])
+            self.assertNotIn('domain', qa_cfg)
+            self.assertNotIn('reference_npz', qa_cfg)
 
     def test_h2_prototypes_are_in_h1(self):
         """验证H2尺度原型均来自H1几何库。"""
@@ -146,8 +147,34 @@ class TestChapter4HomogeneousRunner(unittest.TestCase):
                 preparation = json.load(handle)
             self.assertFalse(preparation['abaqus_started'])
             self.assertEqual(preparation['case_count'], 51)
-            self.assertEqual(preparation['pilot_model_workers'], 3)
+            self.assertEqual(preparation['pilot_model_workers'], 2)
             self.assertEqual(preparation['remaining_model_workers'], 4)
+            self.assertEqual(
+                preparation['production_side_clearance_h'], 2.0,
+            )
+            self.assertEqual(
+                set(preparation['pilot_reference_npz']),
+                set(RUNNER.PILOT_CASE_IDS),
+            )
+            self.assertEqual(
+                preparation['mitigation_diagnostic']['path'],
+                os.path.abspath(RUNNER.MITIGATION_DIAGNOSTIC_PATH),
+            )
+            protocol = preparation['output_tier_protocol']
+            self.assertFalse(
+                protocol['full_surface_raw_complex_frf_release'],
+            )
+            self.assertFalse(protocol['vertical_pga_taf_release'])
+            self.assertEqual(
+                protocol['optional_bandwidth_averaged_frf']['sigma_hz'],
+                0.10,
+            )
+            self.assertEqual(
+                protocol['ml_loss_weight']['definition'], 'abs(H_2H)',
+            )
+            self.assertTrue(
+                protocol['ml_loss_weight']['labels_remain_raw'],
+            )
             self.assertEqual(len(preparation['source_file_sha256']), 6)
             self.assertEqual(len(preparation['case_config_sha256']), 51)
             RUNNER.validate_prepared_run(root_dir, cases, sources)

@@ -104,6 +104,34 @@ def _script_dir():
     return os.path.dirname(_script_path())
 
 
+try:
+    _TEXT_TYPE = unicode
+except NameError:
+    _TEXT_TYPE = str
+
+
+def _to_log_text(value):
+    """把日志文本统一为Unicode，数值参数保持原类型。"""
+    if isinstance(value, _TEXT_TYPE):
+        return value
+    if isinstance(value, bytes):
+        return value.decode('utf-8', 'replace')
+    return value
+
+
+def _format_log_text(message, args):
+    """在进入logging前完成Unicode格式化，兼容Abaqus Python 2.7。"""
+    message = _to_log_text(message)
+    if not args:
+        return message
+    normalized = tuple(_to_log_text(item) for item in args)
+    try:
+        return message % normalized
+    except Exception:
+        suffix = u' '.join(_TEXT_TYPE(item) for item in normalized)
+        return u'{} {}'.format(message, suffix)
+
+
 def log_step(logger=None, message=None, *args):
     """日志函数：首次调用时初始化日志器，后续调用输出带总用时的日志。"""
     if not hasattr(log_step, '_logger'):
@@ -137,7 +165,8 @@ def log_step(logger=None, message=None, *args):
     if message is not None:
         now = time.time()
         delta_total = now - log_step._start_time
-        log_step._logger.info('[%.3fs] ' + message, delta_total, *args)
+        rendered = _format_log_text(message, args)
+        log_step._logger.info(u'[%.3fs] %s' % (delta_total, rendered))
 
     return log_step._logger
 
