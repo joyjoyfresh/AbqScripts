@@ -1,0 +1,101 @@
+{
+  "acceptance": {
+    "maximum_abs_velocity_trend_intercept_m_s": 1e-08,
+    "maximum_abs_velocity_trend_slope_m_s2": 1e-08,
+    "maximum_energy_fraction_above_15hz": 0.0001,
+    "stopband_check_hz": 15.0
+  },
+  "generation_parameters": {
+    "filter": "sixth_order_zero_phase_butterworth_before_polyphase_resampling",
+    "lowpass_hz": 12.0,
+    "taper_seconds": 0.5,
+    "target_dt_s": 0.001,
+    "target_pga_g": 0.1,
+    "target_pga_m_s2": 0.9810000000000001,
+    "velocity_trend_correction": "two_zero_integral_endpoint_zero_basis_functions"
+  },
+  "generator": "generate_sp_eq_inputs.py",
+  "passed": true,
+  "purpose": "小论文 C001—C010 真实波直接闭环冻结输入(EQ01—EQ03)，0.1g 统一线性识别尺度",
+  "schema_version": 1,
+  "signals": [
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 1.2282353811711774e-07,
+      "dt_s": 0.001,
+      "duration_s": 31.18,
+      "endpoint_abs_max_m_s2": 0.0,
+      "energy_fraction_above_15hz": 1.646024644871233e-07,
+      "filename": "sp_eq01_el_centro_0p1g_dt1ms.txt",
+      "label": "eq01_el_centro",
+      "mean_m_s2": -0.00012282353845314068,
+      "output_acceleration_unit": "m/s^2",
+      "pga_g": 0.1,
+      "pga_m_s2": 0.9810000000000001,
+      "sample_count": 31181,
+      "sha256": "754ea9f3858b61b360db966efe0780c8a4d7cde6cf0b649e8573ce88502f3f6e",
+      "source_acceleration_unit": "g",
+      "source_dt_s": 0.019999999999999574,
+      "source_path": "Wave/Seismic/Original/El_Centro.txt",
+      "source_sha256": "42f2218532fc88c4ccbd918a701a2a8d1127de38e716313b24f3dd15cf275674",
+      "velocity_trend_correction_coefficients": [
+        -0.0795019594248866,
+        0.01505886747035296
+      ],
+      "velocity_trend_intercept_m_s": 1.720134043380793e-16,
+      "velocity_trend_slope_m_s2": -1.0476577227776879e-17,
+      "wave_id": "EQ01"
+    },
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 6.326005309261374e-10,
+      "dt_s": 0.001,
+      "duration_s": 40.9,
+      "endpoint_abs_max_m_s2": 0.0,
+      "energy_fraction_above_15hz": 8.620601204580265e-07,
+      "filename": "sp_eq02_kobe_0p1g_dt1ms.txt",
+      "label": "eq02_kobe",
+      "mean_m_s2": -6.326005041425311e-07,
+      "output_acceleration_unit": "m/s^2",
+      "pga_g": 0.09999999999999999,
+      "pga_m_s2": 0.981,
+      "sample_count": 40901,
+      "sha256": "507dde6dd0e162f074d353a4cd3ace2507874654163f0b71c7f1e5a7876f9db5",
+      "source_acceleration_unit": "g",
+      "source_dt_s": 0.009999999999999787,
+      "source_path": "Wave/Seismic/Original/Kobe.txt",
+      "source_sha256": "119ad56cb6764cd90a38d849151aa4fbe5eaaa8a00995ccb0a9ddd977d03eec1",
+      "velocity_trend_correction_coefficients": [
+        5.0277775531094666e-05,
+        -1.4411903336521426e-06
+      ],
+      "velocity_trend_intercept_m_s": -3.9912385291575723e-17,
+      "velocity_trend_slope_m_s2": 2.9923862538810567e-18,
+      "wave_id": "EQ02"
+    },
+    {
+      "corrected_velocity_endpoint_abs_max_m_s": 7.495859396459117e-09,
+      "dt_s": 0.001,
+      "duration_s": 52.78,
+      "endpoint_abs_max_m_s2": 0.0,
+      "energy_fraction_above_15hz": 2.991130263143545e-05,
+      "filename": "sp_eq03_chichi_0p1g_dt1ms.txt",
+      "label": "eq03_chichi",
+      "mean_m_s2": -7.4958592428175035e-06,
+      "output_acceleration_unit": "m/s^2",
+      "pga_g": 0.1,
+      "pga_m_s2": 0.9810000000000001,
+      "sample_count": 52781,
+      "sha256": "76caf35b778aeb743eb24918fd54fcdc24c5c4994cd56b2d03e84fbc0d686df3",
+      "source_acceleration_unit": "g",
+      "source_dt_s": 0.009999999999999787,
+      "source_path": "Wave/Seismic/Original/ChiChi.txt",
+      "source_sha256": "4125fb1b0ec337e72eb7789708707961699c1088b6139271c69448b4d35908b7",
+      "velocity_trend_correction_coefficients": [
+        0.004786928797785139,
+        -0.0008565875892060899
+      ],
+      "velocity_trend_intercept_m_s": -6.973909678123062e-17,
+      "velocity_trend_slope_m_s2": 8.964855067490514e-18,
+      "wave_id": "EQ03"
+    }
+  ]
+}
