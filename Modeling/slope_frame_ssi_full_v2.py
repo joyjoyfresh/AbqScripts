@@ -68,11 +68,9 @@ job_cfg = {
 # 材料阻尼配置
 damping_cfg = {
     'enable': True,                     #! 是否施加材料阻尼（False 则退化为无阻尼行为）
-    'method': 'rayleigh',               # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定 Q) / 'stiffness'=仅刚度比例(β)
-    'constant_xi': 0.01,                #! 统一恒定阻尼比(如 0.05)：None=关闭(按波速计算)；指定值时将忽略 qs_factor，对所有有限土层施加统一阻尼
-    'qs_factor': 0.05,                  # Qs = qs_factor*cs（coarse-grain 法，cs 单位 m/s）
-    'q_bedrock': 999.0,                 # 基岩品质因子(≈无衰减)
-    'bedrock_xi': None,                 #! 基岩阻尼比显式覆盖；None=按 q_bedrock，避免把 finite-layer 的 constant_xi 误用于基岩
+    'method': 'rayleigh',               # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定阻尼比) / 'stiffness'=仅刚度比例(β)
+    'constant_xi': 0.01,                #! 统一恒定阻尼比(如 0.05)：对所有有限土层施加统一阻尼
+    'bedrock_xi': 5.0e-4,               #! 基岩阻尼比（近无衰减）；显式指定，不受 constant_xi 影响
     'fc': None,                         # 输入波主频(Hz)：None=从加速度记录自动估计；可显式/注入覆盖
     'f1_factor': 0.5,                   # 双频拟合下限 = f1_factor*fc
     'f2_factor': 2.5,                   # 双频拟合上限 = f2_factor*fc（≈Ricker 高频边界）
@@ -410,39 +408,29 @@ def _estimate_dominant_freq(acc, dt):
     return float(freqs[idx_max])
 
 
-def _damping_ratio_from_q(cs, is_bedrock, dcfg, layer_name=None):  # 由 Q 值换算阻尼比 ξ(支持逐层 ξ 覆盖)
-    """根据剪切波速与是否基岩，计算品质因子 Q 与阻尼比 ξ=1/(2Q)。
+def _damping_ratio_from_cfg(cs, is_bedrock, dcfg, layer_name=None):  # 由阻尼配置换算阻尼比 ξ(支持逐层 ξ 覆盖)
+    """根据剪切波速与是否基岩，由阻尼配置换算 Rayleigh 阻尼比 ξ。
     
-    constant_xi 只控制有限土层；基岩默认由 q_bedrock 控制，也可用 bedrock_xi 显式覆盖。
+    基岩取 bedrock_xi；有限层优先级：xi_by_layer(EQL) > constant_xi。
     cs : 该层剪切波速 (m/s)；is_bedrock：是否基岩层；dcfg：阻尼配置。
-    返回 (Q, xi)。
+    返回 xi。
     """
     if is_bedrock:  # 基岩层
-        bedrock_xi = dcfg.get('bedrock_xi')
-        if bedrock_xi is not None:
-            xi = float(bedrock_xi)  # 显式基岩阻尼比
-            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
-        else:
-            Q = float(dcfg['q_bedrock'])  # 基岩默认按品质因子
-            xi = 1.0 / (2.0 * Q) if Q > 0.0 else -1.0
+        xi = float(dcfg['bedrock_xi'])
     else:  # 有限层
         xi_by = dcfg.get('xi_by_layer')  # EQL 注入的逐层 ξ(最优先)
         constant_xi = dcfg.get('constant_xi')
         if xi_by and layer_name in xi_by:
             xi = float(xi_by[layer_name])  # 该层应变相容阻尼比(EQL)
-            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
         elif constant_xi is not None:
             xi = float(constant_xi)  # 使用统一恒定阻尼比
-            Q = 1.0 / (2.0 * xi) if xi > 0.0 else -1.0
         else:
-            Q = dcfg['qs_factor'] * cs  # Qs = qs_factor*cs（论文 coarse-grain 法）
-            xi = 1.0 / (2.0 * Q) if Q > 0.0 else -1.0
+            raise ValueError('有限土层未指定阻尼比: layer=%s (需设置 constant_xi 或 EQL 注入 xi_by_layer)' %
+                             layer_name)
     if not (0.0 < float(xi) < 0.5):
-        raise ValueError('材料阻尼比必须满足 0<xi<0.5: layer=%s xi=%r Q=%r' %
-                         (layer_name, xi, Q))
-    if not (float(Q) > 0.0):
-        raise ValueError('材料品质因子必须>0: layer=%s Q=%r' % (layer_name, Q))
-    return Q, xi
+        raise ValueError('材料阻尼比必须满足 0<xi<0.5: layer=%s xi=%r' %
+                         (layer_name, xi))
+    return xi
 
 
 def _rayleigh_coeffs(xi, dcfg, fc, f_layer=None):  # 由阻尼比计算瑞利阻尼系数 α, β（支持逐层重锚定）
@@ -451,7 +439,7 @@ def _rayleigh_coeffs(xi, dcfg, fc, f_layer=None):  # 由阻尼比计算瑞利阻
     xi      : 阻尼比；dcfg：含 method/f1_factor/f2_factor/anchor/harmonics_cover；fc：输入波主频 (Hz)。
     f_layer : 该层自身一维共振基频 (Hz)，仅 anchor=='perband' 时使用；None=退化为输入主频锚定（如基岩）。
     method=='stiffness'：α=0、β=ξ/(π·fc)（fc 处 ξ 精确）；
-    其余（rayleigh 双频拟合）按 anchor 选取拟合频带 [f1,f2]，两端 ξ 相等≈恒定 Q：
+    其余（rayleigh 双频拟合）按 anchor 选取拟合频带 [f1,f2]，两端 ξ 相等≈恒定阻尼比：
       'input'  ：f1=f1_factor·fc，            f2=f2_factor·fc；
       'dual'   ：f1=min(f1_factor·fc, f_site)，f2=f2_factor·fc（覆盖场地基频）；
       'perband'：f1=min(f1_factor·fc, f_layer)，f2=max(f2_factor·fc, harmonics_cover·f_layer)
@@ -474,7 +462,7 @@ def _rayleigh_coeffs(xi, dcfg, fc, f_layer=None):  # 由阻尼比计算瑞利阻
             f1 = min(f1, float(dcfg['f_site']))  # 下限取较小者，使拟合带覆盖场地基频
         w1 = 2.0 * math.pi * f1
         w2 = 2.0 * math.pi * f2
-        alpha = 2.0 * xi * w1 * w2 / (w1 + w2)  # 两端 ξ 相等≈恒定 Q
+        alpha = 2.0 * xi * w1 * w2 / (w1 + w2)  # 两端 ξ 相等≈恒定阻尼比
         beta = 2.0 * xi / (w1 + w2)
     return alpha, beta
 
@@ -1187,13 +1175,13 @@ def _next_pow2(n):  # 求不小于 n 的最小 2 的幂
 def _band_damping_terms(strat, damping):  # 计算各材料带的瑞利阻尼系数表
     """返回 {带名: (alpha, beta)}；damping 未启用时全部为 (0,0)。
 
-    与 _create_band_materials_sections 完全同口径（同一 Q→ξ→(α,β) 公式），
+    与 _create_band_materials_sections 完全同口径（同一 ξ→(α,β) 公式），
     保证 fd 自由场的衰减与 Abaqus 模型内介质一致。
     """
     terms = {}
     for idx, band in enumerate(strat):  # 从下到上遍历各材料带（idx==0 即基岩）
         if damping and damping.get('enable'):  # 启用材料阻尼时
-            _Q, xi = _damping_ratio_from_q(band['mat'].cs, idx == 0, damping, band['name'])  # 该带品质因子与阻尼比
+            xi = _damping_ratio_from_cfg(band['mat'].cs, idx == 0, damping, band['name'])  # 该带阻尼比
             f_layer = None if idx == 0 else _band_resonance_freq(band)  # 基岩无共振→None；有限层取该带共振基频
             a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'], f_layer)  # 该带瑞利系数 (α,β)（perband 逐层重锚定）
         else:  # 未启用阻尼
@@ -1518,7 +1506,7 @@ def _interface_partitions(strat):
 def _create_band_materials_sections(model, strat, damping=None):
     """为分层带（从下到上）逐带创建材料与均质截面，返回 [(band, sec_name), ...]。
 
-    damping: 解析后的阻尼配置 dict（含 enable/method/fc/qs_factor/q_bedrock 等）；
+    damping: 解析后的阻尼配置 dict（含 enable/method/fc/bedrock_xi/constant_xi 等）；
              None 或 enable=False 时退化为无阻尼行为。strat[0] 恒为基岩（_build_stratigraphy 保证）。
     """
     band_sections = []
@@ -1529,9 +1517,9 @@ def _create_band_materials_sections(model, strat, damping=None):
         m = model.Material(name=mat_name)
         m.Elastic(table=((EE, mat.vv),))
         m.Density(table=((mat.density,),))
-        if damping and damping.get('enable'):  # 启用材料阻尼时按 Q 衰减施加瑞利阻尼
-            is_bedrock = (idx == 0)  # 基岩带（最底带）→ 用 q_bedrock≈999
-            Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping, band['name'])  # 由波速换算品质因子 Q 与阻尼比 ξ
+        if damping and damping.get('enable'):  # 启用材料阻尼时按阻尼比施加瑞利阻尼
+            is_bedrock = (idx == 0)  # 基岩带（最底带）→ 用 bedrock_xi
+            xi = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, band['name'])  # 该带阻尼比 ξ
             f_layer = None if is_bedrock else _band_resonance_freq(band)  # 基岩无共振→None；有限层取该带共振基频
             a_ray, b_ray = _rayleigh_coeffs(xi, damping, damping['fc'], f_layer)  # 由 ξ 换算瑞利系数 (α, β)（perband 逐层重锚定）
             m.Damping(alpha=a_ray, beta=b_ray)  # 施加 Abaqus 瑞利阻尼（α 质量比例 + β 刚度比例）
@@ -1678,7 +1666,7 @@ def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, l
         EE = _compute_elastic_modulus_from_wave_speed(mat.cs, mat.vv, mat.density)  # 该带弹模
         if damping and damping.get('enable'):  # 复刻该带原瑞利阻尼(_create_band_materials_sections 同口径)
             is_bedrock = (bi == 0)
-            _Q, xi0 = _damping_ratio_from_q(mat.cs, is_bedrock, damping, band['name'])
+            xi0 = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, band['name'])
             f_layer = None if is_bedrock else _band_resonance_freq(band)
             a0, b0 = _rayleigh_coeffs(xi0, damping, damping['fc'], f_layer)
         else:  # 原本无阻尼→海绵附加为唯一阻尼
@@ -2866,7 +2854,7 @@ def _meta_material(name, cs, vv, density, thickness=None):
 
 
 def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算结果打包为元数据块（v9：含逐层共振频率）
-    """返回阻尼元数据 dict（含逐层 cs/Q/xi/f_layer/alpha/beta），供 case_meta.json 记录与下游核对。
+    """返回阻尼元数据 dict（含逐层 cs/xi/f_layer/alpha/beta），供 case_meta.json 记录与下游核对。
 
     site    : Site 对象（基岩 + 从上到下有限层）；damping：解析后的阻尼配置（含 fc）；
     geom    : Geometry 对象（v9：perband 模式据此推算各有限层共振基频 f_layer，None 则不记录 f_layer）。
@@ -2878,19 +2866,18 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
     per_layer = []
     mats = [(site.bedrock, True)] + [(L, False) for L in site.layers]  # 基岩在前 + 各有限层（从上到下）
     for mat, is_bedrock in mats:
-        Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping, str(mat.name))  # 该层品质因子与阻尼比
+        xi = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, str(mat.name))  # 该层阻尼比
         f_layer = None if (is_bedrock or geom is None) else _material_resonance_freq(mat, site, geom)  # v9：有限层共振基频（与建材同口径）
         a_ray, b_ray = _rayleigh_coeffs(xi, damping, fc, f_layer)  # 该层瑞利系数（perband 时随 f_layer 重锚定）
         per_layer.append({'name': str(mat.name), 'cs': _meta_f(mat.cs),  # 层名与波速
-                          'Q': _meta_f(Q), 'xi': _meta_f(xi),  # 品质因子与阻尼比
+                          'xi': _meta_f(xi),  # 阻尼比
                           'f_layer': _meta_f(f_layer),  # v9：该层一维共振基频（perband QA 锚点）
                           'alpha': _meta_f(a_ray), 'beta': _meta_f(b_ray)})  # 瑞利系数
     return {'enable': True, 'method': damping.get('method'), 'fc': _meta_f(fc),  # 总体配置
             'anchor': damping.get('anchor', 'input'), 'f_site': _meta_f(damping.get('f_site')),  # v8：锚定方式与场地基频
             'harmonics_cover': _meta_f(damping.get('harmonics_cover')),  # v9：perband 拟合上限覆盖的共振谐波次数
             'constant_xi': _meta_f(damping.get('constant_xi')),  # 有限土层统一阻尼比
-            'bedrock_xi': _meta_f(damping.get('bedrock_xi')),  # 基岩显式阻尼覆盖
-            'qs_factor': _meta_f(damping.get('qs_factor')), 'q_bedrock': _meta_f(damping.get('q_bedrock')),  # Q 换算因子
+            'bedrock_xi': _meta_f(damping.get('bedrock_xi')),  # 基岩阻尼比
             'f1_factor': _meta_f(damping.get('f1_factor')), 'f2_factor': _meta_f(damping.get('f2_factor')),  # 双频拟合边界
             'layers': per_layer}  # 逐层阻尼明细（基岩在前）
 
@@ -2957,7 +2944,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'bedrock': bedrock,  # 基岩材料字典
             'layers': layers,
             'derived': derived,  # 派生量
-            'damping': _damping_meta(site, damping, geom),  # 材料阻尼块（逐层 Q/xi/f_layer/alpha/beta，可复现；v9 传 geom 算共振频率）
+            'damping': _damping_meta(site, damping, geom),  # 材料阻尼块（逐层 xi/f_layer/alpha/beta，可复现；v9 传 geom 算共振频率）
             'eql': (eql_info if eql_info else {'enable': False}),  # v2 土体非线性 EQL 结果(各非线性层 γ_eff/G_Gmax/Vs0→Vs/ξ)
             'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
             'extra': {},  # 附加自定义键值
@@ -4140,15 +4127,15 @@ def _resolve_material_damping(site, geom, damping_cfg, acc_info, surface_geometr
     log_step(logger, '材料阻尼: enable=%s, method=%s, anchor=%s, fc=%s',
              damping.get('enable'), damping.get('method'), damping.get('anchor', 'input'), fc)
     if damping.get('enable'):
-        if not site.layers and damping.get('constant_xi') is not None and damping.get('bedrock_xi') is None:
-            log_step(logger, '阻尼配置提示: 当前为均质基岩且无有限土层，constant_xi=%s 不生效；基岩按 q_bedrock=%s 计算',
-                     damping.get('constant_xi'), damping.get('q_bedrock'))
+        if not site.layers and damping.get('constant_xi') is not None:
+            log_step(logger, '阻尼配置提示: 当前为均质基岩且无有限土层，constant_xi=%s 不生效；基岩按 bedrock_xi=%s 计算',
+                     damping.get('constant_xi'), damping.get('bedrock_xi'))
         for mat, is_bedrock in [(site.bedrock, True)] + [(layer, False) for layer in site.layers]:
-            Q, xi = _damping_ratio_from_q(mat.cs, is_bedrock, damping, str(mat.name))
+            xi = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, str(mat.name))
             f_layer = None if is_bedrock else _material_resonance_freq(mat, site, geom)
             alpha_ray, beta_ray = _rayleigh_coeffs(xi, damping, fc, f_layer)
-            log_step(logger, '实际材料阻尼: 层=%s, 类型=%s, Q=%.6g, xi=%.6g, alpha=%.6g, beta=%.6g',
-                     mat.name, ('基岩' if is_bedrock else '有限土层'), Q, xi, alpha_ray, beta_ray)
+            log_step(logger, '实际材料阻尼: 层=%s, 类型=%s, xi=%.6g, alpha=%.6g, beta=%.6g',
+                     mat.name, ('基岩' if is_bedrock else '有限土层'), xi, alpha_ray, beta_ray)
     return damping, fc
 
 
