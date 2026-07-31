@@ -14,6 +14,8 @@ venv/
 *.swp
 *.swo
 
+.workbuddy/
+
 # 测试目录，整个不进版本库
 test/
 
