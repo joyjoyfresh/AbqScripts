@@ -13,9 +13,9 @@ import numpy as np
 
 
 REPO = Path(__file__).resolve().parents[2]
-GENERAL = REPO / "Postprocess" / "General"
+EVALUATION = REPO / "Run" / "evaluation"
 ML_DIR = REPO / "ML"
-for directory in (GENERAL, ML_DIR):
+for directory in (EVALUATION, ML_DIR):
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
 
@@ -93,6 +93,61 @@ class ComplexFrfPipelineTests(unittest.TestCase):
         self.assertTrue(np.isfinite(evaluation.circular_phase_rmse_deg(
             reference, candidate, mask, weight
         )))
+
+    def test_v002_coordinate_phase_alignment_removes_horizontal_delay(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            reference_dir = root / "case-001-P061"
+            candidate_dir = root / "case-003-V002"
+            reference_dir.mkdir()
+            candidate_dir.mkdir()
+            frequency = np.asarray([1.0, 2.0, 3.0])
+            s_values = np.asarray([-1.0, 0.0, 1.0])
+            reference_x = np.asarray([100.0, 200.0, 300.0])
+            candidate_x = reference_x + 300.0
+            delay = 300.0 * np.sin(np.deg2rad(15.0)) / 2000.0
+            reference_g = np.ones((3, 3), dtype=complex)
+            candidate_g = reference_g * np.exp(
+                -1j * 2.0 * np.pi * frequency[:, None] * delay
+            )
+            for case_dir, x_values, surface_y in (
+                (reference_dir, reference_x, 400.0),
+                (candidate_dir, candidate_x, 700.0),
+            ):
+                np.savez_compressed(
+                    case_dir / "surface_results.npz",
+                    frf_synthetic_sgrid_s=s_values,
+                    frf_synthetic_sgrid_x=x_values,
+                )
+                (case_dir / "case_config.json").write_text(
+                    json.dumps({"freefield_cfg": {"phase_origin_x": 0.0}}),
+                    encoding="utf-8",
+                )
+                (case_dir / "case_meta.json").write_text(
+                    json.dumps({
+                        "incident_angle": 15.0,
+                        "bedrock": {"cs": 2000.0},
+                        "geometry": {"total_L": 1000.0},
+                        "ff_theory": {"left": {"surface_y": surface_y}},
+                    }),
+                    encoding="utf-8",
+                )
+            reference = {
+                "case_dir": str(reference_dir), "record": "synthetic",
+                "G": reference_g, "mask": np.ones((3, 3), dtype=bool),
+            }
+            candidate = {
+                "case_dir": str(candidate_dir), "record": "synthetic",
+                "G": candidate_g, "mask": np.ones((3, 3), dtype=bool),
+                "phase": np.zeros((3, 3)), "group_delay": np.zeros((3, 3)),
+                "spatial_phase_gradient": np.zeros((3, 3)),
+            }
+            aligned, info = evaluation.coordinate_phase_alignment(
+                reference, candidate, frequency, s_values
+            )
+            self.assertTrue(info["applied"])
+            self.assertAlmostEqual(info["delta_t_x_s_median"], delay, places=12)
+            self.assertTrue(np.allclose(aligned["G"], reference_g, atol=1.0e-12))
 
     def test_analysis_training_and_reconstruction(self):
         with tempfile.TemporaryDirectory() as folder:

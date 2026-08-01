@@ -25,4 +25,10 @@ test/ML/*
 !test/ML/test_complex_frf_pipeline.py
 
 # 正式工作目录下的所有文件不进版本库
-Run/
+Run/*
+!Run/evaluation/
+Run/evaluation/*
+!Run/evaluation/*.py
+!Run/Auto_ch*/
+Run/Auto_ch*/*
+!Run/Auto_ch*/*.py

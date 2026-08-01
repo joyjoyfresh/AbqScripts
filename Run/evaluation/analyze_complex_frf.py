@@ -6,8 +6,8 @@
 空间相位梯度、层状/均质坡复数修正量和逐工况统计表。
 
 运行示例：
-    python Postprocess/General/analyze_complex_frf.py
-    python Postprocess/General/analyze_complex_frf.py --figures representative
+    python Run/evaluation/analyze_complex_frf.py
+    python Run/evaluation/analyze_complex_frf.py --figures representative
 
 默认只接受相对于一维自由场的 ``H_surface_over_1D_h``。该字段无有效值时
 工况会被明确跳过，不会用入射波传函或端点传函冒充研究定义中的 ``G_h``。

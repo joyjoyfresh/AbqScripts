@@ -190,12 +190,10 @@ abaqus cae noGUI=Modeling/Multi/VAB_oblique_TAF_multilayer_v8.py
 
 ### 第五步：后处理与分析
 
-#### 5.1 通用提取（`Postprocess/General/`）
+#### 5.1 复频响评价与数据集分析（`Run/evaluation/`）
 
-- `Postprocess_PGA_v3.py` —— 从 ODB 提取地表 PGA（坡顶/坡面/坡脚），按 `x/h` 无量纲坐标输出 `PGA_*.csv`
-- `Compute_TAF_v2.py` —— 由坡面 PGA ÷ 平地 PGA 计算 TAF
-- `Collect_results_v2.py` —— 汇总多工况结果
-- `Plot_PGA_v1.py` / `Plot_TAF_v1.py` —— 绘图
+- `analyze_complex_frf.py` —— 统一复频响网格，计算幅值、相位、群时延和空间相位梯度，并生成分析数据集
+- `evaluate_complex_frf_quality.py` —— 检查复频响数据质量，评价 V002 坐标相位校正后的计算域残余差异
 
 #### 5.2 单工况分析（`Postprocess/Single/`）
 
