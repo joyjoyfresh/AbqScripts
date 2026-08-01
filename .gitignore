@@ -16,8 +16,13 @@ venv/
 
 .workbuddy/
 
-# 测试目录，整个不进版本库
+# 测试目录默认忽略，仅显式纳入纯Python回归入口
 test/
+!test/
+test/*
+!test/ML/
+test/ML/*
+!test/ML/test_complex_frf_pipeline.py
 
 # 正式工作目录下的所有文件不进版本库
 Run/

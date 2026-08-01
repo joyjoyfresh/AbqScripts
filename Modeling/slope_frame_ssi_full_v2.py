@@ -3001,6 +3001,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                              'quantity': 'AF_1D relative to bedrock outcrop motion',  # 一维场地放大基准
                              'legacy_keys': 'taf_h/taf_v retained for compatibility',  # 旧字段名不改
                              'note': 'fd 一维柱 AF_1D；FE 远场 AF 应与之一致(±5%)'}
+                reference_series = {}  # 保存左右一维参考完整时程，供复频响和真实波闭环使用
                 for tag, ys in (('left', geom.H_upper), ('right', geom.H_lower)):  # 左(上平台)/右(下平台)两柱
                     col_t = _build_column(strat_t, ys, p0, 0.0)
                     sol_t = _fd_solve_column(col_t, p0, om0, damp_terms, incl)  # 频域求解（单位入射）
@@ -3011,10 +3012,24 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                     spec_t = np.zeros(len(freqs0), dtype=complex)  # y 向加速度全频谱容器
                     spec_t[idx0] = fld['uy'] * A0[idx0]  # y 向加速度谱
                     ay0 = np.fft.irfft(spec_t, n=Nfft)  # y 向加速度时程
+                    reference_series[tag] = ax0  # 水平完整时程用于复数一维参考
                     ff_theory[tag] = {'taf_h': _meta_f(float(np.max(np.abs(ax0))) / denom0),  # 兼容键：该柱水平 AF_1D
                                       'taf_v': _meta_f(float(np.max(np.abs(ay0))) / denom0),  # 兼容键：该柱竖向 AF_1D
                                       'surface_y': _meta_f(ys),  # 该柱地表高程
                                       'layers': [seg['name'] for seg in col_t]}  # 该柱层组成（自检用）
+                record_name = os.path.splitext(os.path.basename(acc_path))[0]  # 与ODB记录名保持一致
+                reference_path = os.path.join(out_dir, 'freefield_reference_%s.npz' % record_name)
+                rock_acc = np.zeros(Nfft, dtype=float)  # 基岩半空间露头水平参考
+                rock_acc[:len(acc0)] = factor_h * np.asarray(acc0, dtype=float)
+                np.savez_compressed(
+                    reference_path,
+                    time=np.arange(Nfft, dtype=float) * dt0,
+                    rock_acc_h=rock_acc,
+                    one_d_left_acc_h=reference_series['left'],
+                    one_d_right_acc_h=reference_series['right'],
+                    record=np.asarray(record_name),
+                )
+                ff_theory['reference_file'] = os.path.basename(reference_path)  # 下游自动发现入口
             except Exception as _fe:  # 一维基准计算异常
                 if logger:
                     log_step(logger, 'ff_theory 计算失败(不影响建模): %s', str(_fe))
@@ -4347,6 +4362,11 @@ def main():
         _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping, _ff_cfg,
                                    sgeom, acc_info, selfcheck, _eql_meta,
                                    validation_geometry=validation_geometry)  # 写 case_meta 并输出理论 QA
+
+        reference_only_env = str(os.environ.get('ABQ_REFERENCE_ONLY', '')).strip().lower()  # 已有工况补生一维参考
+        if bool(_run_cfg.get('reference_only', False)) or reference_only_env in ('1', 'true', 'yes', 'on'):
+            log_step(logger, 'reference_only：一维完整参考已生成，不创建或提交有限元模型')
+            return
 
         log_step(logger, '运行控制: 几何=%s, 自由场引擎=%s（TAF 分母用解析自由场）',
                  validation_geometry, _ff_cfg.get('engine'))

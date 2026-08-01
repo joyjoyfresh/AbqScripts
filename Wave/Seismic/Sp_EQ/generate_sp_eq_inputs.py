@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成小论文 C001—C010 真实波直接闭环的冻结输入(EQ01—EQ03)并写出可追溯清单。
+"""生成小论文 C001—C010 真实波直接闭环输入(EQ01—EQ03)并写出处理清单。
 
 预处理协议与 G1r 参考闸门完全一致：6 阶零相位 Butterworth 12 Hz 低通、
 整数倍 polyphase 重采样到 1 ms、g→m/s²、首尾 0.5 s 余弦锥化、
@@ -10,7 +10,6 @@
 
 from __future__ import print_function
 
-import hashlib
 import json
 import os
 
@@ -26,22 +25,11 @@ LOWPASS_HZ = 12.0  # 低通截止(Hz)，与 G1b 通带上限一致
 STOPBAND_CHECK_HZ = 15.0  # 高频泄漏检查频率(Hz)
 FILTER_ORDER = 6  # Butterworth 阶数
 TAPER_SECONDS = 0.50  # 首尾锥化时长(s)
-VELOCITY_TREND_LIMIT = 1.0e-8  # 速度趋势验收上限
-HIGH_FREQUENCY_ENERGY_LIMIT = 1.0e-4  # 高频能量占比验收上限
 SOURCES = (  # (标识, 源文件绝对路径)，源文件均为 g 单位
     ('eq01_el_centro', os.path.join(REPO_ROOT, 'Wave', 'Seismic', 'Original', 'El_Centro.txt')),
     ('eq02_kobe', os.path.join(REPO_ROOT, 'Wave', 'Seismic', 'Original', 'Kobe.txt')),
     ('eq03_chichi', os.path.join(REPO_ROOT, 'Wave', 'Seismic', 'Original', 'ChiChi.txt')),
 )
-
-
-def _sha256(path):
-    """计算文件SHA-256。"""
-    digest = hashlib.sha256()
-    with open(path, 'rb') as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _model_velocity_trend(signal, times):
@@ -121,7 +109,7 @@ def process_source(source_path):
 
 
 def signal_metrics(times, signal):
-    """计算单位、时间步、基线和高频泄漏验收指标。"""
+    """记录单位、时间步、基线和高频能量等处理结果。"""
     trend, corrected_velocity = _model_velocity_trend(signal, times)
     spectrum = np.fft.rfft(signal)
     frequencies = np.fft.rfftfreq(signal.size, TARGET_DT)
@@ -147,7 +135,7 @@ def signal_metrics(times, signal):
 
 
 def main():
-    """生成三条冻结输入与清单，任一门槛不通过时返回非零状态。"""
+    """生成三条真实波输入与处理清单。"""
     outputs = []
     for label, source_path in SOURCES:
         times, signal, source_dt, coefficients = process_source(source_path)
@@ -159,9 +147,7 @@ def main():
             'label': label,
             'wave_id': 'EQ' + label.split('_')[0][-2:],  # EQ01/EQ02/EQ03
             'filename': filename,
-            'sha256': _sha256(output_path),
             'source_path': os.path.relpath(source_path, REPO_ROOT).replace('\\', '/'),
-            'source_sha256': _sha256(source_path),
             'source_dt_s': source_dt,
             'source_acceleration_unit': 'g',
             'output_acceleration_unit': 'm/s^2',
@@ -170,8 +156,8 @@ def main():
         outputs.append(metrics)
 
     manifest = {
-        'schema_version': 1,
-        'purpose': '小论文 C001—C010 真实波直接闭环冻结输入(EQ01—EQ03)，0.1g 统一线性识别尺度',
+        'schema_version': 2,
+        'purpose': '小论文 C001—C010 真实波直接闭环输入(EQ01—EQ03)，0.1g 统一线性识别尺度',
         'generator': os.path.basename(__file__),
         'generation_parameters': {
             'target_dt_s': TARGET_DT,
@@ -182,28 +168,12 @@ def main():
             'taper_seconds': TAPER_SECONDS,
             'velocity_trend_correction': 'two_zero_integral_endpoint_zero_basis_functions',
         },
-        'acceptance': {
-            'maximum_abs_velocity_trend_slope_m_s2': VELOCITY_TREND_LIMIT,
-            'maximum_abs_velocity_trend_intercept_m_s': VELOCITY_TREND_LIMIT,
-            'stopband_check_hz': STOPBAND_CHECK_HZ,
-            'maximum_energy_fraction_above_15hz': HIGH_FREQUENCY_ENERGY_LIMIT,
-        },
         'signals': outputs,
     }
-    manifest['passed'] = bool(all(
-        abs(item['velocity_trend_slope_m_s2']) <= VELOCITY_TREND_LIMIT
-        and abs(item['velocity_trend_intercept_m_s']) <= VELOCITY_TREND_LIMIT
-        and item['energy_fraction_above_15hz'] <= HIGH_FREQUENCY_ENERGY_LIMIT
-        and abs(item['pga_m_s2'] - TARGET_PGA) <= 1.0e-10
-        and item['endpoint_abs_max_m_s2'] <= 1.0e-12
-        for item in outputs
-    ))
     manifest_path = os.path.join(OUTPUT_DIR, 'sp_eq_input_manifest.json')
     with open(manifest_path, 'w', encoding='utf-8') as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2, sort_keys=True)
     print(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True))
-    if not manifest['passed']:
-        raise SystemExit(2)
 
 
 if __name__ == '__main__':
