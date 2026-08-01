@@ -212,25 +212,9 @@ def main(argv=None):
                 reference, candidate, row, alignment, residual, raw, geometry
             )
 
-    fieldnames = [
-        "reference",
-        "candidate",
-        "candidate_folder",
-        "variation",
-        "formal_case",
-        "side_clearance",
-        "base_depth",
-        "comparison_basis",
-        "phase_alignment_applied",
-        "phase_alignment_reason",
-    ]
-    fieldnames.extend(quality.COMPARISON_METRIC_FIELDS)
-    fieldnames.extend("raw_" + field for field in quality.COMPARISON_METRIC_FIELDS)
-    fieldnames.extend(ALIGNMENT_FIELDS)
     quality.write_csv(
         output / "domain_sensitivity_comparison.csv",
         rows,
-        fieldnames=fieldnames,
     )
 
     summary = {
