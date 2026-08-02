@@ -162,6 +162,18 @@ def validate_postprocess_status(folder_path):  # 核验后处理数据文件是�
     return True, "completed"
 
 
+def _case_already_done(root_dir, folder_name):
+    """检查工况目录是否已有成功的后处理结果，用于跳过已完成的工况。"""
+    status_path = os.path.join(root_dir, folder_name, POSTPROCESS_STATUS_FILENAME)
+    if not os.path.isfile(status_path):
+        return False
+    try:
+        with open(status_path, 'r', encoding='utf-8') as f:
+            return bool(json.load(f).get('success', False))
+    except Exception:
+        return False
+
+
 def validate_config(config):
     """验证工况配置是否合规。
 
@@ -890,8 +902,15 @@ def main():  # 批处理主控制流程
             print("错误：工况生成了重复文件夹名 -> {}".format(folder_name))  # 打印命名冲突提示
             sys.exit(1)  # 异常退出
         seen.add(folder_name)  # 加入已生成名称集合中
+        if _case_already_done(root_dir, folder_name):  # 检查工况是否已有成功的后处理结果
+            print("跳过已完成工况：{}".format(folder_name))
+            continue
         folder_plan.append((folder_name, case["config"]))  # 记录到待处理工况目录中
         status_dict[folder_name] = 'planned'
+
+    if not folder_plan:
+        print("所有工况均已完成，无需重新运行。")
+        return
 
     os.makedirs(root_dir, exist_ok=True)  # 创建结果总输出根目录
 

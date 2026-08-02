@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-  # 声明源码编码为 UTF-8
-"""小论文批次 01/05：P061基准与V001—V003数值验证（全局执行序号001—004）。
+"""小论文批次 01/05：P061基准与V001—V004数值验证（全局执行序号001—005）。
 
 依据《毕业论文第四至第六章与英文期刊小论文融合研究实施总计划最终版》§4.4：
   P061 = i=60°、d/h=1.40、rv=0.30的标准配置统一对照基准；
   V001 = P061改用全局均匀1 m网格，对照P061的默认自适应网格；
-  V002 = P061扩大计算域（侧向净距1H→4H、基底深度3H→6H）；
-  V003 = P061延长静默尾段（6 s→12 s）。
-三项验证均直接对比本批次先行运行的P061；P061在批次03中仍按开发工况登记。
+  V002 = P061延长静默尾段（6 s→12 s）；
+  V003 = P061仅将侧向净空由1H改为2H，base_depth固定3H；
+  V004 = P061仅将基底深度由3H改为6H，侧向净空固定1H。
+四项验证均直接对比本批次先行运行的P061；P061在批次03中仍按开发工况登记。
 参考线只供独立评价和人工解释，不由建模或后处理自动决定研究结论。
 
 运行形式：
   python Autorun_ch4_sp_01_V_v1.py [求解输出根目录]
 缺省输出根目录为 C:\\Users\\12462\\Documents\\Code\\AbqScripts\\Run\\ch4_sp_01_V，
-工况文件夹按全局执行顺序命名（case-001-P061、case-002-V001至case-004-V003）。
+工况文件夹按全局执行顺序命名（case-001-P061、case-002-V001至case-005-V004）。
 """
 
 import os  # 导入操作系统相关路径与目录操作模块
@@ -26,7 +27,7 @@ import math  # 导入数学模块用于临界角计算
 import time  # 导入时间模块用于轮询子进程与进度日志
 import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 
-ROOT_DIR = r"C:\Users\12462\Documents\Code\AbqScripts\Run\ch4_sp_01_V"  # 默认求解输出根目录（小论文批次 01/05：V001—V003），可用命令行参数覆盖
+ROOT_DIR = r"C:\Users\12462\Documents\Code\AbqScripts\Run\ch4_sp_01_V"  # 默认求解输出根目录（小论文批次 01/05：V001—V004），可用命令行参数覆盖
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留
 REQUIRED_RESULT_FILES = ["surface_results.npz", "surface_results.xlsx"]  # 清理前必须同时存在且非空的规范数据产物
@@ -118,9 +119,9 @@ def base_config(slope_angle, layers, wave_files, extra=None):
     return config
 
 
-PARAMETER_CASES = [  # P061 基准 + V001—V003 数值验证工况（计划 §4.4，全局执行序号 001—004）
+PARAMETER_CASES = [  # P061 基准 + V001—V004 数值验证工况（计划 §4.4，全局执行序号 001—005）
     {
-        "name": "001-P061",  # P061（i=60°, d/h=1.40, rv=0.30）标准配置基准，先于 V001—V003 运行
+        "name": "001-P061",  # P061（i=60°, d/h=1.40, rv=0.30）标准配置基准，先于 V001—V004 运行
         "config": base_config(60.0, [cover_layer(600.0, 140.0)], [G1B_WAVE]),
     },
     {
@@ -129,14 +130,19 @@ PARAMETER_CASES = [  # P061 基准 + V001—V003 数值验证工况（计划 §4
                               extra={'mesh_cfg': {'size': 1.0, 'auto': False, 'graded': False}}),
     },
     {
-        "name": "003-V002",  # P061 扩大计算域：侧向净距 1H→4H，基底深度 3H→6H
-        "config": base_config(60.0, [cover_layer(600.0, 140.0)], [G1B_WAVE],
-                              extra={'geometry_cfg': {'side_clearance': 4.0, 'base_depth': 6.0}}),
-    },
-    {
-        "name": "004-V003",  # P061 延长尾段：6 s→12 s
+        "name": "003-V002",  # P061 延长尾段：6 s→12 s
         "config": base_config(60.0, [cover_layer(600.0, 140.0)], [G1B_WAVE],
                               extra={'time_cfg': {'tail_seconds': 12.0}}),
+    },
+    {
+        "name": "004-V003",  # P061 侧向净空单因素：1H→2H，base_depth固定3H
+        "config": base_config(60.0, [cover_layer(600.0, 140.0)], [G1B_WAVE],
+                              extra={'geometry_cfg': {'side_clearance': 2.0}}),
+    },
+    {
+        "name": "005-V004",  # P061 底部深度单因素：3H→6H，侧向净空固定1H
+        "config": base_config(60.0, [cover_layer(600.0, 140.0)], [G1B_WAVE],
+                              extra={'geometry_cfg': {'base_depth': 6.0}}),
     },
 ]
 
@@ -158,6 +164,18 @@ def validate_postprocess_status(folder_path):  # 核验后处理数据文件是�
             POSTPROCESS_STATUS_FILENAME, payload.get('reason') or 'unknown',
         )
     return True, "completed"
+
+
+def _case_already_done(root_dir, folder_name):
+    """检查工况目录是否已有成功的后处理结果，用于跳过已完成的工况。"""
+    status_path = os.path.join(root_dir, folder_name, POSTPROCESS_STATUS_FILENAME)
+    if not os.path.isfile(status_path):
+        return False
+    try:
+        with open(status_path, 'r', encoding='utf-8') as f:
+            return bool(json.load(f).get('success', False))
+    except Exception:
+        return False
 
 
 def validate_config(config):
@@ -888,8 +906,15 @@ def main():  # 批处理主控制流程
             print("错误：工况生成了重复文件夹名 -> {}".format(folder_name))  # 打印命名冲突提示
             sys.exit(1)  # 异常退出
         seen.add(folder_name)  # 加入已生成名称集合中
+        if _case_already_done(root_dir, folder_name):  # 检查工况是否已有成功的后处理结果
+            print("跳过已完成工况：{}".format(folder_name))
+            continue
         folder_plan.append((folder_name, case["config"]))  # 记录到待处理工况目录中
         status_dict[folder_name] = 'planned'
+
+    if not folder_plan:
+        print("所有工况均已完成，无需重新运行。")
+        return
 
     os.makedirs(root_dir, exist_ok=True)  # 创建结果总输出根目录
 
