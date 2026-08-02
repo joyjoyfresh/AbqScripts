@@ -32,11 +32,11 @@ def find_repo_root(start: Path) -> Path:
     configured = os.environ.get("ABQSCRIPTS_REPO_ROOT")
     if configured:
         candidate = Path(configured).resolve()
-        marker = candidate / "Run" / "Auto_ch4" / "x_validation_parameters.json"
+        marker = candidate / "Run" / "Auto_ch4" / "cross_solver" / "x_validation_parameters.json"
         if marker.is_file():
             return candidate
     for candidate in (start, *start.parents):
-        marker = candidate / "Run" / "Auto_ch4" / "x_validation_parameters.json"
+        marker = candidate / "Run" / "Auto_ch4" / "cross_solver" / "x_validation_parameters.json"
         if marker.is_file():
             return candidate
     raise FileNotFoundError("无法从工况目录定位仓库根目录")
@@ -713,7 +713,7 @@ def evaluate_wavefield(abaqus_case: Path, specfem_case: Path,
         axis.set_ylabel("y / m")
         figure.colorbar(artist, ax=axis, label="Abaqus - SPECFEM2D / (m/s²)")
         figure.tight_layout()
-        figure.savefig(output_dir / "x002_wavefield_difference_t0p45.png", dpi=180)
+        figure.savefig(output_dir / "x002_sr_wavefield_difference_t0p45.png", dpi=180)
         plt.close(figure)
     return {
         "available": True,
@@ -752,7 +752,7 @@ def save_plots(output_dir: Path, time: np.ndarray, s: np.ndarray,
     axes[-1, 1].set_xlabel("common time / s")
     axes[0, 0].legend()
     figure.tight_layout()
-    figure.savefig(output_dir / "x002_fixed_point_timeseries.png", dpi=180)
+    figure.savefig(output_dir / "x002_sr_fixed_point_timeseries.png", dpi=180)
     plt.close(figure)
 
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
@@ -765,7 +765,7 @@ def save_plots(output_dir: Path, time: np.ndarray, s: np.ndarray,
     axes[0].legend()
     axes[-1].set_xlabel("normalized surface coordinate s")
     figure.tight_layout()
-    figure.savefig(output_dir / "x002_surface_pga.png", dpi=180)
+    figure.savefig(output_dir / "x002_sr_surface_pga.png", dpi=180)
     plt.close(figure)
 
 
@@ -773,8 +773,8 @@ def main() -> int:
     """执行完整比较并写出研究评价产物。"""
     abaqus_case = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
     repo_root = find_repo_root(abaqus_case)
-    specfem_case = repo_root / "Run" / "cross_solver_X" / "specfem2d" / "X002-S"
-    params_path = repo_root / "Run" / "Auto_ch4" / "x_validation_parameters.json"
+    specfem_case = repo_root / "Run" / "cross_solver_X" / "specfem2d" / "X002-SR"
+    params_path = repo_root / "Run" / "Auto_ch4" / "cross_solver" / "x_validation_parameters.json"
     params = json.loads(params_path.read_text(encoding="utf-8"))
     scale = float(params["pulse"]["global_linear_scale"])
     band = tuple(float(value) for value in params["pulse"]["acceleration_effective_band_5pct_hz"])
@@ -864,8 +864,8 @@ def main() -> int:
     }
 
     result = {
-        "schema": "x002-cross-solver-comparison-1.1",
-        "case_pair": ["X002-A", "X002-S"],
+        "schema": "x002_sr-cross-solver-comparison-1.1",
+        "case_pair": ["X002-A", "X002-SR"],
         "status": "evaluated",
         "formal_gates_met": formal_gates_met,
         "formal_gates": formal_gates,
@@ -891,14 +891,14 @@ def main() -> int:
         "software": {"python": sys.version, "platform": platform.platform(),
                      "numpy": np.__version__},
     }
-    write_json(output_dir / "x002_comparison_metrics.json", result)
-    np.savez_compressed(output_dir / "x002_comparison_arrays.npz",
+    write_json(output_dir / "x002_sr_comparison_metrics.json", result)
+    np.savez_compressed(output_dir / "x002_sr_comparison_arrays.npz",
                         common_time=common_time, s=s, x=target_x,
                         abaqus_acc_h=a_h, abaqus_acc_v=a_v,
                         specfem_acc_h=s_h, specfem_acc_v=s_v,
                         abaqus_pga_h=a_pga_h, abaqus_pga_v=a_pga_v,
                         specfem_pga_h=s_pga_h, specfem_pga_v=s_pga_v)
-    with (output_dir / "x002_surface_pga.csv").open("w", encoding="utf-8", newline="") as handle:
+    with (output_dir / "x002_sr_surface_pga.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(("s", "x_m", "abaqus_pga_h", "specfem_pga_h",
                          "abaqus_pga_v", "specfem_pga_v"))
@@ -909,7 +909,7 @@ def main() -> int:
                 "vertical": {"abaqus": a_pga_v, "specfem": s_pga_v}})
     print(json.dumps({"status": result["status"],
                       "formal_gates_met": result["formal_gates_met"],
-                      "metrics": str(output_dir / "x002_comparison_metrics.json")},
+                      "metrics": str(output_dir / "x002_sr_comparison_metrics.json")},
                      ensure_ascii=False, indent=2))
     return 0
 

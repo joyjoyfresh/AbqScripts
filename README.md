@@ -98,7 +98,7 @@ py -3 Run/Auto_ch4/Autorun_ch4_sp_02_H_v1.py C:\Abaqus\AbqScripts\Run\ch4_sp_02_
 常用分析脚本：
 
 ```powershell
-py -3 Run/evaluation/analyze_complex_frf.py --help
+py -3 Run/Auto_ch4/evaluation/analyze_complex_frf.py --help
 py -3 ML/train_complex_frf_surrogate.py --help
 py -3 ML/reconstruct_real_wave.py --help
 ```

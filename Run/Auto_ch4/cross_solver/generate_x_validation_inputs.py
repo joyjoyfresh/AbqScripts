@@ -927,7 +927,7 @@ def generate_case(case_name: str, params: dict, output_root: Path, specfem_root:
 
 def main() -> int:
     script_path = Path(__file__).resolve()
-    repo_root = script_path.parents[2]
+    repo_root = script_path.parents[3]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--specfem-root", type=Path,
                         default=Path("/home/fuyuxuan/software/specfem2d-v8.1.0"))
