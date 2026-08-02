@@ -38,4 +38,4 @@
 
 ## 提交
 
-- 如果用户指明要提交，请使用以下命令提交 commit：`git add -A && git commit -m "$(date +%Y-%m-%d_%H:%M)"`。
+- 如果用户指明要提交，请使用以下命令提交并推送：`git add -A && git commit -m "$(date +%Y-%m-%d_%H:%M)" && git push origin main`。
