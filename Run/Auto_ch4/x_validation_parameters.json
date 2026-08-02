@@ -40,6 +40,23 @@
       "polynomial_degree": 4,
       "target_edge": 15.0
     },
+    "X002-A": {
+      "analysis_time": 2.3,
+      "dt": 0.001,
+      "full_field_frequency": 50,
+      "has_cover": true,
+      "mesh_auto": true,
+      "mesh_graded": true,
+      "mesh_size": 4.0,
+      "output_sample_stride": 1,
+      "parameter_source": "P061",
+      "phase_origin_x": 193.18516525781368,
+      "solver": "Abaqus/Standard",
+      "spatial_discretization": "CPE4R low-order finite element",
+      "time_integration": "implicit TRANSIENT_FIDELITY",
+      "time_mapping": "t_common = t_abaqus_output - 0.3 s",
+      "validation_point_tolerance": 6.0
+    },
     "X002-S": {
       "dt": 5e-05,
       "has_cover": true,

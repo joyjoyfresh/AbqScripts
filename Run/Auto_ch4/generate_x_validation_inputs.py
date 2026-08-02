@@ -297,6 +297,23 @@ def build_parameter_table() -> dict:
         "validation_point_tolerance": 6.0,
         "full_field_frequency": 50,
     }
+    cases["X002-A"] = {
+        "parameter_source": "P061",
+        "solver": "Abaqus/Standard",
+        "spatial_discretization": "CPE4R low-order finite element",
+        "time_integration": "implicit TRANSIENT_FIDELITY",
+        "has_cover": True,
+        "mesh_size": 4.0,
+        "mesh_auto": True,
+        "mesh_graded": True,
+        "dt": PUBLIC_DT,
+        "analysis_time": TOTAL_TIME + ABAQUS_TAIL_SECONDS,
+        "output_sample_stride": 1,
+        "phase_origin_x": ABAQUS_PHASE_ORIGIN_X,
+        "time_mapping": "t_common = t_abaqus_output - 0.3 s",
+        "validation_point_tolerance": 6.0,
+        "full_field_frequency": 50,
+    }
     return {
         "schema": "x-cross-solver-parameters-1.1",
         "units": {"length": "m", "time": "s", "density": "kg/m3", "acceleration": "m/s2"},
@@ -799,6 +816,11 @@ def summarize_run(case_dir: Path, params: dict) -> dict:
         raw_peaks.append(local_peak)
     output_dir = case_dir / "OUTPUT_FILES"
     station_map = json.loads((case_dir / "DATA" / "station_map.json").read_text(encoding="utf-8"))
+    case_name = case_dir.name
+    case_config = params["cases"].get(case_name, {})
+    has_cover = bool(case_config.get("has_cover", False))
+    cover_interface_y = CREST_Y - COVER["thickness_below_crest"]
+    bedrock_shortest_wavelength = BEDROCK["vs"] / params["pulse"]["acceleration_effective_band_5pct_hz"][1]
     incident_checks = []
     for station_name in ("R0001", "R0002", "R0003"):
         metadata = next(item for item in station_map["stations"] if item["station"] == station_name)
@@ -821,6 +843,9 @@ def summarize_run(case_dir: Path, params: dict) -> dict:
                 scaled_z = value_z * params["pulse"]["global_linear_scale"]
                 candidates.append((math.hypot(scaled_x, scaled_z), common_time, scaled_x, scaled_z))
         peak, observed_time, accel_x, accel_z = max(candidates)
+        below_interface = metadata["z"] < cover_interface_y
+        within_cover_influence = (has_cover and below_interface
+                                  and (cover_interface_y - metadata["z"]) < bedrock_shortest_wavelength)
         incident_checks.append({
             "station": station_name, "expected_common_peak_time": expected_time,
             "observed_common_peak_time": observed_time, "time_error": observed_time - expected_time,
@@ -828,15 +853,26 @@ def summarize_run(case_dir: Path, params: dict) -> dict:
             "accel_x_m_s2": accel_x, "accel_z_m_s2": accel_z,
             "polarization_az_over_ax": accel_z / accel_x,
             "polarization_ratio_error": accel_z / accel_x + math.tan(INCIDENCE_RAD),
+            "within_cover_influence": within_cover_influence,
         })
+    gate_items = [item for item in incident_checks if not item["within_cover_influence"]]
+    if not gate_items:
+        raise RuntimeError("覆盖层影响区外的基岩入射测点为空，无法判定入射门控")
     incident_gate = {
-        "max_abs_time_error_s": max(abs(item["time_error"]) for item in incident_checks),
-        "max_abs_peak_relative_error": max(abs(item["vector_peak_relative_error"]) for item in incident_checks),
-        "max_abs_polarization_ratio_error": max(abs(item["polarization_ratio_error"]) for item in incident_checks),
+        "max_abs_time_error_s": max(abs(item["time_error"]) for item in gate_items),
+        "max_abs_peak_relative_error": max(abs(item["vector_peak_relative_error"]) for item in gate_items),
+        "max_abs_polarization_ratio_error": max(abs(item["polarization_ratio_error"]) for item in gate_items),
     }
     incident_gate["passed"] = (incident_gate["max_abs_time_error_s"] <= 0.005
                                and incident_gate["max_abs_peak_relative_error"] <= 0.10
                                and incident_gate["max_abs_polarization_ratio_error"] <= 0.02)
+    incident_gate["gate_stations"] = [item["station"] for item in gate_items]
+    incident_gate["excluded_cover_influence_stations"] = [
+        item["station"] for item in incident_checks if item["within_cover_influence"]]
+    if has_cover:
+        incident_gate["note"] = (f"覆盖层工况按首个材料基岩计算P061解析入射场，界面影响区"
+                                 f"(距覆盖层底界面小于基岩最短波长{bedrock_shortest_wavelength:.1f} m)内测点"
+                                 f"仅作辅助诊断，不参与正式入射门控")
     result = {
         "seismogram_file_count": len(files), "all_values_finite": finite,
         "row_count_min": min(row_counts) if row_counts else 0,

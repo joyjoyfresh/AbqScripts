@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""按公共坐标和时间基准评价 X001-A 与已完成的 X001-S。
+"""按公共坐标和时间基准评价 X002-A 与已完成的 X002-S。
 
 脚本不对任一通道追加移时、缩放或符号修正。采用分级评价体系：
 核心工程指标（PGA空间分布、早期全场快照）为正式门控；
@@ -83,35 +83,41 @@ def require_close(label: str, actual: float, expected: float,
                   tolerance: float = 1.0e-9) -> None:
     """硬校验关键浮点配置。"""
     if not math.isclose(float(actual), float(expected), rel_tol=0.0, abs_tol=tolerance):
-        raise RuntimeError(f"X001-A身份校验失败: {label}={actual}，预期{expected}")
+        raise RuntimeError(f"X002-A身份校验失败: {label}={actual}，预期{expected}")
 
 
 def validate_abaqus_identity(case_dir: Path, params: dict,
                               prefix: str, raw_time: np.ndarray) -> dict:
-    """拒绝把其他 Abaqus 工况误作 X001-A。"""
+    """拒绝把其他 Abaqus 工况误作 X002-A。"""
     config = json.loads((case_dir / "case_config.json").read_text(encoding="utf-8"))
     meta = json.loads((case_dir / "case_meta.json").read_text(encoding="utf-8"))
     pulse = params["pulse"]
     geometry = params["geometry"]
     bedrock = params["materials"]["bedrock"]
-    case = params["cases"]["X001-A"]
+    case = params["cases"]["X002-A"]
     expected_wave = Path(pulse["abaqus_acceleration_file"]).name
     expected_prefix = "raw_" + Path(expected_wave).stem + "_"
-    if case_dir.name != "X001-A" or meta.get("folder") != "X001-A":
-        raise RuntimeError("X001-A身份校验失败: 工况目录或case_meta.folder不是X001-A")
+    if case_dir.name != "X002-A" or meta.get("folder") != "X002-A":
+        raise RuntimeError("X002-A身份校验失败: 工况目录或case_meta.folder不是X002-A")
     if prefix != expected_prefix:
-        raise RuntimeError(f"X001-A身份校验失败: 原始记录{prefix}，预期{expected_prefix}")
+        raise RuntimeError(f"X002-A身份校验失败: 原始记录{prefix}，预期{expected_prefix}")
     wave_files = config.get("run_cfg", {}).get("wave_files", [])
     if len(wave_files) != 1 or Path(wave_files[0]).name != expected_wave:
-        raise RuntimeError(f"X001-A身份校验失败: wave_files={wave_files}")
+        raise RuntimeError(f"X002-A身份校验失败: wave_files={wave_files}")
     wave_path = case_dir / expected_wave
     digest = hashlib.sha256(wave_path.read_bytes()).hexdigest()
     if digest != pulse["abaqus_acceleration_sha256"]:
-        raise RuntimeError("X001-A身份校验失败: 工况目录公共脉冲SHA-256不一致")
+        raise RuntimeError("X002-A身份校验失败: 工况目录公共脉冲SHA-256不一致")
 
     material = config["material_cfg"]
-    if material.get("layers") != [] or meta.get("layers") != []:
-        raise RuntimeError("X001-A身份校验失败: H004必须为均质基岩")
+    layers = material.get("layers", [])
+    if len(layers) != 1 or layers[0].get("name") != "cover":
+        raise RuntimeError("X002-A身份校验失败: P061必须包含一层覆盖层")
+    cover = params["materials"]["cover"]
+    require_close("覆盖层Vs", layers[0]["vs"], cover["vs"])
+    require_close("覆盖层泊松比", layers[0]["poisson_ratio"], cover["poisson_ratio"])
+    require_close("覆盖层密度", layers[0]["density"], cover["density"])
+    require_close("覆盖层厚度", layers[0]["thickness"], cover["thickness_below_crest"])
     require_close("入射角", material["angle"], params["physics"]["incidence_angle_from_vertical_deg"])
     require_close("基岩Vs", material["bedrock"]["vs"], bedrock["vs"])
     require_close("基岩泊松比", material["bedrock"]["poisson_ratio"], bedrock["poisson_ratio"])
@@ -135,16 +141,23 @@ def validate_abaqus_identity(case_dir: Path, params: dict,
     require_close("case_meta.freefield.phase_origin_x", meta["freefield"]["phase_origin_x"],
                   pulse["abaqus_phase_origin_x_m"])
     if meta["freefield"].get("initial_state_mode") != "incremental":
-        raise RuntimeError("X001-A身份校验失败: initial_state_mode不是incremental")
+        raise RuntimeError("X002-A身份校验失败: initial_state_mode不是incremental")
     actual_damping = meta["damping"]["layers"]
-    if len(actual_damping) != 1 or actual_damping[0].get("name") != "Bedrock":
-        raise RuntimeError("X001-A身份校验失败: 实际阻尼材料不是单一基岩")
-    expected_damping = bedrock["damping_mapping"]
-    require_close("Rayleigh alpha", actual_damping[0]["alpha"], expected_damping["alpha"], 1.0e-12)
-    require_close("Rayleigh beta", actual_damping[0]["beta"], expected_damping["beta"], 1.0e-15)
+    if len(actual_damping) != 2:
+        raise RuntimeError("X002-A身份校验失败: 实际阻尼材料应为两层（基岩+覆盖层）")
+    bed_damping = next((d for d in actual_damping if d.get("name") == "Bedrock"), None)
+    cover_damping = next((d for d in actual_damping if d.get("name") == "cover"), None)
+    if bed_damping is None or cover_damping is None:
+        raise RuntimeError("X002-A身份校验失败: 阻尼层缺少Bedrock或cover")
+    expected_bed_damping = bedrock["damping_mapping"]
+    require_close("Rayleigh alpha (bedrock)", bed_damping["alpha"], expected_bed_damping["alpha"], 1.0e-12)
+    require_close("Rayleigh beta (bedrock)", bed_damping["beta"], expected_bed_damping["beta"], 1.0e-15)
+    expected_cover_damping = cover["damping_mapping"]
+    require_close("Rayleigh alpha (cover)", cover_damping["alpha"], expected_cover_damping["alpha"], 1.0e-10)
+    require_close("Rayleigh beta (cover)", cover_damping["beta"], expected_cover_damping["beta"], 1.0e-13)
     dt = float(case["dt"])
     if len(raw_time) < 2 or np.any(np.diff(raw_time) <= 0.0):
-        raise RuntimeError("X001-A身份校验失败: Abaqus时间轴不是严格递增序列")
+        raise RuntimeError("X002-A身份校验失败: Abaqus时间轴不是严格递增序列")
     require_close("Abaqus原始起始时刻", raw_time[0], 0.0, max(1.0e-7, 0.01 * dt))
     require_close("Abaqus原始中位步长", np.median(np.diff(raw_time)), dt,
                   max(1.0e-6, 0.01 * dt))
@@ -216,7 +229,7 @@ def load_abaqus(case_dir: Path, common_time: np.ndarray,
         mapped_y = surface_elevation(x, y, target_x)
         surface_coordinate_error = float(np.max(np.abs(mapped_y - target_z)))
         if surface_coordinate_error > 1.0e-4:
-            raise RuntimeError("Abaqus TOP_SURFACE高程与X001-S公共地表坐标不一致")
+            raise RuntimeError("Abaqus TOP_SURFACE高程与X002-S公共地表坐标不一致")
         acc_h_nodes = time_resample(np.asarray(data[prefix + "acc_h"], dtype=float),
                                     source_time, common_time)
         acc_v_nodes = time_resample(np.asarray(data[prefix + "acc_v"], dtype=float),
@@ -254,16 +267,16 @@ def load_abaqus(case_dir: Path, common_time: np.ndarray,
                                         under_time, common_time),
             }
         else:
-            raise RuntimeError("X001-A规范数据缺少必备的三处地下检查点")
+            raise RuntimeError("X002-A规范数据缺少必备的三处地下检查点")
         for label, values, expected_shape in (
                 ("surface.acc_h", surface["acc_h"], (801, 2000)),
                 ("surface.acc_v", surface["acc_v"], (801, 2000)),
                 ("underground.acc_h", underground["acc_h"], (3, 2000)),
                 ("underground.acc_v", underground["acc_v"], (3, 2000))):
             if values.shape != expected_shape:
-                raise RuntimeError(f"X001-A {label}形状{values.shape}，预期{expected_shape}")
+                raise RuntimeError(f"X002-A {label}形状{values.shape}，预期{expected_shape}")
             if not np.all(np.isfinite(values)):
-                raise RuntimeError(f"X001-A {label}包含非有限值")
+                raise RuntimeError(f"X002-A {label}包含非有限值")
     return {"surface": surface, "underground": underground, "identity": identity}
 
 
@@ -285,7 +298,7 @@ def load_specfem(case_dir: Path, scale: float) -> dict:
     rock = sorted((item for item in station_map["stations"] if item["role"] == "incident_check"),
                   key=lambda item: item["station"])
     if len(main) != 801 or len(rock) != 3:
-        raise RuntimeError(f"X001-S测点数量错误: main={len(main)}, rock={len(rock)}")
+        raise RuntimeError(f"X002-S测点数量错误: main={len(main)}, rock={len(rock)}")
     common_time = None
     surface_h, surface_v = [], []
     for item in main:
@@ -308,21 +321,21 @@ def load_specfem(case_dir: Path, scale: float) -> dict:
     surface_v = np.asarray(surface_v, dtype=float)
     common_time = np.asarray(common_time, dtype=float)
     if common_time.shape != (2000,) or not np.all(np.isfinite(common_time)):
-        raise RuntimeError("X001-S公共时间必须为2000个有限值")
+        raise RuntimeError("X002-S公共时间必须为2000个有限值")
     if np.any(np.diff(common_time) <= 0.0):
-        raise RuntimeError("X001-S公共时间不是严格递增序列")
-    require_close("X001-S公共起始时刻", common_time[0], 0.0, 1.0e-12)
-    require_close("X001-S公共结束时刻", common_time[-1], 1.999, 1.0e-12)
-    require_close("X001-S公共中位步长", np.median(np.diff(common_time)), 0.001, 1.0e-12)
+        raise RuntimeError("X002-S公共时间不是严格递增序列")
+    require_close("X002-S公共起始时刻", common_time[0], 0.0, 1.0e-12)
+    require_close("X002-S公共结束时刻", common_time[-1], 1.999, 1.0e-12)
+    require_close("X002-S公共中位步长", np.median(np.diff(common_time)), 0.001, 1.0e-12)
     if surface_h.shape != (801, 2000) or surface_v.shape != (801, 2000):
-        raise RuntimeError("X001-S地表矩阵形状不是801×2000")
+        raise RuntimeError("X002-S地表矩阵形状不是801×2000")
     if not np.all(np.isfinite(surface_h)) or not np.all(np.isfinite(surface_v)):
-        raise RuntimeError("X001-S地表矩阵包含非有限值")
+        raise RuntimeError("X002-S地表矩阵包含非有限值")
     for item in rock_data:
         if item["acc_h"].shape != (2000,) or item["acc_v"].shape != (2000,):
-            raise RuntimeError("X001-S地下检查点时程长度不是2000")
+            raise RuntimeError("X002-S地下检查点时程长度不是2000")
         if not np.all(np.isfinite(item["acc_h"])) or not np.all(np.isfinite(item["acc_v"])):
-            raise RuntimeError("X001-S地下检查点包含非有限值")
+            raise RuntimeError("X002-S地下检查点包含非有限值")
     return {
         "time": common_time,
         "surface": {
@@ -511,9 +524,9 @@ def evaluate_rock(abaqus: dict | None, specfem: list[dict],
     if abaqus is None:
         return {"available": False, "reason": "Abaqus地下检查点未提取"}
     if len(abaqus["name"]) != 3 or len(set(name.upper() for name in abaqus["name"])) != 3:
-        raise RuntimeError("X001-A地下时程必须恰有三个不重复的命名点")
+        raise RuntimeError("X002-A地下时程必须恰有三个不重复的命名点")
     if len(specfem) != 3:
-        raise RuntimeError("X001-S入射检查点必须恰有三个")
+        raise RuntimeError("X002-S入射检查点必须恰有三个")
     if len(point_map.get("points", [])) != 3:
         raise RuntimeError("validation_point_map.json必须恰有三个点")
     points = []
@@ -598,12 +611,19 @@ def nearest_indices(points: np.ndarray, queries: np.ndarray) -> tuple[np.ndarray
 
 def specfem_wavefield_point_count(specfem_case: Path) -> int:
     """从正式求解日志读取波场文件中的有效全局 GLL 点数。"""
-    text = (specfem_case / "OUTPUT_FILES" / "solver.log").read_text(
-        encoding="utf-8", errors="replace")
-    match = re.search(r"Number of grid points\s*=\s*(\d+)", text)
-    if match is None:
-        raise RuntimeError("solver.log未记录Number of grid points")
-    return int(match.group(1))
+    solver_log = specfem_case / "OUTPUT_FILES" / "solver.log"
+    if solver_log.is_file():
+        text = solver_log.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"Number of grid points\s*=\s*(\d+)", text)
+        if match is not None:
+            return int(match.group(1))
+    grid_path = specfem_case / "OUTPUT_FILES" / "wavefield_grid_for_dumps.bin"
+    if grid_path.is_file():
+        raw = np.fromfile(grid_path, dtype='<f4')
+        total = len(raw) // 2
+        coords = raw[:2 * total].reshape((-1, 2))
+        return len(np.unique(coords.round(decimals=6), axis=0))
+    raise FileNotFoundError("无法确定SPECFEM2D波场GLL点数: solver.log和grid文件均不存在")
 
 
 def evaluate_wavefield(abaqus_case: Path, specfem_case: Path,
@@ -646,7 +666,13 @@ def evaluate_wavefield(abaqus_case: Path, specfem_case: Path,
         a_index = int(np.argmin(np.abs(common_times - common_time)))
         dump_path = specfem_case / "OUTPUT_FILES" / f"wavefield{step:07d}_01.bin"
         if not dump_path.is_file():
-            raise FileNotFoundError(dump_path)
+            import glob as _glob
+            candidates = sorted(_glob.glob(
+                str(specfem_case / "OUTPUT_FILES" / "wavefield*_01.bin")))
+            if not candidates:
+                raise FileNotFoundError(f"无可用波场快照文件: {specfem_case / 'OUTPUT_FILES'}")
+            dump_path = Path(min(candidates,
+                                 key=lambda p: abs(int(Path(p).stem.split("_")[0][9:]) - step)))
         values_raw = np.fromfile(dump_path, dtype='<f4')
         if len(values_raw) < 2 * point_count:
             raise RuntimeError(f"{dump_path.name}长度与波场坐标不一致")
@@ -672,7 +698,7 @@ def evaluate_wavefield(abaqus_case: Path, specfem_case: Path,
         if abs(common_time - 0.45) < 1.0e-9:
             plot_payload = (queries[:, 0], queries[:, 1], test_h - reference_h)
     if len(snapshot_results) != len(snapshot_specs) or len(snapshot_results) != 3:
-        raise RuntimeError("X001波场必须完成三个预定快照评价")
+        raise RuntimeError("X002波场必须完成三个预定快照评价")
     if plot_payload is not None:
         import matplotlib
         matplotlib.use("Agg")
@@ -682,12 +708,12 @@ def evaluate_wavefield(abaqus_case: Path, specfem_case: Path,
         figure, axis = plt.subplots(figsize=(10, 5.5))
         artist = axis.scatter(px[::stride], py[::stride], c=difference[::stride],
                               s=4, cmap="coolwarm")
-        axis.set_title("X001 horizontal acceleration difference at common t=0.45 s")
+        axis.set_title("X002 horizontal acceleration difference at common t=0.45 s")
         axis.set_xlabel("x / m")
         axis.set_ylabel("y / m")
         figure.colorbar(artist, ax=axis, label="Abaqus - SPECFEM2D / (m/s²)")
         figure.tight_layout()
-        figure.savefig(output_dir / "x001_wavefield_difference_t0p45.png", dpi=180)
+        figure.savefig(output_dir / "x002_sr_wavefield_difference_t0p45.png", dpi=180)
         plt.close(figure)
     return {
         "available": True,
@@ -726,7 +752,7 @@ def save_plots(output_dir: Path, time: np.ndarray, s: np.ndarray,
     axes[-1, 1].set_xlabel("common time / s")
     axes[0, 0].legend()
     figure.tight_layout()
-    figure.savefig(output_dir / "x001_fixed_point_timeseries.png", dpi=180)
+    figure.savefig(output_dir / "x002_sr_fixed_point_timeseries.png", dpi=180)
     plt.close(figure)
 
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
@@ -739,7 +765,7 @@ def save_plots(output_dir: Path, time: np.ndarray, s: np.ndarray,
     axes[0].legend()
     axes[-1].set_xlabel("normalized surface coordinate s")
     figure.tight_layout()
-    figure.savefig(output_dir / "x001_surface_pga.png", dpi=180)
+    figure.savefig(output_dir / "x002_sr_surface_pga.png", dpi=180)
     plt.close(figure)
 
 
@@ -747,7 +773,7 @@ def main() -> int:
     """执行完整比较并写出研究评价产物。"""
     abaqus_case = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd().resolve()
     repo_root = find_repo_root(abaqus_case)
-    specfem_case = repo_root / "Run" / "cross_solver_X" / "specfem2d" / "X001-S"
+    specfem_case = repo_root / "Run" / "cross_solver_X" / "specfem2d" / "X002-SR"
     params_path = repo_root / "Run" / "Auto_ch4" / "x_validation_parameters.json"
     params = json.loads(params_path.read_text(encoding="utf-8"))
     scale = float(params["pulse"]["global_linear_scale"])
@@ -793,7 +819,7 @@ def main() -> int:
     output_dir = abaqus_case / "comparison"
     output_dir.mkdir(parents=True, exist_ok=True)
     point_map = json.loads((abaqus_case / "validation_point_map.json").read_text(encoding="utf-8"))
-    tolerance = float(params["cases"]["X001-A"]["validation_point_tolerance"])
+    tolerance = float(params["cases"]["X002-A"]["validation_point_tolerance"])
     rock = evaluate_rock(abaqus["underground"], specfem["rock"], common_time,
                          point_map, tolerance)
     snapshots = params["observations"]["wavefield_snapshots"]
@@ -838,8 +864,8 @@ def main() -> int:
     }
 
     result = {
-        "schema": "x001-cross-solver-comparison-1.1",
-        "case_pair": ["X001-A", "X001-S"],
+        "schema": "x002_sr-cross-solver-comparison-1.1",
+        "case_pair": ["X002-A", "X002-SR"],
         "status": "evaluated",
         "formal_gates_met": formal_gates_met,
         "formal_gates": formal_gates,
@@ -865,14 +891,14 @@ def main() -> int:
         "software": {"python": sys.version, "platform": platform.platform(),
                      "numpy": np.__version__},
     }
-    write_json(output_dir / "x001_comparison_metrics.json", result)
-    np.savez_compressed(output_dir / "x001_comparison_arrays.npz",
+    write_json(output_dir / "x002_sr_comparison_metrics.json", result)
+    np.savez_compressed(output_dir / "x002_sr_comparison_arrays.npz",
                         common_time=common_time, s=s, x=target_x,
                         abaqus_acc_h=a_h, abaqus_acc_v=a_v,
                         specfem_acc_h=s_h, specfem_acc_v=s_v,
                         abaqus_pga_h=a_pga_h, abaqus_pga_v=a_pga_v,
                         specfem_pga_h=s_pga_h, specfem_pga_v=s_pga_v)
-    with (output_dir / "x001_surface_pga.csv").open("w", encoding="utf-8", newline="") as handle:
+    with (output_dir / "x002_sr_surface_pga.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(("s", "x_m", "abaqus_pga_h", "specfem_pga_h",
                          "abaqus_pga_v", "specfem_pga_v"))
@@ -883,7 +909,7 @@ def main() -> int:
                 "vertical": {"abaqus": a_pga_v, "specfem": s_pga_v}})
     print(json.dumps({"status": result["status"],
                       "formal_gates_met": result["formal_gates_met"],
-                      "metrics": str(output_dir / "x001_comparison_metrics.json")},
+                      "metrics": str(output_dir / "x002_sr_comparison_metrics.json")},
                      ensure_ascii=False, indent=2))
     return 0
 
