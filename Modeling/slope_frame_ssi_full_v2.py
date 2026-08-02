@@ -120,6 +120,9 @@ run_cfg = {
     'validation_geometry': 'slope',     # 验证几何模式：slope=生产坡地(默认) / flat=显式平场验证(仅freefield)
     'submit_jobs': True,                # 是否提交 Abaqus 作业：False=只建模并写几何审计（F0 基础设施检查）
     'job_progress_interval_seconds': 360.0,  # 作业进度写入建模日志的间隔(s)；默认6min/<=0=关闭定时进度
+    'validation_points': None,          # 可选地下检查点列表：[{'name':'R0001','x':500,'y':300}, ...]
+    'validation_point_tolerance': None, # 检查点到最近节点的允许距离(m)；None=2倍实际网格尺寸
+    'full_field_frequency': None,       # surface_only=True时的全场快照步距；None=仅保留首末场
 }
 
 # 人工边界配置
@@ -2496,7 +2499,8 @@ def build_models(acc_info, base_model, part_name, inst_name,
                  site, geom, angle, job,
                  step_name=DEFAULT_STEP_NAME, model_scene='slope', logger=None,
                  tcfg=None, fc_used=None, ffcfg=None, damping=None, surface_geometry='horizontal',
-                 surface_only=False, critical_angle_check=True, elem_name='CPE4'):
+                 surface_only=False, critical_angle_check=True, elem_name='CPE4',
+                 full_field_frequency=None):
     """根据加速度时程信息批量复制模型、创建分析步、施加人工边界。
 
     site/geom : 场地材料与几何对象（直接转发给 VAB_oblique）
@@ -2507,6 +2511,7 @@ def build_models(acc_info, base_model, part_name, inst_name,
     ffcfg     : 自由场引擎配置（v6），转发给 VAB_oblique
     damping   : 解析后阻尼配置（v6），转发给 VAB_oblique 用于 fd 自由场衰减一致化
     surface_geometry: v7 表层几何模式，转发给 VAB_oblique（须与 create_model 同口径）
+    full_field_frequency: surface_only=True 时全场输出步距；None 表示仅保留首末场
     """
     logger = logger or log_step()  # 在未传入日志器时使用默认日志器
 
@@ -2556,9 +2561,16 @@ def build_models(acc_info, base_model, part_name, inst_name,
                 underground_region = model.rootAssembly.sets['VALIDATION_UNDERGROUND']
                 model.FieldOutputRequest(name='F-Output-Validation', createStepName=step_name,
                                          variables=('A', 'U'), frequency=frequency, region=underground_region)
-            model.fieldOutputRequests['F-Output-1'].setValues(  # 整体场输出降频（仅留抽检帧）
-                variables=variables, frequency=10000000)  # 设为极大间隔（几乎只输出首末帧）
-            log_step(logger, '%s 输出瘦身: TOP_SURFACE 全时程 A/U + 整体场输出降频', new_model_name)  # 记录瘦身日志
+            if full_field_frequency is None:  # 常规工况保持仅首末全场
+                whole_field_frequency = 10000000
+            else:  # 验证工况可按固定步距保存少量全场快照
+                whole_field_frequency = int(full_field_frequency)
+                if whole_field_frequency < 1:
+                    raise ValueError('run_cfg.full_field_frequency 必须为正整数')
+            model.fieldOutputRequests['F-Output-1'].setValues(
+                variables=variables, frequency=whole_field_frequency)
+            log_step(logger, '%s 输出瘦身: TOP_SURFACE 全时程 A/U + 整体场步距=%d',
+                     new_model_name, whole_field_frequency)
 
         # P0#1 重力两步法：在地震步【前】插 Static 通用步施加结构自重。previous='Initial' → Abaqus
         # 自动把该静力步插到 Initial 与地震步之间，地震步续接其静平衡状态。'off'(v1基线)则不插。
@@ -2973,6 +2985,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'reference_field_mode': (ffcfg or {}).get('reference_field_mode', 'global_upper'),  # 三边界参考场口径
             'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
             'initial_state_mode': (ffcfg or {}).get('initial_state_mode', 'raw'),  # fd 初态参考口径
+            'phase_origin_x': _meta_f((ffcfg or {}).get('phase_origin_x', 0.0)),  # 水平相位原点（跨域/跨软件对齐）
         }
         # ── v7：同侧一维场地放大基准 ff_theory（自动 QA 锚点） ──────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
@@ -3827,6 +3840,9 @@ def _add_crest_ref_for_freefield(base_model, geom, inst_name, logger):
     asm.Set(name='CREST_REF', nodes=asm.instances[inst_name].nodes.sequenceFromLabels([crest_node.label]))
     log_step(logger, u'[freefield] 坡顶参考点 CREST_REF 已建: x=%.1f(目标x=%.1f), y=%.1f',
              crest_node.coordinates[0], x_target, crest_node.coordinates[1])
+    if 'VALIDATION_UNDERGROUND' in asm.sets.keys():
+        log_step(logger, u'[freefield] 已存在工况显式地下检查点，跳过旧自动两点')
+        return
     # 解析端到端验证额外保留两个坡肩地下代表点，避免仅用地表点判定输入传播
     top_y = max(float(node.coordinates[1]) for node in top.nodes)
     depth_ref = max(float(geom.bedrock_thickness) * 0.25, 1.0)
@@ -4291,6 +4307,63 @@ def _write_geometry_validation_audit(model_name, part_name, inst_name, geom,
     return audit
 
 
+def _add_validation_point_sets(model_name, inst_name, points, mesh_size, logger, tolerance=None):
+    """把配置中的物理坐标映射到最近网格节点，并创建地下检查点输出集合。"""
+    if not isinstance(points, (list, tuple)) or not points:
+        return []
+    model = mdb.models[model_name]
+    assembly = model.rootAssembly
+    instance = assembly.instances[inst_name]
+    nodes = list(instance.nodes)
+    if not nodes:
+        raise RuntimeError('%s 无网格节点，无法创建地下检查点' % model_name)
+    mapped = []
+    used_labels = set()
+    max_distance = (max(0.0, float(tolerance)) if tolerance is not None
+                    else max(1.0e-6, 2.0 * float(mesh_size)))
+    for index, item in enumerate(points, start=1):
+        if not isinstance(item, dict) or item.get('x') is None or item.get('y') is None:
+            raise ValueError('run_cfg.validation_points[%d] 必须包含 x/y' % (index - 1))
+        tx = float(item['x'])
+        ty = float(item['y'])
+        nearest = min(nodes, key=lambda node: ((float(node.coordinates[0]) - tx) ** 2 +
+                                               (float(node.coordinates[1]) - ty) ** 2))
+        ax = float(nearest.coordinates[0])
+        ay = float(nearest.coordinates[1])
+        distance = math.sqrt((ax - tx) ** 2 + (ay - ty) ** 2)
+        if distance > max_distance:
+            raise RuntimeError('地下检查点%s最近节点距离%.6f m超过限值%.6f m' %
+                               (str(item.get('name') or index), distance, max_distance))
+        label = int(nearest.label)
+        if label in used_labels:
+            raise RuntimeError('地下检查点映射到重复节点%d，请调整目标坐标或网格' % label)
+        used_labels.add(label)
+        set_name = 'VALIDATION_UNDERGROUND_%d' % index
+        node_seq = instance.nodes.sequenceFromLabels((label,))
+        assembly.Set(name=set_name, nodes=node_seq)
+        mapped.append({
+            'name': str(item.get('name') or ('P%d' % index)),
+            'set_name': set_name,
+            'node_label': label,
+            'target_x': tx,
+            'target_y': ty,
+            'actual_x': ax,
+            'actual_y': ay,
+            'distance': distance,
+        })
+    all_nodes = instance.nodes.sequenceFromLabels(tuple(sorted(used_labels)))
+    assembly.Set(name='VALIDATION_UNDERGROUND', nodes=all_nodes)
+    text = json.dumps({'schema_version': 1, 'points': mapped}, ensure_ascii=False,
+                      indent=2, sort_keys=True)
+    if isinstance(text, bytes):
+        text = text.decode('utf-8')
+    with io.open(os.path.join(os.getcwd(), 'validation_point_map.json'), 'w', encoding='utf-8') as handle:
+        handle.write(text)
+    log_step(logger, '%s 地下检查点已创建: 数量=%d, 最大映射距离=%.6f m',
+             model_name, len(mapped), max(item['distance'] for item in mapped))
+    return mapped
+
+
 # ==========================================================
 #  主函数
 # ==========================================================
@@ -4405,7 +4478,10 @@ def main():
                 site=site, geom=geom_for_model, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,
                 surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)
         _write_geometry_validation_audit(base_model, part_name, inst_name, geom_for_model,
-                                        validation_geometry, logger)  # 建模后立即审计外形和节点集
+                                         validation_geometry, logger)  # 建模后立即审计外形和节点集
+        _add_validation_point_sets(base_model, inst_name, _run_cfg.get('validation_points'),
+                                   mesh_used, logger,
+                                   _run_cfg.get('validation_point_tolerance'))  # 可选验证点仅在工况显式配置时创建
 
         if tssi_cfg.get('enable'):  # ssi 场景: 在坡地基础模型上追加坡顶框架(Tie 耦合); build_models 会复制到各波
             add_frame_on_crest(base_model, geom_for_model, part_name, inst_name, logger)
@@ -4429,7 +4505,8 @@ def main():
                 tcfg=_time_cfg, fc_used=fc_resolved, ffcfg=_ff_cfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼
                 surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)),  # v7 表层几何 + v8 输出瘦身
                 critical_angle_check=bool(_run_cfg.get('critical_angle_check', True)),  # v8：临界角校验开关
-                elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v3：单元类型透传(CPE8R 时边界自动用二次一致权重)
+                elem_name=_mesh_cfg.get('elem', 'CPE4'),  # v3：单元类型透传(CPE8R 时边界自动用二次一致权重)
+                full_field_frequency=_run_cfg.get('full_field_frequency'))  # X验证可保存稀疏全场快照
             model_names = slope_model_names  # 待提交的模型名称
 
         if tssi_cfg.get('enable') and model_names:  # ssi 场景: 各波 SSI 模型追加框架层历史输出(步已建)

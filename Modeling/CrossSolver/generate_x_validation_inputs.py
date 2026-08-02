@@ -29,6 +29,13 @@ INCIDENCE_RAD = math.radians(INCIDENCE_DEG)
 GLL_MIN_SPACING_RATIO = 0.1726731646460114
 PULSE_Q_CENTER = 50.0
 CPML_DIAGNOSTIC_WIDTH = 100.0
+ABAQUS_PHASE_ORIGIN_X = PULSE_Q_CENTER / math.sin(INCIDENCE_RAD)
+ABAQUS_TAIL_SECONDS = T0
+WAVEFIELD_SNAPSHOTS = (
+    (0.30, 3000, "incident peak plane q=650 m, before it sweeps most of the main surface"),
+    (0.45, 4500, "incident peak plane q=950 m, just after it sweeps the main surface"),
+    (0.60, 6000, "incident peak plane q=1250 m, post-interaction scattered-wave stage"),
+)
 
 H = 100.0
 SLOPE_DEG = 60.0
@@ -180,6 +187,10 @@ def pulse_characteristics() -> dict:
         "acceleration_spectrum_peak_hz": math.sqrt(2.0) * F0,
         "acceleration_effective_band_5pct_hz": [active[0], active[-1]],
         "time_mapping": "t_common = t_specfem_output + 0.3 s",
+        "time_mapping_specfem": "t_common = t_specfem_output + 0.3 s",
+        "time_mapping_abaqus": "t_common = t_abaqus_output - 0.3 s",
+        "abaqus_phase_origin_x_m": ABAQUS_PHASE_ORIGIN_X,
+        "abaqus_tail_seconds": ABAQUS_TAIL_SECONDS,
         "amplitude_rule": "SPECFEM2D unit initial-field outputs are multiplied once by global_linear_scale; no channel-wise scaling",
     }
 
@@ -269,8 +280,25 @@ def build_parameter_table() -> dict:
             "ngllx": 5,
             "polynomial_degree": 4,
         })
+    cases["X001-A"] = {
+        "parameter_source": "H004",
+        "solver": "Abaqus/Standard",
+        "spatial_discretization": "CPE4R low-order finite element",
+        "time_integration": "implicit TRANSIENT_FIDELITY",
+        "has_cover": False,
+        "mesh_size": 4.0,
+        "mesh_auto": True,
+        "mesh_graded": True,
+        "dt": PUBLIC_DT,
+        "analysis_time": TOTAL_TIME + ABAQUS_TAIL_SECONDS,
+        "output_sample_stride": 1,
+        "phase_origin_x": ABAQUS_PHASE_ORIGIN_X,
+        "time_mapping": "t_common = t_abaqus_output - 0.3 s",
+        "validation_point_tolerance": 6.0,
+        "full_field_frequency": 50,
+    }
     return {
-        "schema": "x-cross-solver-parameters-1.0",
+        "schema": "x-cross-solver-parameters-1.1",
         "units": {"length": "m", "time": "s", "density": "kg/m3", "acceleration": "m/s2"},
         "physics": {"dimension": "2D", "kinematics": "plane strain", "constitutive": "linear elastic",
                     "incident_wave": "upgoing in-plane SV", "incidence_angle_from_vertical_deg": INCIDENCE_DEG},
@@ -301,6 +329,17 @@ def build_parameter_table() -> dict:
             "s_definition": "crest platform (x-xcrest)/H; slope 0..1; toe platform 1+(x-xtoe)/H",
             "fixed_surface_points": ["crest", "slope_midpoint", "toe"],
             "rock_checks": [[500.0, 300.0], [700.0, 300.0], [500.0, 500.0]],
+            "wavefield_snapshots": [
+                {
+                    "common_time_s": common_time,
+                    "incident_peak_plane_q_m": PULSE_Q_CENTER + BEDROCK["vs"] * common_time,
+                    "specfem_step": step,
+                    "specfem_actual_common_time_s": (step - 1) * CASE_CONFIG["X001-S"]["dt"],
+                    "abaqus_raw_time_s": common_time - (-T0),
+                    "physical_stage": stage,
+                }
+                for common_time, step, stage in WAVEFIELD_SNAPSHOTS
+            ],
             "public_sample_dt": PUBLIC_DT,
         },
         "cases": cases,
@@ -807,7 +846,8 @@ def summarize_run(case_dir: Path, params: dict) -> dict:
         "max_raw_acceleration": max(raw_peaks) if raw_peaks else None,
         "max_scaled_acceleration": (max(raw_peaks) * params["pulse"]["global_linear_scale"]
                                     if raw_peaks else None),
-        "wavefield_dump_count": len(list(output_dir.glob("wavefield*.bin"))),
+        "wavefield_dump_count": len([path for path in output_dir.glob("wavefield*.bin")
+                                      if path.name != "wavefield_grid_for_dumps.bin"]),
         "output_file_count": len([path for path in output_dir.iterdir() if path.is_file()]),
         "output_bytes": sum(path.stat().st_size for path in output_dir.iterdir() if path.is_file()),
         "incident_checks": incident_checks, "incident_gate": incident_gate,

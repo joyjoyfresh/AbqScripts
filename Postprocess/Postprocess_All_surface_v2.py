@@ -783,8 +783,8 @@ def extract_surface_acc(odb):
     return xs, ys, np.array(times, dtype=float), a1_mat, a2_mat
 
 
-def extract_validation_underground_acc(odb):  # 提取两个地下验证点的双分量时程
-    """返回验证点坐标和时程；旧 ODB 缺少集合时返回空字典。"""
+def extract_validation_underground_acc(odb):  # 提取地下验证点的双分量时程
+    """返回全部 ``VALIDATION_UNDERGROUND_*`` 点的坐标和时程；旧 ODB 缺少集合时返回空字典。"""
     def first_node(node_set):  # 兼容装配级节点集返回的嵌套 OdbMeshNodeArray
         node = node_set.nodes
         while not hasattr(node, 'coordinates'):
@@ -795,12 +795,16 @@ def extract_validation_underground_acc(odb):  # 提取两个地下验证点的�
 
     point_sets = []
     assembly_sets = getattr(odb.rootAssembly, 'nodeSets', {})
-    for name in ('VALIDATION_UNDERGROUND_1', 'VALIDATION_UNDERGROUND_2'):
+    point_names = sorted([str(name) for name in assembly_sets.keys()
+                          if str(name).startswith('VALIDATION_UNDERGROUND_')])
+    for name in point_names:
         if name in assembly_sets:
             point_sets.append((name, assembly_sets[name]))
     for iname in odb.rootAssembly.instances.keys():
         inst = odb.rootAssembly.instances[iname]
-        for name in ('VALIDATION_UNDERGROUND_1', 'VALIDATION_UNDERGROUND_2'):
+        inst_names = sorted([str(name) for name in inst.nodeSets.keys()
+                             if str(name).startswith('VALIDATION_UNDERGROUND_')])
+        for name in inst_names:
             if name not in [item[0] for item in point_sets] and name in inst.nodeSets.keys():
                 point_sets.append((name, inst.nodeSets[name]))
     if not point_sets:
@@ -823,7 +827,9 @@ def extract_validation_underground_acc(odb):  # 提取两个地下验证点的�
         times.append(float(frame.frameValue))
         rows_h.append(frame_h)
         rows_v.append(frame_v)
-    return {'time': np.asarray(times, dtype=float), 'x': np.asarray(xs, dtype=float),
+    return {'time': np.asarray(times, dtype=float),
+            'name': np.asarray([name for name, _nset in sorted(point_sets)]),
+            'x': np.asarray(xs, dtype=float),
             'y': np.asarray(ys, dtype=float), 'acc_h': np.asarray(rows_h, dtype=float).T,
             'acc_v': np.asarray(rows_v, dtype=float).T}
 
@@ -998,6 +1004,7 @@ def _put_raw_timeseries_payload(payload, manifest, raw_timeseries):  # 写入原
         suffix = _npz_safe_record(record)
         prefix = 'raw_%s_' % suffix
         for field in ('time', 'x', 'y', 'acc_h', 'acc_v', 'input_acc',
+                      'underground_name',
                       'underground_time', 'underground_x', 'underground_y',
                       'underground_acc_h', 'underground_acc_v', 'energy_time'):
             value = data.get(field)
@@ -1332,6 +1339,7 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
     RAW_TIMESERIES[record] = {
         'time': t, 'x': xs, 'y': ys, 'acc_h': a1_mat, 'acc_v': a2_mat,
         'input_acc': a_in_pad,
+        'underground_name': underground.get('name'),
         'underground_time': underground.get('time'), 'underground_x': underground.get('x'),
         'underground_y': underground.get('y'), 'underground_acc_h': underground.get('acc_h'),
         'underground_acc_v': underground.get('acc_v'),

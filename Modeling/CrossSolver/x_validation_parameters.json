@@ -12,6 +12,23 @@
     "x002_limit": "the built-in analytical correction uses the first bedrock material; X002 comparisons require a predeclared boundary-safe time window"
   },
   "cases": {
+    "X001-A": {
+      "analysis_time": 2.3,
+      "dt": 0.001,
+      "full_field_frequency": 50,
+      "has_cover": false,
+      "mesh_auto": true,
+      "mesh_graded": true,
+      "mesh_size": 4.0,
+      "output_sample_stride": 1,
+      "parameter_source": "H004",
+      "phase_origin_x": 193.18516525781368,
+      "solver": "Abaqus/Standard",
+      "spatial_discretization": "CPE4R low-order finite element",
+      "time_integration": "implicit TRANSIENT_FIDELITY",
+      "time_mapping": "t_common = t_abaqus_output - 0.3 s",
+      "validation_point_tolerance": 6.0
+    },
     "X001-S": {
       "dt": 0.0001,
       "has_cover": false,
@@ -194,7 +211,33 @@
         500.0
       ]
     ],
-    "s_definition": "crest platform (x-xcrest)/H; slope 0..1; toe platform 1+(x-xtoe)/H"
+    "s_definition": "crest platform (x-xcrest)/H; slope 0..1; toe platform 1+(x-xtoe)/H",
+    "wavefield_snapshots": [
+      {
+        "abaqus_raw_time_s": 0.6,
+        "common_time_s": 0.3,
+        "incident_peak_plane_q_m": 650.0,
+        "physical_stage": "incident peak plane q=650 m, before it sweeps most of the main surface",
+        "specfem_actual_common_time_s": 0.2999,
+        "specfem_step": 3000
+      },
+      {
+        "abaqus_raw_time_s": 0.75,
+        "common_time_s": 0.45,
+        "incident_peak_plane_q_m": 950.0,
+        "physical_stage": "incident peak plane q=950 m, just after it sweeps the main surface",
+        "specfem_actual_common_time_s": 0.4499,
+        "specfem_step": 4500
+      },
+      {
+        "abaqus_raw_time_s": 0.8999999999999999,
+        "common_time_s": 0.6,
+        "incident_peak_plane_q_m": 1250.0,
+        "physical_stage": "incident peak plane q=1250 m, post-interaction scattered-wave stage",
+        "specfem_actual_common_time_s": 0.5999,
+        "specfem_step": 6000
+      }
+    ]
   },
   "physics": {
     "constitutive": "linear elastic",
@@ -206,6 +249,8 @@
   "pulse": {
     "abaqus_acceleration_file": "Wave/Impulse/Acceleration/ricker_displacement_derived_acceleration_4Hz_0p1g.txt",
     "abaqus_acceleration_sha256": "c09bef8643c0a63be2bd3b66d075453e4d18ef7ee5049f67ed39f27c85cb372f",
+    "abaqus_phase_origin_x_m": 193.18516525781368,
+    "abaqus_tail_seconds": 0.3,
     "acceleration_effective_band_5pct_hz": [
       1.6972,
       11.0916
@@ -225,9 +270,11 @@
     "scaled_sv_vector_peak_m_s2": 0.980665,
     "scaled_sv_vertical_abs_peak_m_s2": 0.2538147788654635,
     "time_mapping": "t_common = t_specfem_output + 0.3 s",
+    "time_mapping_abaqus": "t_common = t_abaqus_output - 0.3 s",
+    "time_mapping_specfem": "t_common = t_specfem_output + 0.3 s",
     "unscaled_acceleration_peak_m_s2": 947.4820225045784
   },
-  "schema": "x-cross-solver-parameters-1.0",
+  "schema": "x-cross-solver-parameters-1.1",
   "units": {
     "acceleration": "m/s2",
     "density": "kg/m3",
