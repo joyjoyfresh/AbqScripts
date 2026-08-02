@@ -2,7 +2,7 @@
 """运行 X001-A，并在完成后与既有 X001-S 作统一口径比较。
 
 运行形式：
-    python Batch/Autorun_x001_a.py [输出根目录]
+    python Run/Auto_ch4/Autorun_x001_a.py [输出根目录]
 
 缺省输出根目录为 ``Run/cross_solver_X/abaqus``，工况目录固定为 ``X001-A``。
 本入口保留 ODB、求解日志、原始时程和全场快照，不执行过程文件清理。
@@ -19,15 +19,15 @@ import sys
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 RUN_HELPER = os.path.join(REPO_ROOT, 'Run', 'Auto_ch4', 'Autorun_ch4_sp_02_H_v1.py')
-PARAMETER_FILE = os.path.join(REPO_ROOT, 'Modeling', 'CrossSolver', 'x_validation_parameters.json')
+PARAMETER_FILE = os.path.join(REPO_ROOT, 'Run', 'Auto_ch4', 'x_validation_parameters.json')
 MODEL_SCRIPT = os.path.join(REPO_ROOT, 'Modeling', 'slope_frame_ssi_full_v2.py')
 SURFACE_POSTPROCESS = os.path.join(REPO_ROOT, 'Postprocess', 'Postprocess_All_surface_v2.py')
 WAVEFIELD_POSTPROCESS = os.path.join(
-    REPO_ROOT, 'Postprocess', 'CrossSolver', 'extract_x001_a_wavefield.py')
+    REPO_ROOT, 'Run', 'Auto_ch4', 'extract_x001_a_wavefield.py')
 COMPARISON_SCRIPT = os.path.join(
-    REPO_ROOT, 'Postprocess', 'CrossSolver', 'compare_x001_a_s.py')
+    REPO_ROOT, 'Run', 'Auto_ch4', 'compare_x001_a_s.py')
 DEFAULT_ROOT = os.path.join(REPO_ROOT, 'Run', 'cross_solver_X', 'abaqus')
 
 
@@ -53,9 +53,9 @@ def mark_evaluated(output_root):
     now = datetime.datetime.now().isoformat()
     case_entry['status'] = 'evaluated'
     case_entry['evaluation_result'] = (
-        'reference_lines_met'
-        if bool(metrics.get('reference_lines_met'))
-        else 'reference_lines_not_met'
+        'formal_gates_met'
+        if bool(metrics.get('formal_gates_met'))
+        else 'formal_gates_not_met'
     )
     case_entry['evaluation_file'] = os.path.relpath(metrics_path, output_root).replace(os.sep, '/')
     case_entry['updated_at'] = now

@@ -27,3 +27,4 @@ Run/evaluation/*
 !Run/Auto_ch*/
 Run/Auto_ch*/*
 !Run/Auto_ch*/*.py
+!Run/Auto_ch*/*.json
