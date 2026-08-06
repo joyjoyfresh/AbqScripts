@@ -206,22 +206,32 @@ def predict_field(model, X):
 
 
 def weighted_complex_error(truth, prediction, mask, weight):
-    weights = np.asarray(weight, dtype=float)[:, None]
-    valid = mask & np.isfinite(truth.real) & np.isfinite(prediction.real)
-    denominator = np.sum(weights * valid * np.abs(truth) ** 2)
+    weights = np.broadcast_to(np.asarray(weight, dtype=float)[:, None], truth.shape)
+    # 用布尔索引取有效像素，避免掩码外非有限值经 0×inf 产生 NaN 污染求和
+    valid = mask & np.isfinite(truth) & np.isfinite(prediction)
+    if not np.any(valid):
+        return float("nan")
+    w = weights[valid]
+    t = truth[valid]
+    p = prediction[valid]
+    denominator = np.sum(w * np.abs(t) ** 2)
     if denominator <= 0.0:
         return float("nan")
-    return float(np.sqrt(np.sum(weights * valid * np.abs(prediction - truth) ** 2) / denominator))
+    return float(np.sqrt(np.sum(w * np.abs(p - t) ** 2) / denominator))
 
 
 def circular_phase_error(truth, prediction, mask, weight):
-    weights = np.asarray(weight, dtype=float)[:, None]
-    valid = mask & np.isfinite(truth.real) & np.isfinite(prediction.real)
-    denominator = np.sum(weights * valid)
+    weights = np.broadcast_to(np.asarray(weight, dtype=float)[:, None], truth.shape)
+    # 用布尔索引取有效像素，避免掩码外非有限值经 0×inf/0×NaN 污染求和
+    valid = mask & np.isfinite(truth) & np.isfinite(prediction)
+    if not np.any(valid):
+        return float("nan")
+    w = weights[valid]
+    difference = np.angle(prediction[valid] * np.conj(truth[valid]))
+    denominator = np.sum(w)
     if denominator <= 0.0:
         return float("nan")
-    difference = np.angle(prediction * np.conj(truth))
-    return float(np.degrees(np.sqrt(np.sum(weights * valid * difference ** 2) / denominator)))
+    return float(np.degrees(np.sqrt(np.sum(w * difference ** 2) / denominator)))
 
 
 def log_amplitude_rmse(truth, prediction, mask):
