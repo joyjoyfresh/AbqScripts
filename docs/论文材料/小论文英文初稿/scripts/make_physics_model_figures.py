@@ -1,19 +1,26 @@
 # -*- coding: utf-8 -*-
-"""小论文物理与模型插图生成脚本（Fig. 1—6）。
+"""Figure generation script for English draft (Figs. 1–6).
 
-从 Run/ch4_sp_analysis_dev、Run/ch4_sp_surrogate_dev、Run/ch4_sp_blind_B 读取
-规范分析产物，生成论文正文六张图：
-  fig1_method_schematic.png        方法与复频响定义示意（模型+G_h分解+重构链）；
-  fig2_case_matrix_pipeline.png    工况矩阵与验证流水线；
-  fig3_fields_homo_vs_layered.png  均质(H004)与层状(P061)幅值—相位—群时延场对比；
-  fig4_sp_h1_nonmonotonicity.png   SP-H1：峰值幅值非单调切片与主峰频率迁移；
-  fig5_sp_h2_chi_scaling.png       SP-H2：覆盖层修正量对 χ 的标度；
-  fig6_cv_blind_error_by_rv.png    CV 与盲测逐例误差按 rv 分层。
-输出与本脚本同目录；运行：python make_physics_model_figures.py
+Reads standardized data products from:
+  Run/ch4_sp_analysis_dev
+  Run/ch4_sp_surrogate_dev
+  Run/ch4_sp_blind_B
+
+Generates 6 figures for the paper:
+  fig1_method_schematic.png        Method overview (model + decomposition + surrogate + reconstruction chain)
+  fig2_case_matrix_pipeline.png    Parameter matrix and staged validation pipeline
+  fig3_fields_homo_vs_layered.png  Joint amplitude-phase-delay fields (homogeneous vs layered)
+  fig4_sp_h1_nonmonotonicity.png   SP-H1: Non-monotonicity and peak-frequency migration
+  fig5_sp_h2_chi_scaling.png       SP-H2: Scaling of cover-layer correction with chi
+  fig6_cv_blind_error_by_rv.png    CV and blind test errors stratified by rv
+
+Output directory: ../images/
+Usage: python make_physics_model_figures.py
 """
 
 import csv
 import os
+import sys
 
 import numpy as np
 import matplotlib
@@ -22,14 +29,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# scripts -> 小论文英文初稿 -> 论文材料 -> docs -> REPO_ROOT
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR))))
 ANALYSIS = os.path.join(REPO_ROOT, "Run", "ch4_sp_analysis_dev")
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(CURRENT_DIR), "images")
 
 SLOPES = [15.0, 30.0, 45.0, 60.0]
 RVS = [0.30, 0.45, 0.60, 0.75]
 DHS = [0.20, 0.60, 1.00, 1.40]
-# B 池参数（计划 §4.8），用于盲测分层
+# B-pool parameters (Plan §4.8)
 B_PARAMS = {
     "B001": (22.5, 0.40, 0.375), "B002": (22.5, 0.40, 0.675),
     "B003": (22.5, 0.80, 0.525), "B004": (22.5, 1.20, 0.375),
@@ -46,175 +55,220 @@ def read_csv(path):
 
 
 def fig1_method_schematic():
-    """方法与复频响定义示意图。"""
+    """Method overview and definition schematic."""
     fig = plt.figure(figsize=(11.5, 5.6))
     gs = fig.add_gridspec(1, 2, width_ratios=[1.05, 1.25], wspace=0.18)
 
-    # (a) 模型示意：成层坡地 + 斜入射 + 地表观测与一维参考
+    # (a) Model schematic
     ax = fig.add_subplot(gs[0])
     ax.set_xlim(0, 10)
     ax.set_ylim(0, 6.4)
     ax.set_aspect("equal")
     ax.axis("off")
-    # 基岩与覆盖层（坡角示意 60°，坡高 h）
+    # Bedrock and cover
     rock = Polygon([(0, 0), (10, 0), (10, 2.2), (4.3, 2.2), (5.6, 4.4), (0, 4.4)],
                    closed=True, facecolor="0.82", edgecolor="k", lw=1.0)
     cover = Polygon([(0, 4.4), (5.6, 4.4), (6.8, 6.4), (0, 6.4)],
                     closed=True, facecolor="0.62", edgecolor="k", lw=1.0)
     ax.add_patch(rock)
     ax.add_patch(cover)
-    ax.text(7.6, 1.0, "bedrock\n$V_{s,b}$", ha="center", fontsize=9)
-    ax.text(2.6, 5.5, "cover layer\n$V_{s,c}$, thickness $d$", ha="center", fontsize=9)
-    ax.text(6.35, 5.55, "$h$", fontsize=10)
+    ax.text(7.6, 1.0, "Bedrock\n$V_{s,b}$", ha="center", fontsize=9.5)
+    ax.text(2.6, 5.5, "Cover layer\n$V_{s,c}$, thickness $d$", ha="center", fontsize=9.5)
+    ax.text(6.35, 5.55, "$h$", fontsize=10.5)
     ax.annotate("", xy=(6.82, 6.42), xytext=(5.62, 4.42),
                 arrowprops=dict(arrowstyle="-", color="k", lw=0.8))
-    # 坡角标注
+    # Slope angle
     ax.plot([5.6, 6.6], [4.4, 4.4], "k:", lw=0.8)
-    ax.text(6.35, 4.55, "$i$", fontsize=10)
-    # 斜入射 SV 波
+    ax.text(6.35, 4.55, "$i$", fontsize=10.5)
+    # Inclined SV wave
     arrow = FancyArrowPatch((1.1, 0.35), (2.6, 2.6), arrowstyle="-|>", mutation_scale=14,
                             color="tab:blue", lw=1.6)
     ax.add_patch(arrow)
-    ax.text(1.0, 1.9, "SV, $15^\\circ$\nfrom vertical", fontsize=8, color="tab:blue")
-    # 地表观测点与归一化坐标
+    ax.text(1.0, 1.9, "SV wave, 15$^\circ$", fontsize=8.5, color="tab:blue")
+    # Surface receivers
     for sx, lab in [(1.2, "$s<0$"), (6.2, "$s=0$"), (8.6, "$s>0$")]:
         yy = 4.4 if sx < 5.6 else (4.4 + (sx - 5.6) * (2.0 / 1.2) if sx <= 6.8 else 6.4)
         ax.plot(sx, yy, "ko", ms=3.5)
     ax.plot(6.8, 6.4, "ko", ms=5, mfc="tab:red")
-    ax.text(6.95, 6.25, "crest ($s=0$)", fontsize=8)
-    ax.text(8.7, 6.28, "surface receivers, $s\\in[-4,4]$", fontsize=8, ha="center")
-    # 一维自由场参考柱
+    ax.text(6.95, 6.25, "Crest ($s=0$)", fontsize=8.5)
+    ax.text(8.7, 6.28, "Surface array, $s\in[-4,4]$", fontsize=8.5, ha="center")
+    # 1-D free-field reference column
     ax.add_patch(Rectangle((0.25, 0.3), 0.55, 4.0, fill=False, edgecolor="tab:green",
                            ls="--", lw=1.2))
-    ax.text(0.52, 0.12, "1-D free field\n(same side)", fontsize=7.5, ha="center", color="tab:green")
-    ax.set_title("(a) Two-layered slope model and observation layout", fontsize=10)
+    ax.text(0.52, 0.12, "Same-side 1-D\nfree-field column", fontsize=8, ha="center", color="tab:green")
+    ax.set_title("(a) Two-layered slope under inclined SV incidence", fontsize=10.5)
 
-    # (b) 复频响分解与重构链
+    # (b) Complex FRF chain
     ax = fig.add_subplot(gs[1])
     ax.set_xlim(0, 12)
-    ax.set_ylim(0, 10)
+    ax.set_ylim(10, 0)
     ax.axis("off")
 
-    def box(x, y, w, h, text, fc="0.92"):
-        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.06",
-                                    facecolor=fc, edgecolor="k", lw=0.9))
-        ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=8.5)
+    def box(xy, w, h, text, fc="0.95", ec="0.3", fs=8.5, sub=""):
+        p = FancyBboxPatch(xy, w, h, boxstyle="round,pad=0.25",
+                           facecolor=fc, edgecolor=ec, lw=1.0)
+        ax.add_patch(p)
+        cx, cy = xy[0] + w / 2, xy[1] + h / 2
+        if sub:
+            ax.text(cx, cy - 0.3, text, ha="center", va="center", fontsize=fs, weight="bold")
+            ax.text(cx, cy + 0.38, sub, ha="center", va="center", fontsize=fs - 1.2, color="0.3")
+        else:
+            ax.text(cx, cy, text, ha="center", va="center", fontsize=fs)
 
-    def arrow(p, q):
-        ax.add_patch(FancyArrowPatch(p, q, arrowstyle="-|>", mutation_scale=12, lw=1.0))
+    def arrow(xy1, xy2, label=""):
+        p = FancyArrowPatch(xy1, xy2, arrowstyle="-|>", mutation_scale=11, color="0.3", lw=1.2)
+        ax.add_patch(p)
+        if label:
+            mx, my = (xy1[0] + xy2[0]) / 2, (xy1[1] + xy2[1]) / 2
+            ax.text(mx, my - 0.22, label, ha="center", fontsize=7.5, color="0.25")
 
-    box(0.2, 8.2, 3.2, 1.2, "broadband multi-sine\n$g(t)$, 0.1g, 0.5-12 Hz", fc="tab:blue")
-    ax.text(1.8, 9.05, "", fontsize=8)
-    box(0.2, 5.6, 3.2, 1.2, "2-D FE slope model\n(Abaqus, CPE4R)")
-    box(4.4, 5.6, 3.2, 1.2, "surface spectra\n$\\widehat A_h^{2D}(f,s)$")
-    box(0.2, 3.0, 3.2, 1.2, "1-D free field\n$\\widehat A_h^{1D}(f)$", fc="tab:green")
-    box(4.4, 3.0, 3.2, 1.2, "complex FRF\n$G_h(f,s)=\\widehat A^{2D}/\\widehat A^{1D}$", fc="tab:orange")
-    box(8.4, 3.9, 3.3, 1.0, "amplitude $A_h=|G_h|$")
-    box(8.4, 2.5, 3.3, 1.0, "phase $\\Phi_h$, $\\tau_g$, $k_{app}$")
-    box(4.4, 0.4, 3.2, 1.2, "surrogate\nPOD-GPR: [$i$, $d/h$, $r_v$] $\\to$ $G_h$", fc="tab:purple")
-    box(8.4, 0.4, 3.3, 1.2, "real-wave reconstruction\n$\\widehat A^{2D}_g=G_h\\,\\widehat A^{1D}_g$\n→ PGA, TAF, spectra", fc="tab:red")
-    arrow((1.8, 8.2), (1.8, 6.8))
-    arrow((3.4, 6.2), (4.4, 6.2))
-    arrow((1.8, 5.6), (1.8, 4.2))
-    arrow((3.4, 3.6), (4.4, 3.6))
-    arrow((7.6, 3.9), (8.4, 4.35))
-    arrow((7.6, 3.3), (8.4, 3.0))
-    arrow((6.0, 3.0), (6.0, 1.6))
-    arrow((7.6, 1.0), (8.4, 1.0))
-    ax.set_title("(b) Complex FRF: definition, decomposition, surrogate and reconstruction",
-                 fontsize=10)
+    box((0.2, 0.5), 3.2, 1.8, "Broadband excitation\n$G_{1b}$ (0.5–12 Hz multi-sine)",
+        fc="#e8f4f8", ec="#2b7bba", fs=8.5)
+    box((4.4, 0.5), 3.2, 1.8, "Abaqus/Standard\n2-D layered FE slope",
+        fc="#e8f4f8", ec="#2b7bba", fs=8.5)
+    arrow((3.4, 1.4), (4.4, 1.4))
+
+    box((8.6, 0.5), 3.2, 1.8, "Complex FRF $G_h(f,s)$\n$=\\hat{A}_{2D}(f,s)/\\hat{A}_{1D}(f,s)$",
+        fc="#fff2e6", ec="#d96b27", fs=9)
+    arrow((7.6, 1.4), (8.6, 1.4), "Surface / 1D")
+
+    box((4.4, 3.6), 3.2, 1.6, "Amplitude $|G_h|$\n$\\ln|G_h|$\\to topographic amp.",
+        fc="#f0f7e6", ec="#5a8a27", fs=8)
+    box((8.6, 3.6), 3.2, 1.6, "Phase $\\Phi_h$\nUnwrapped phase & $\\tau_g$\\to delay",
+        fc="#f0f7e6", ec="#5a8a27", fs=8)
+    arrow((9.4, 2.3), (6.0, 3.6))
+    arrow((10.2, 2.3), (10.2, 3.6))
+
+    box((4.4, 6.6), 3.2, 1.4, "POD-GPR surrogate\n$(i, d/h, r_v) \\to \\hat{G}_h(f,s)$",
+        fc="#f3e8f8", ec="#8a3ab9", fs=8.5)
+    arrow((6.0, 5.2), (6.0, 6.6))
+    arrow((10.2, 5.2), (6.8, 6.6))
+
+    box((8.6, 8.2), 3.2, 1.6, "Real-record reconstruction\n$\\hat{a}_{2D}(t,s)=\\mathcal{F}^{-1}[\\hat{G}_h\\cdot\\mathcal{F}(a_{1D})]$",
+        fc="#fce8e6", ec="#c93b2b", fs=8)
+    box((4.4, 8.4), 3.2, 1.0, "Site bedrock ground\nmotion $a_0(t)$",
+        fc="#f5f5f5", ec="0.5", fs=8)
+    arrow((6.0, 8.0), (6.0, 8.4))
+    arrow((6.0, 6.6), (6.0, 8.0))
+    arrow((7.6, 8.9), (8.4, 8.9))
+    ax.set_title("(b) Definition, decomposition, surrogate, and reconstruction",
+                 fontsize=10.5)
 
     fig.tight_layout()
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig1_method_schematic.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig2_case_matrix_pipeline():
-    """工况矩阵与验证流水线。"""
+    """Case matrix and staged pipeline."""
     d = np.load(os.path.join(ANALYSIS, "complex_frf_dataset.npz"), allow_pickle=False)
     X = d["X"]
     ids = [str(s) for s in d["case_ids"]]
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.5, 8.2),
                                    gridspec_kw={"height_ratios": [1.15, 1.0]})
-    # (a) 参数矩阵：P 网格 + H 基线 + B 盲测点
     cmap = plt.get_cmap("viridis")
-    # 同一(d/h,rv)网格点上叠放四个坡角，按坡角水平错开避免重叠
-    dodge = {slope: (k - 1.5) * 0.035 for k, slope in enumerate(SLOPES)}
-    for k, slope in enumerate(SLOPES):
-        sel = [j for j, cid in enumerate(ids)
-               if cid.startswith("P") and abs(X[j, 0] - slope) < 1e-6]
-        ax1.scatter(X[sel, 1] + dodge[slope], X[sel, 2], s=64, color=cmap(k / 3.0),
-                    edgecolors="k", linewidths=0.6, label="P, $i$=%d$^\\circ$" % slope)
-    # H 基线（无覆盖层，画在底部轴线上示意）
-    hs = [j for j, cid in enumerate(ids) if cid.startswith("H")]
-    ax1.scatter([X[j, 1] for j in hs], [-0.055] * len(hs), marker="^", s=70,
-                color="none", edgecolors="k", linewidths=1.2,
-                label="H homogeneous baselines")
-    # B 盲测点
-    bx = [B_PARAMS[c][1] for c in sorted(B_PARAMS)]
-    br = [B_PARAMS[c][2] for c in sorted(B_PARAMS)]
-    ax1.scatter(bx, br, marker="*", s=190, color="tab:red", edgecolors="k",
-                linewidths=0.7, label="B blind test (unseen)")
-    ax1.set_xlabel("thickness ratio $d/h$")
-    ax1.set_ylabel("velocity ratio $r_v$")
-    ax1.set_xlim(-0.08, 1.55)
-    ax1.set_ylim(-0.12, 0.85)
-    ax1.legend(fontsize=8, ncol=3, frameon=False)
-    ax1.set_title("(a) Parameter matrix: 64 development cases (P), 4 homogeneous baselines (H), "
-                  "12 blind cases (B)", fontsize=10)
+    slope_colors = {15.0: cmap(0.1), 30.0: cmap(0.38), 45.0: cmap(0.68), 60.0: cmap(0.92)}
+    dodge = {15.0: -0.015, 30.0: -0.005, 45.0: 0.005, 60.0: 0.015}
 
-    # (b) 验证与建模流水线
-    ax2.set_xlim(0, 12)
-    ax2.set_ylim(0, 6)
+    for i_case, cid in enumerate(ids):
+        if cid.startswith("P"):
+            sl, dh, rv = X[i_case, 0], X[i_case, 1], X[i_case, 2]
+            ax1.scatter(dh + dodge[sl], rv, color=slope_colors[sl],
+                        s=52, edgecolors="k", lw=0.6, zorder=3)
+    for sl in SLOPES:
+        ax1.scatter(0.0 + dodge[sl], 1.0, color=slope_colors[sl], marker="s",
+                    s=60, edgecolors="k", lw=0.8, zorder=3)
+    for bname, (sl, dh, rv) in B_PARAMS.items():
+        ax1.scatter(dh, rv, marker="^", s=70, facecolor="tab:red",
+                    edgecolors="k", lw=0.9, zorder=4)
+        ax1.text(dh + 0.02, rv + 0.012, bname, fontsize=7, color="tab:red", weight="bold")
+
+    handles = [
+        plt.Line2D([], [], marker="o", color="w", mfc=slope_colors[sl], ms=8,
+                   mec="k", label="$i=%.0f^\\circ$" % sl)
+        for sl in SLOPES
+    ]
+    handles.append(plt.Line2D([], [], marker="s", color="w", mfc="0.6", ms=8,
+                              mec="k", label="Homogeneous baseline H ($d/h=0$)"))
+    handles.append(plt.Line2D([], [], marker="^", color="w", mfc="tab:red", ms=8,
+                              mec="k", label="Blind combination B (12 cases)"))
+    ax1.legend(handles=handles, loc="upper right", fontsize=8, framealpha=0.9)
+    ax1.set_xlabel("Cover-layer thickness ratio $d/h$", fontsize=9.5)
+    ax1.set_ylabel("Velocity ratio $r_v = V_{s,c}/V_{s,b}$", fontsize=9.5)
+    ax1.set_xlim(-0.08, 1.52)
+    ax1.set_ylim(0.24, 1.08)
+    ax1.grid(True, ls=":", alpha=0.5)
+    ax1.set_title("(a) Parameter matrix: 64 development cases P ($4\\times 4\\times 4$) "
+                  "+ 4 homogeneous baselines H + 12 blind cases B", fontsize=10.5)
+
+    ax2.set_xlim(0, 11)
+    ax2.set_ylim(0, 6.5)
     ax2.axis("off")
 
-    def stage(x, y, w, h, title, detail, fc):
-        ax2.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.05",
-                                     facecolor=fc, edgecolor="k", lw=0.9))
-        ax2.text(x + w / 2, y + h - 0.28, title, ha="center", va="top",
-                 fontsize=8.5, weight="bold")
-        ax2.text(x + w / 2, y + h - 0.55, detail, ha="center", va="top", fontsize=7.2)
+    def pbox(xy, w, h, title, sub="", fc="#f2f5f9", ec="#3b6998"):
+        p = FancyBboxPatch(xy, w, h, boxstyle="round,pad=0.2", facecolor=fc, edgecolor=ec, lw=1.0)
+        ax2.add_patch(p)
+        cx, cy = xy[0] + w / 2, xy[1] + h / 2
+        if sub:
+            ax2.text(cx, cy + 0.22, title, ha="center", va="center", fontsize=8, weight="bold")
+            ax2.text(cx, cy - 0.25, sub, ha="center", va="center", fontsize=7, color="0.25")
+        else:
+            ax2.text(cx, cy, title, ha="center", va="center", fontsize=8)
 
-    def link(p, q, label=None):
-        ax2.add_patch(FancyArrowPatch(p, q, arrowstyle="-|>", mutation_scale=12, lw=1.1))
+    def link(p1, p2, label=""):
+        p = FancyArrowPatch(p1, p2, arrowstyle="-|>", mutation_scale=10, color="0.35", lw=1.0)
+        ax2.add_patch(p)
         if label:
-            ax2.text((p[0] + q[0]) / 2, (p[1] + q[1]) / 2 + 0.16, label,
-                     ha="center", fontsize=7.2, color="0.25")
+            mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+            ax2.text(mx, my + 0.18, label, ha="center", fontsize=7, color="0.3")
 
-    stage(0.15, 4.1, 2.5, 1.5, "V series (5)", "mesh / tail / domain\nsingle-factor checks", "tab:blue")
-    stage(3.25, 4.1, 2.5, 1.5, "X series (5)", "Abaqus vs SPECFEM2D\ncross-software gates", "tab:blue")
-    stage(6.35, 4.1, 2.5, 1.5, "H + P (68)", "broadband identification\namplitude-phase analysis", "tab:green")
-    stage(9.45, 4.1, 2.4, 1.5, "Model lock", "5-fold CV, POD-GPR\nhash recorded", "tab:orange")
-    stage(3.25, 0.7, 2.5, 1.5, "B blind (12)", "one-shot test on unseen\nintermediate combos", "tab:red")
-    stage(6.35, 0.7, 2.5, 1.5, "C loop (10)", "EQ01-03 reconstruction\nvs direct FEM truth", "tab:red")
-    link((2.65, 4.85), (3.25, 4.85), "gate")
-    link((5.75, 4.85), (6.35, 4.85), "gate")
+    pbox((0.2, 4.0), 2.2, 1.7, "Stage 1: Config checks", "P061 baseline + V001–V004\n(mesh / tail / domain)",
+         fc="#e6f2ff", ec="#1f77b4")
+    pbox((2.8, 4.0), 2.2, 1.7, "Stage 2: Cross-software", "X001–X002\nAbaqus vs SPECFEM2D\n(4 Hz Ricker gates)",
+         fc="#e6f2ff", ec="#1f77b4")
+    link((2.4, 4.85), (2.8, 4.85), "passed")
+
+    pbox((5.4, 4.0), 2.2, 1.7, "Stage 3: Physics laws", "64 layered cases (P)\nDual-channel + SP-H1/H2\n(non-monot. / $\\chi$ scaling)",
+         fc="#fff3e6", ec="#ff7f0e")
+    link((5.0, 4.85), (5.4, 4.85), "confidence")
+
+    pbox((8.0, 4.0), 2.7, 1.7, "Stage 4: Surrogate", "POD-GPR vs Ridge/NN\n5-fold CV (SP-H3)\nlocked hyperparameters",
+         fc="#f0e6ff", ec="#9467bd")
+    link((7.6, 4.85), (8.0, 4.85), "dataset")
+
+    pbox((3.0, 0.6), 2.7, 1.7, "Stage 5: Blind test", "12 unseen combos (B)\none-shot evaluation\nno retuning",
+         fc="#f9e6eb", ec="#d62728")
+    pbox((6.4, 0.6), 3.0, 1.7, "Stage 6: Real-wave closed loop", "10 C cases (EQ01–03)\ntime hist. / PGA / TAF / PSA\nvs direct FE (SP-H4)",
+         fc="#e6f9ec", ec="#2ca02c")
+
     link((8.85, 4.85), (9.45, 4.85))
     ax2.add_patch(FancyArrowPatch((10.65, 4.1), (4.5, 2.2), arrowstyle="-|>",
                                   mutation_scale=12, lw=1.1,
                                   connectionstyle="arc3,rad=0.25"))
-    ax2.text(8.2, 3.0, "locked model,\nno re-tuning", fontsize=7.2, color="0.25", ha="center")
+    ax2.text(8.2, 3.0, "locked model\nno retuning", fontsize=7.5, color="0.25", ha="center")
     link((5.75, 1.45), (6.35, 1.45), "locked model")
-    ax2.set_title("(b) Validation and modelling pipeline (gates per master plan §8)", fontsize=10)
+    ax2.set_title("(b) Validation, surrogate modelling, and closed-loop pipeline", fontsize=10.5)
 
     fig.tight_layout()
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig2_case_matrix_pipeline.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig3_fields_homo_vs_layered():
-    """H004 均质 vs P061 层状：幅值—相位—群时延场。"""
+    """Homogeneous baseline H004 vs layered P061 joint fields."""
     d = np.load(os.path.join(ANALYSIS, "complex_frf_dataset.npz"), allow_pickle=False)
     ids = [str(s) for s in d["case_ids"]]
     freq = d["frequency_hz"]
     s = d["s"]
     F, S = np.meshgrid(freq, s, indexing="ij")
-    rows = [("H004", "Homogeneous H004 (60$^\\circ$ bedrock)"),
-            ("P061", "Layered P061 (60$^\\circ$, d/h=1.40, $r_v$=0.30)")]
+    rows = [("H004", "Homogeneous baseline H004 ($i=60^\\circ$)"),
+            ("P061", "Layered configuration P061 ($i=60^\\circ, d/h=1.40, r_v=0.30$)")]
     fig, axes = plt.subplots(2, 3, figsize=(12.5, 6.4))
     for r, (cid, title) in enumerate(rows):
         k = ids.index(cid)
@@ -241,14 +295,15 @@ def fig3_fields_homo_vs_layered():
     fig.suptitle("Amplitude-phase-group-delay joint fields: homogeneous vs layered slope "
                  "(masked where invalid)", fontsize=10.5)
     fig.tight_layout(rect=[0, 0, 1, 0.965])
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig3_fields_homo_vs_layered.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig4_sp_h1():
-    """SP-H1：峰值幅值随 d/h 的非单调切片 + rv=0.30 主峰频率迁移。"""
+    """SP-H1: Peak amplitude non-monotonicity and peak-frequency migration."""
     rows = read_csv(os.path.join(ANALYSIS, "case_metrics.csv"))
     grid_amp, grid_hz = {}, {}
     for r in rows:
@@ -265,7 +320,6 @@ def fig4_sp_h1():
             ls = "-" if rv in (0.30, 0.75) else "--"
             ax1.plot(DHS, seq, ls, color=cmap(k / 3.0), marker="o", ms=4, lw=1.1,
                      alpha=0.55 + 0.45 * (j in (0, 3)))
-    # 图例：坡角用色、rv 用线型标注示意
     for k, slope in enumerate(SLOPES):
         ax1.plot([], [], color=cmap(k / 3.0), lw=2, label="$i$=%d$^\\circ$" % slope)
     ax1.text(0.22, 1.985, "$r_v$: solid=0.30, dashed=0.45,\ndashed=0.60, solid=0.75 "
@@ -288,14 +342,15 @@ def fig4_sp_h1():
     ax2.legend(fontsize=8, frameon=False)
     ax2.set_title("(b) Peak-frequency migration, softest cover ($r_v$=0.30)", fontsize=10)
     fig.tight_layout()
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig4_sp_h1_nonmonotonicity.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig5_sp_h2():
-    """SP-H2：覆盖层修正量对 χ 的标度（逐例中位修正量）。"""
+    """SP-H2: Scaling of cover-layer corrections with chi."""
     from scipy.stats import spearmanr
     rows = read_csv(os.path.join(ANALYSIS, "layer_correction_metrics.csv"))
     chi, da, dp, dg = [], [], [], []
@@ -316,7 +371,6 @@ def fig5_sp_h2():
     for ax, (y, ylab, title) in zip(axes, panels):
         ax.scatter(chi, y, s=30, color="tab:blue", edgecolors="k", linewidths=0.4, alpha=0.85)
         rho, p = spearmanr(chi, y)
-        # 低次拟合趋势线仅作视觉引导
         z = np.polyfit(chi, y, 2)
         xx = np.linspace(chi.min(), chi.max(), 100)
         ax.plot(xx, np.polyval(z, xx), "tab:red", lw=1.2, ls="--")
@@ -327,14 +381,15 @@ def fig5_sp_h2():
         ax.set_ylabel(ylab)
         ax.set_title(title, fontsize=10)
     fig.tight_layout()
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig5_sp_h2_chi_scaling.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig6_cv_blind():
-    """CV 与盲测逐例复数误差按 rv 分层箱线图（含参考线）。"""
+    """CV and blind per-case complex errors stratified by rv."""
     cv = read_csv(os.path.join(REPO_ROOT, "Run", "ch4_sp_surrogate_dev", "cv_case_metrics.csv"))
     cm = read_csv(os.path.join(ANALYSIS, "case_metrics.csv"))
     rv_of_case = {r["case_id"]: float(r["velocity_ratio"]) for r in cm if r["group"] == "P"}
@@ -384,10 +439,11 @@ def fig6_cv_blind():
     ax2.axhline(20, color="tab:red", ls=":", lw=1.2)
     ax2.set_title("(b) One-shot blind test (12 unseen combinations)", fontsize=10)
     fig.tight_layout()
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig6_cv_blind_error_by_rv.png")
     fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 if __name__ == "__main__":

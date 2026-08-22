@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-"""小论文 C 池真实波闭环插图生成脚本。
+"""Figure generation script for C-pool real-earthquake closed-loop validation (Figs. 7, 8, S1).
 
-从 Run/ch4_sp_reconstruction/C00X 读取重构产物，生成三张论文图：
-  fig7_c005_representative_panels.png  代表性工况 C005（P061/EQ01）四联图：
-                                       坡顶时程、PGA 空间分布、TAF 空间分布、坡顶 5% 阻尼反应谱；
-  fig8_ten_case_metrics_summary.png    十例闭环指标汇总（对照参考线）；
-  figS1_crest_timehist_grid.png        补充材料：十例坡顶带限时程 2x5 网格。
-输出与本脚本同目录；运行：python make_c_closure_figures.py [重构结果根目录]
+Reads reconstruction data products from:
+  Run/ch4_sp_reconstruction/C00X
+
+Generates 3 figures for the paper:
+  fig7_c005_representative_panels.png  Representative case C005 (P061/EQ01) 4-panel:
+                                       crest time history, spatial PGA, spatial TAF, 5%-damping PSA
+  fig8_ten_case_metrics_summary.png    Summary of closed-loop metrics for all 10 cases against reference lines
+  figS1_crest_timehist_grid.png        Supplementary: 2x5 grid of crest time histories for 10 cases
+
+Output directory: ../images/
+Usage: python make_c_closure_figures.py [reconstruction_root]
 """
 
 import json
@@ -19,19 +24,21 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# scripts -> 小论文英文初稿 -> 论文材料 -> docs -> REPO_ROOT
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(CURRENT_DIR))))
 RECON_ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "Run", "ch4_sp_reconstruction")
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(CURRENT_DIR), "images")
 
 CASES = ["C%03d" % i for i in range(1, 11)]
-REF_NRMSE = 0.10      # 时程重建参考线（计划 §4.1.1）
-REF_CORR = 0.95       # 相关系数参考线
-REF_PGA = 0.10        # PGA/TAF 相对误差参考线
-REF_TPEAK = 0.02      # 峰值时刻绝对误差参考线（s）
+REF_NRMSE = 0.10      # Reference threshold for time-history NRMSE (§4.1.1)
+REF_CORR = 0.95       # Reference threshold for correlation
+REF_PGA = 0.10        # Reference threshold for PGA / TAF relative error
+REF_TPEAK = 0.02      # Reference threshold for peak-time absolute error (s)
 
 
 def load_case(case):
-    """读取单例重构 NPZ 与指标 JSON。"""
+    """Load single-case reconstruction NPZ and metrics JSON."""
     case_dir = os.path.join(RECON_ROOT, case)
     npz = np.load(os.path.join(case_dir, "reconstruction.npz"), allow_pickle=False)
     with open(os.path.join(case_dir, "reconstruction_metrics.json"), encoding="utf-8") as handle:
@@ -40,7 +47,7 @@ def load_case(case):
 
 
 def case_label(metrics):
-    """生成"系统/记录"短标签，如 P061/EQ01。"""
+    """Generate short label 'system/record' (e.g. P061/EQ01)."""
     record = metrics["record"]
     eq = "EQ01" if "eq01" in record else ("EQ02" if "eq02" in record else "EQ03")
     p = metrics["parameters"]
@@ -50,12 +57,11 @@ def case_label(metrics):
 
 
 def fig7_representative():
-    """C005（P061/EQ01，最陡最厚最软边界工况）四联图。"""
+    """Case C005 (P061/EQ01, steepest-thickest-softest boundary configuration) 4-panel."""
     npz, metrics = load_case("C005")
     s = npz["s"]
     time = npz["time"]
-    crest = int(np.argmin(np.abs(s)))  # s=0 坡顶索引
-    # 识别代理无效地表区（全频段掩码覆盖不足），在空间分布图中如实标示
+    crest = int(np.argmin(np.abs(s)))  # s=0 crest index
     coverage = npz["predicted_G_h_valid_mask"].mean(axis=0)
     invalid = s[coverage < 0.5]
     fig, axes = plt.subplots(2, 2, figsize=(10.0, 7.2))
@@ -105,14 +111,15 @@ def fig7_representative():
     fig.suptitle("C005: P061 (i=60$^\\circ$, d/h=1.40, $r_v$=0.30) under EQ01 El Centro 0.1g   "
                  "(time-history NRMSE %.1f%%)" % (nrmse * 100), fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig7_c005_representative_panels.png")
     fig.savefig(out, dpi=300)
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def fig8_summary():
-    """十例闭环指标汇总柱状图（含参考线）。"""
+    """10-case closed-loop metric summary."""
     labels = []
     nrmse, corr, pga, tpeak = [], [], [], []
     for case in CASES:
@@ -146,14 +153,15 @@ def fig8_summary():
     fig.suptitle("Closed-loop reconstruction vs direct FEM: ten C-pool cases (medians over surface points)",
                  fontsize=10)
     fig.tight_layout(rect=[0, 0, 1, 0.955])
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "fig8_ten_case_metrics_summary.png")
     fig.savefig(out, dpi=300)
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 def figS1_timehist_grid():
-    """补充材料：十例坡顶带限时程网格图。"""
+    """Supplementary: 10-case crest band-limited time history grid."""
     fig, axes = plt.subplots(2, 5, figsize=(14.0, 5.2), sharey=False)
     for ax, case in zip(axes.ravel(), CASES):
         npz, metrics = load_case(case)
@@ -172,10 +180,11 @@ def figS1_timehist_grid():
     ]
     fig.legend(handles=handles, loc="upper right", frameon=False, fontsize=8)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
+    os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "figS1_crest_timehist_grid.png")
     fig.savefig(out, dpi=300)
     plt.close(fig)
-    print("已生成:", out)
+    print("Generated:", out)
 
 
 if __name__ == "__main__":
