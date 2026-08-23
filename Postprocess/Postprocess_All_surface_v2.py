@@ -382,7 +382,7 @@ def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs,
     transfer = np.empty((acc_h.shape[0], freqs.size), dtype=np.complex128)
     transfer[:] = complex(float('nan'), float('nan'))
     valid = np.zeros(transfer.shape, dtype=bool)
-    left_mask = xs <= float(x_toe)
+    left_mask = xs <= (float(x_toe) + 1e-4)
     for node_mask, reference, side in ((left_mask, ref_left, 'left'), (~left_mask, ref_right, 'right')):
         if reference is None or not np.any(node_mask):
             continue
@@ -1510,12 +1510,12 @@ def calc_s_coords(xs, x_crest, x_toe, h_ref):  # 计算三段归一化坐标 s
     if w_slope <= 0:  # 无效跨度
         w_slope = 1.0  # 兜底值
     for i, x in enumerate(xs):  # 遍历每个节点
-        if x <= x_crest:  # 属于段 A 坡顶平台
+        if x <= x_crest + 1e-4:  # 属于段 A 坡顶平台
             s[i] = (x - x_crest) / h_ref  # 计算对应 s (值为负或零)
-        elif x < x_toe:  # 属于段 B 坡面
+        elif x <= x_toe + 1e-4:  # 属于段 B 坡面（含坡脚棱交界点）
             s[i] = (x - x_crest) / w_slope  # 线性映射至 [0, 1] 区间
         else:  # 属于段 C 坡脚平台
-            s[i] = 1.0 + (x - x_toe) / h_ref  # 计算对应 s (值大于或等于 1)
+            s[i] = 1.0 + (x - x_toe) / h_ref  # 计算对应 s (值大于 1)
     return s  # 返回结果
 
 
@@ -1843,13 +1843,13 @@ def build_s_grid(a_max, c_max):  # 构造统一三段 s 子网格
 
     # 段标签打法（网格点归段依据）：
     # s <= 0 的打 'A'
-    # 0 < s < 1.0 的打 'B'
-    # s >= 1.0 的打 'C'
+    # 0 < s <= 1.0 的打 'B'（坡面终点 s=1.00 严格归段 B，与以 ref_left 为分母的复频响匹配）
+    # s > 1.0 的打 'C'
     seg_labels = []
     for s in s_grid:
         if s <= 0.0:
             seg_labels.append('A')
-        elif s < 1.0:
+        elif s <= 1.0 + 1e-9:
             seg_labels.append('B')
         else:
             seg_labels.append('C')
@@ -2165,7 +2165,7 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'):
                 aligned = resample_H_matrix(
                     frf[field], frf_s, s_grid, seg_labels,
-                    fill_short_gaps=field in ('H_surface_h', 'H_surface_v'))
+                    fill_short_gaps=field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'))  # 全复频响场启用短缺口填补，修复坡脚 s∈[0.95,1.10] 段界死区
                 frf['sgrid_%s' % field] = aligned
                 frf['sgrid_%s_valid_mask' % field] = np.isfinite(aligned.real) & np.isfinite(aligned.imag)
             frf_metadata = frf.get('metadata') or {}

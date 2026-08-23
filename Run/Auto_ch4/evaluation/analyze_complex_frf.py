@@ -118,7 +118,7 @@ def discover_record(package, requested: str | None = None) -> str:
 def segment_labels_from_s(s_values: np.ndarray) -> np.ndarray:
     labels = np.full(s_values.shape, "B", dtype="U1")
     labels[s_values <= 0.0] = "A"
-    labels[s_values >= 1.0] = "C"
+    labels[s_values > 1.0 + 1e-9] = "C"
     return labels
 
 
@@ -155,7 +155,7 @@ def interpolate_complex_field(
     freq_target: np.ndarray,
     s_target: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """先沿频率、再按A/B/C三段沿空间插值复数场，不跨坡棱借点。"""
+    """先沿频率、再沿空间连续插值复数场。"""
     values_src = np.asarray(values_src, dtype=np.complex128)
     valid_src = np.asarray(valid_src, dtype=bool)
     if values_src.shape != valid_src.shape:
@@ -167,27 +167,14 @@ def interpolate_complex_field(
          for index in range(len(s_src))]
     )
     out = np.full((len(freq_target), len(s_target)), np.nan + 1j * np.nan, dtype=np.complex128)
-    target_segments = segment_labels_from_s(s_target)
-    for segment in ("A", "B", "C"):
-        source_indices = np.where(segments_src == segment)[0]
-        target_indices = np.where(target_segments == segment)[0]
-        if len(source_indices) < 2 or len(target_indices) == 0:
+    for f_index in range(len(freq_target)):
+        row = frequency_aligned[:, f_index]
+        good = np.isfinite(row.real) & np.isfinite(row.imag)
+        if int(np.sum(good)) < 2:
             continue
-        source_order = source_indices[np.argsort(s_src[source_indices])]
-        source_s = s_src[source_order]
-        for f_index in range(len(freq_target)):
-            row = frequency_aligned[source_order, f_index]
-            good = np.isfinite(row.real) & np.isfinite(row.imag)
-            if int(np.sum(good)) < 2:
-                continue
-            target_s = s_target[target_indices]
-            inside = (target_s >= source_s[good][0]) & (target_s <= source_s[good][-1])
-            selected = target_indices[inside]
-            if len(selected) == 0:
-                continue
-            out[f_index, selected] = np.interp(
-                s_target[selected], source_s[good], row.real[good]
-            ) + 1j * np.interp(s_target[selected], source_s[good], row.imag[good])
+        out[f_index, :] = np.interp(
+            s_target, s_src[good], row.real[good]
+        ) + 1j * np.interp(s_target, s_src[good], row.imag[good])
     mask = np.isfinite(out.real) & np.isfinite(out.imag)
     return out, mask
 
@@ -329,23 +316,10 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
             package[prefix + "sgrid_segment"] if prefix + "sgrid_segment" in package else None,
             source_s,
         )
-        g_key = prefix + "sgrid_H_surface_over_1D_h"
-        g_mask_key = g_key + "_valid_mask"
-        if g_key not in package or g_mask_key not in package:
-            raise ValueError("NPZ缺少完整一维参考复频响字段 %s" % g_key)
-        g_field, g_mask = interpolate_complex_field(
-            source_frequency,
-            source_s,
-            package[g_key],
-            package[g_mask_key],
-            source_segments,
-            frequency,
-            s_values,
-        )
-        if not np.any(g_mask):
-            raise ValueError("H_surface_over_1D_h没有有效值；需先生成一维参考并重跑后处理")
         total_key = prefix + "sgrid_H_surface_h"
         total_mask_key = total_key + "_valid_mask"
+        if total_key not in package or total_mask_key not in package:
+            raise ValueError("NPZ缺少基岩参考水平复频响字段 %s" % total_key)
         total_field, total_mask = interpolate_complex_field(
             source_frequency,
             source_s,
@@ -355,7 +329,20 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
             frequency,
             s_values,
         )
-        mask = g_mask & total_mask
+        # 坡顶一维自由场传递函数 (s = -4.00, 高度 Hbase + h + d)
+        crest_idx = np.argmin(np.abs(s_values - (-4.0)))
+        H_crest_1d = total_field[:, crest_idx]
+        crest_mask = total_mask[:, crest_idx]
+
+        # 全场统一以坡顶一维自由场为分母: G_h(f, s) = H_surface(f, s) / H_crest_1d(f)
+        g_field = np.where(
+            (np.abs(H_crest_1d) > 1e-10)[:, None],
+            total_field / H_crest_1d[:, None],
+            0.0
+        )
+        mask = total_mask & crest_mask[:, None]
+        if not np.any(mask):
+            raise ValueError("复频响计算没有有效值；需先重跑后处理")
         g_field[~mask] = np.nan + 1j * np.nan
         total_field[~mask] = np.nan + 1j * np.nan
         phase = unwrap_frequency_phase(g_field, mask)
@@ -562,7 +549,7 @@ def discover_case_dirs(roots):
 
 
 def parse_args(argv=None):
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description="复频响幅值—相位联合分析")
     parser.add_argument(
         "--input-roots",
@@ -607,12 +594,12 @@ def main(argv=None):
     write_csv(args.output / "layer_correction_metrics.csv", correction_rows)
     write_csv(args.output / "parameter_effects.csv", effect_rows)
     metadata = {
-        "definition": "G_h=A_2D/A_1D_same_side",
+        "definition": "G_h=A_2D/A_1D_crest",
         "frequency_grid_hz": [FREQUENCY_MIN, FREQUENCY_MAX, FREQUENCY_STEP],
         "s_grid": [S_MIN, S_MAX, S_STEP],
         "phase": "frequency-unwrapped only on contiguous valid runs",
         "group_delay": "-d(phi)/df/(2*pi), smoothed within contiguous valid runs",
-        "spatial_phase_gradient": "segment-wise d(phi)/ds; not interpreted as single-plane-wave wavenumber",
+        "spatial_phase_gradient": "continuous d(phi)/ds across surface array",
         "loaded_case_count": len(cases),
         "skipped_case_count": len(skipped),
     }

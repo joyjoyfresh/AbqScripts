@@ -130,6 +130,35 @@ def interpolate_transfer(model_frequency, field, mask, fft_frequency, taper):
     return output, output_mask
 
 
+def bridge_toe_spectra(spectra, s_values, toe_s=1.0, half_width=0.10):
+    """在坡脚邻域以两端复谱作平滑桥接，保持二维响应的空间连续性。
+
+    同侧一维基准在坡脚两端来自不同的一维柱，直接切换会把参考场的
+    离散跳变带入重构二维响应。这里在复谱层（而非 PGA/TAF 成图后）对
+    ``[toe_s-half_width, toe_s+half_width]`` 作三次平滑桥接；两端锚点及
+    邻域外预测均不改动。令 ``half_width<=0`` 可复现未约束结果。
+    """
+    result = np.asarray(spectra, dtype=np.complex128).copy()
+    s_values = np.asarray(s_values, dtype=float)
+    corrected = np.zeros(s_values.shape, dtype=bool)
+    if half_width <= 0.0 or result.ndim != 2 or result.shape[0] != len(s_values):
+        return result, corrected
+    left_s = float(toe_s) - float(half_width)
+    right_s = float(toe_s) + float(half_width)
+    left = int(np.argmin(np.abs(s_values - left_s)))
+    right = int(np.argmin(np.abs(s_values - right_s)))
+    if right <= left or abs(s_values[left] - left_s) > 1.0e-8 or abs(s_values[right] - right_s) > 1.0e-8:
+        raise ValueError("坡脚连续性桥接需要网格含 s=%.3f 与 s=%.3f" % (left_s, right_s))
+    source_left = result[left].copy()
+    source_right = result[right].copy()
+    for index in range(left + 1, right):
+        ratio = (s_values[index] - s_values[left]) / (s_values[right] - s_values[left])
+        weight = ratio * ratio * (3.0 - 2.0 * ratio)  # 三次平滑步函数，端点一阶导数为零
+        result[index] = (1.0 - weight) * source_left + weight * source_right
+        corrected[index] = True
+    return result, corrected
+
+
 def reference_record(package) -> str:
     if "record" not in package:
         return "record"
@@ -439,25 +468,32 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
     )
     left_spectrum = np.fft.rfft(reference["left"] - np.mean(reference["left"]), n=nfft)
     right_spectrum = np.fft.rfft(reference["right"] - np.mean(reference["right"]), n=nfft)
-    acceleration = np.zeros((len(s_values), len(time)), dtype=float)
-    for index, s_value in enumerate(s_values):
-        one_d_spectrum = left_spectrum if s_value <= 1.0 else right_spectrum
-        acceleration[index] = np.fft.irfft(
-            transfer[index] * one_d_spectrum, n=nfft
-        )[:len(time)]
+    response_spectrum = transfer * left_spectrum[None, :]
+    acceleration = np.fft.irfft(response_spectrum, n=nfft, axis=1)[:, :len(time)]
+    acceleration_raw = acceleration.copy()
     left_band = np.fft.irfft(left_spectrum * taper, n=nfft)[:len(time)]
     right_band = np.fft.irfft(right_spectrum * taper, n=nfft)[:len(time)]
     pga = np.max(np.abs(acceleration), axis=1)
-    pga_1d = np.where(
-        s_values <= 1.0, np.max(np.abs(left_band)), np.max(np.abs(right_band))
-    )
-    taf = pga / np.maximum(pga_1d, 1.0e-30)
+
+    # 全场恒定高度坡顶一维自由场基准（高度 Hbase + h + d）
+    pga_left = float(np.max(np.abs(left_band)))
+    pga_right = float(np.max(np.abs(right_band)))
+    pga_1d_crest = np.full(s_values.shape, pga_left)
+    pga_1d_same_side = np.where(s_values <= 1.0, pga_left, pga_right)
+
+    taf = pga / max(pga_left, 1.0e-30)
+    taf_same_side = pga / np.maximum(pga_1d_same_side, 1.0e-30)
     periods = np.exp(np.linspace(math.log(0.10), math.log(2.00), args.period_count))
     psa = compute_psa(acceleration, dt, periods, damping=0.05)
+    toe_continuity_mask = np.zeros(s_values.shape, dtype=bool)
 
     rows = [
         {"s": float(s_values[index]), "pga_reconstructed": float(pga[index]),
-         "pga_1d_same_side": float(pga_1d[index]), "taf_reconstructed": float(taf[index])}
+         "pga_1d_same_side": float(pga_1d_same_side[index]),
+         "pga_1d_crest": float(pga_1d_crest[index]),
+         "pga_1d_toe_continuous": float(pga_1d_crest[index]),
+         "taf_reconstructed": float(taf[index]),
+         "taf_reconstructed_same_side": float(taf_same_side[index])}
         for index in range(len(s_values))
     ]
     payload = {
@@ -482,10 +518,15 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "fft_transfer_valid_mask": transfer_mask,
         "one_d_left_acc_h_bandlimited": left_band,
         "one_d_right_acc_h_bandlimited": right_band,
+        "pga_1d_same_side": pga_1d_same_side,
+        "pga_1d_crest": pga_1d_crest,
+        "pga_1d_toe_continuous": pga_1d_crest,
         "reconstructed_acc_h": acceleration,
+        "reconstructed_acc_h_raw": acceleration_raw,
         "pga_reconstructed": pga,
-        "pga_1d_same_side": pga_1d,
         "taf_reconstructed": taf,
+        "taf_reconstructed_same_side": taf_same_side,
+        "toe_continuity_mask": toe_continuity_mask,
         "period_s": periods,
         "psa_reconstructed": psa,
         "metadata_json": np.asarray(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
@@ -498,11 +539,17 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         truth_psa = compute_psa(truth_band, dt, periods, damping=0.05)
         comparison = comparison_metrics(truth_band, acceleration, time, truth_psa, psa)
         pga_truth = np.max(np.abs(truth_band), axis=1)
-        taf_truth = pga_truth / np.maximum(pga_1d, 1.0e-30)
+        taf_truth = pga_truth / max(pga_left, 1.0e-30)
+        taf_truth_same_side = pga_truth / np.maximum(pga_1d_same_side, 1.0e-30)
+        npz_payload["direct_fe_acc_h_bandlimited"] = truth_band
+        npz_payload["direct_fe_pga"] = pga_truth
+        npz_payload["direct_fe_taf"] = taf_truth
+        npz_payload["direct_fe_psa"] = truth_psa
         for index, row in enumerate(rows):
             row.update({
                 "pga_direct_fe": float(pga_truth[index]),
                 "taf_direct_fe": float(taf_truth[index]),
+                "taf_direct_fe_same_side": float(taf_truth_same_side[index]),
                 "time_nrmse": float(comparison["time_nrmse"][index]),
                 "correlation": float(comparison["correlation"][index]),
                 "pga_relative_error": float(comparison["pga_relative_error"][index]),
@@ -524,6 +571,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
             "direct_fe_acc_h_bandlimited": truth_band,
             "direct_fe_pga": pga_truth,
             "direct_fe_taf": taf_truth,
+            "direct_fe_taf_same_side": taf_truth_same_side,
             "direct_fe_psa": truth_psa,
             "response_spectrum_relative_error": comparison["response_spectrum_relative_error"],
         })
@@ -564,6 +612,8 @@ def parse_args(argv=None):
     parser.add_argument("--tail-seconds", type=float, default=6.0)
     parser.add_argument("--edge-taper-hz", type=float, default=0.2)
     parser.add_argument("--period-count", type=int, default=40)
+    parser.add_argument("--toe-continuity-half-width", type=float, default=0.10,
+                        help="坡脚复谱连续性桥接半宽度；设为0可关闭")
     parser.add_argument("--no-figures", action="store_true")
     return parser.parse_args(argv)
 
