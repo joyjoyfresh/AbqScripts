@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """用代理完整复频响和真实波一维参考重构二维坡地地表响应。
 
-物理链为 ``A_2D(f,s)=G_h(f,s)*A_1D(f)``。脚本不会用入射波或端点
-传函代替同工况一维参考；一维参考由建模脚本生成的
+物理链为 ``A_2D(f,s)=G_h(f,s)*A_1D,left(f)``。全地表统一使用左侧
+上平台一维自由场；一维参考由建模脚本生成的
 ``freefield_reference_<record>.npz`` 提供。给定C池直接有限元工况时，程序
 同时计算时程、峰值时刻、PGA、TAF和5%阻尼反应谱误差。
 """
@@ -128,35 +128,6 @@ def interpolate_transfer(model_frequency, field, mask, fft_frequency, taper):
         ) * taper[inside]
         output_mask[s_index, inside] = True
     return output, output_mask
-
-
-def bridge_toe_spectra(spectra, s_values, toe_s=1.0, half_width=0.10):
-    """在坡脚邻域以两端复谱作平滑桥接，保持二维响应的空间连续性。
-
-    同侧一维基准在坡脚两端来自不同的一维柱，直接切换会把参考场的
-    离散跳变带入重构二维响应。这里在复谱层（而非 PGA/TAF 成图后）对
-    ``[toe_s-half_width, toe_s+half_width]`` 作三次平滑桥接；两端锚点及
-    邻域外预测均不改动。令 ``half_width<=0`` 可复现未约束结果。
-    """
-    result = np.asarray(spectra, dtype=np.complex128).copy()
-    s_values = np.asarray(s_values, dtype=float)
-    corrected = np.zeros(s_values.shape, dtype=bool)
-    if half_width <= 0.0 or result.ndim != 2 or result.shape[0] != len(s_values):
-        return result, corrected
-    left_s = float(toe_s) - float(half_width)
-    right_s = float(toe_s) + float(half_width)
-    left = int(np.argmin(np.abs(s_values - left_s)))
-    right = int(np.argmin(np.abs(s_values - right_s)))
-    if right <= left or abs(s_values[left] - left_s) > 1.0e-8 or abs(s_values[right] - right_s) > 1.0e-8:
-        raise ValueError("坡脚连续性桥接需要网格含 s=%.3f 与 s=%.3f" % (left_s, right_s))
-    source_left = result[left].copy()
-    source_right = result[right].copy()
-    for index in range(left + 1, right):
-        ratio = (s_values[index] - s_values[left]) / (s_values[right] - s_values[left])
-        weight = ratio * ratio * (3.0 - 2.0 * ratio)  # 三次平滑步函数，端点一阶导数为零
-        result[index] = (1.0 - weight) * source_left + weight * source_right
-        corrected[index] = True
-    return result, corrected
 
 
 def reference_record(package) -> str:
@@ -475,7 +446,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
     right_band = np.fft.irfft(right_spectrum * taper, n=nfft)[:len(time)]
     pga = np.max(np.abs(acceleration), axis=1)
 
-    # 全场恒定高度坡顶一维自由场基准（高度 Hbase + h + d）
+    # 全场统一使用左侧上平台一维自由场基准（高度 Hbase + h + d）
     pga_left = float(np.max(np.abs(left_band)))
     pga_right = float(np.max(np.abs(right_band)))
     pga_1d_crest = np.full(s_values.shape, pga_left)
@@ -489,10 +460,12 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
 
     rows = [
         {"s": float(s_values[index]), "pga_reconstructed": float(pga[index]),
+         "pga_1d_left": float(pga_1d_crest[index]),
          "pga_1d_same_side": float(pga_1d_same_side[index]),
          "pga_1d_crest": float(pga_1d_crest[index]),
          "pga_1d_toe_continuous": float(pga_1d_crest[index]),
          "taf_reconstructed": float(taf[index]),
+         "taf_reconstructed_left_reference": float(taf[index]),
          "taf_reconstructed_same_side": float(taf_same_side[index])}
         for index in range(len(s_values))
     ]
@@ -502,7 +475,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "parameters": {name: float(value) for name, value in parameters.items()},
         "model": str(args.model.resolve()),
         "reference": reference["path"],
-        "definition": "A_2D=G_h_surrogate*A_1D_same_side",
+        "definition": "A_2D=G_h_surrogate*A_1D_left_global",
         "reported_time_domain_band_hz": [float(model_frequency[0]), float(model_frequency[-1])],
         "edge_taper_hz": float(args.edge_taper_hz),
         "note": "时程、PGA、TAF和反应谱均按代理公共频带重构；直接有限元比较采用同一频带窗",
@@ -518,6 +491,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "fft_transfer_valid_mask": transfer_mask,
         "one_d_left_acc_h_bandlimited": left_band,
         "one_d_right_acc_h_bandlimited": right_band,
+        "pga_1d_left": pga_1d_crest,
         "pga_1d_same_side": pga_1d_same_side,
         "pga_1d_crest": pga_1d_crest,
         "pga_1d_toe_continuous": pga_1d_crest,
@@ -525,6 +499,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "reconstructed_acc_h_raw": acceleration_raw,
         "pga_reconstructed": pga,
         "taf_reconstructed": taf,
+        "taf_reconstructed_left_reference": taf,
         "taf_reconstructed_same_side": taf_same_side,
         "toe_continuity_mask": toe_continuity_mask,
         "period_s": periods,
@@ -549,6 +524,7 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
             row.update({
                 "pga_direct_fe": float(pga_truth[index]),
                 "taf_direct_fe": float(taf_truth[index]),
+                "taf_direct_fe_left_reference": float(taf_truth[index]),
                 "taf_direct_fe_same_side": float(taf_truth_same_side[index]),
                 "time_nrmse": float(comparison["time_nrmse"][index]),
                 "correlation": float(comparison["correlation"][index]),
@@ -612,8 +588,6 @@ def parse_args(argv=None):
     parser.add_argument("--tail-seconds", type=float, default=6.0)
     parser.add_argument("--edge-taper-hz", type=float, default=0.2)
     parser.add_argument("--period-count", type=int, default=40)
-    parser.add_argument("--toe-continuity-half-width", type=float, default=0.10,
-                        help="坡脚复谱连续性桥接半宽度；设为0可关闭")
     parser.add_argument("--no-figures", action="store_true")
     return parser.parse_args(argv)
 

@@ -193,9 +193,10 @@ def rerun_one(npz_path, dry_run=False):
             before = {round(float(sgrid_s[i]), 2): int(np.sum(np.isfinite(before_arr[i, :].real)))
                       for i in np.where(before_mask)[0]}
 
-        # 重算四个 frf sgrid 字段（全启用 fill_short_gaps）
+        # 重算可用的 frf sgrid 字段（全启用 fill_short_gaps）
         changes = {}
-        for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'):
+        for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h',
+                      'H_surface_over_1D_left_h', 'H_station_h'):
             node_key = prefix + field
             if node_key not in package:
                 continue

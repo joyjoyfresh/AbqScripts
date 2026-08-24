@@ -179,6 +179,57 @@ def interpolate_complex_field(
     return out, mask
 
 
+def recover_left_reference_transfer(
+    total_field: np.ndarray,
+    same_side_field: np.ndarray,
+    total_mask: np.ndarray,
+    same_side_mask: np.ndarray,
+    s_values: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """从上平台数据恢复左侧一维自由场相对入射波的复传递函数。
+
+    已有规范包仅保存 ``A_2D/A_in`` 与分段的 ``A_2D/A_1D_same_side``。
+    在 ``s<=0`` 的上平台，两者之比严格等于 ``A_1D_left/A_in``；逐频率
+    对所有有效上平台点取复数分量中位数，可兼容旧数据而无需重跑 Abaqus。
+    """
+    total_field = np.asarray(total_field, dtype=np.complex128)
+    same_side_field = np.asarray(same_side_field, dtype=np.complex128)
+    total_mask = np.asarray(total_mask, dtype=bool)
+    same_side_mask = np.asarray(same_side_mask, dtype=bool)
+    s_values = np.asarray(s_values, dtype=float)
+    if total_field.shape != same_side_field.shape:
+        raise ValueError("入射参考场与同侧一维参考场形状不一致")
+    if total_field.shape != total_mask.shape or same_side_field.shape != same_side_mask.shape:
+        raise ValueError("复数场与有效掩码形状不一致")
+    if total_field.shape[0] != len(s_values):
+        raise ValueError("复数场空间维与s坐标长度不一致")
+
+    upper = s_values <= 1.0e-9
+    valid_ratio = (
+        upper[:, None]
+        & total_mask
+        & same_side_mask
+        & np.isfinite(total_field.real)
+        & np.isfinite(total_field.imag)
+        & np.isfinite(same_side_field.real)
+        & np.isfinite(same_side_field.imag)
+        & (np.abs(same_side_field) > 1.0e-12)
+    )
+    ratio = np.full(total_field.shape, np.nan + 1j * np.nan, dtype=np.complex128)
+    ratio[valid_ratio] = total_field[valid_ratio] / same_side_field[valid_ratio]
+    reference = np.full(total_field.shape[1], np.nan + 1j * np.nan, dtype=np.complex128)
+    reference_mask = np.zeros(total_field.shape[1], dtype=bool)
+    for f_index in range(total_field.shape[1]):
+        values = ratio[valid_ratio[:, f_index], f_index]
+        if len(values) == 0:
+            continue
+        value = complex(float(np.median(values.real)), float(np.median(values.imag)))
+        if np.isfinite(value.real) and np.isfinite(value.imag) and abs(value) > 1.0e-12:
+            reference[f_index] = value
+            reference_mask[f_index] = True
+    return reference, reference_mask
+
+
 def contiguous_runs(mask: np.ndarray):
     indices = np.where(mask)[0]
     if len(indices) == 0:
@@ -320,29 +371,54 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
         total_mask_key = total_key + "_valid_mask"
         if total_key not in package or total_mask_key not in package:
             raise ValueError("NPZ缺少基岩参考水平复频响字段 %s" % total_key)
+        source_total = np.asarray(package[total_key], dtype=np.complex128)
+        source_total_mask = np.asarray(package[total_mask_key], dtype=bool)
         total_field, total_mask = interpolate_complex_field(
             source_frequency,
             source_s,
-            package[total_key],
-            package[total_mask_key],
+            source_total,
+            source_total_mask,
             source_segments,
             frequency,
             s_values,
         )
-        # 坡顶一维自由场传递函数 (s = -4.00, 高度 Hbase + h + d)
-        crest_idx = np.argmin(np.abs(s_values - (-4.0)))
-        H_crest_1d = total_field[:, crest_idx]
-        crest_mask = total_mask[:, crest_idx]
-
-        # 全场统一以坡顶一维自由场为分母: G_h(f, s) = H_surface(f, s) / H_crest_1d(f)
-        g_field = np.where(
-            (np.abs(H_crest_1d) > 1e-10)[:, None],
-            total_field / H_crest_1d[:, None],
-            0.0
+        left_key = prefix + "sgrid_H_surface_over_1D_left_h"
+        left_mask_key = left_key + "_valid_mask"
+        if left_key in package and left_mask_key in package:
+            source_g = np.asarray(package[left_key], dtype=np.complex128)
+            source_g_mask = np.asarray(package[left_mask_key], dtype=bool)
+            reference_source = "explicit_left_1d_field"
+        else:
+            same_side_key = prefix + "sgrid_H_surface_over_1D_h"
+            same_side_mask_key = same_side_key + "_valid_mask"
+            if same_side_key not in package or same_side_mask_key not in package:
+                raise ValueError("NPZ缺少统一左参考字段及兼容恢复字段 %s" % same_side_key)
+            left_reference, left_reference_mask = recover_left_reference_transfer(
+                source_total,
+                package[same_side_key],
+                source_total_mask,
+                package[same_side_mask_key],
+                source_s,
+            )
+            source_g = np.full(source_total.shape, np.nan + 1j * np.nan, dtype=np.complex128)
+            source_g_mask = source_total_mask & left_reference_mask[None, :]
+            safe_reference = np.where(left_reference_mask, left_reference, 1.0 + 0.0j)
+            source_g[source_g_mask] = (
+                source_total / safe_reference[None, :]
+            )[source_g_mask]
+            reference_source = "derived_left_1d_from_legacy_fields"
+        g_field, g_mask = interpolate_complex_field(
+            source_frequency,
+            source_s,
+            source_g,
+            source_g_mask,
+            source_segments,
+            frequency,
+            s_values,
         )
-        mask = total_mask & crest_mask[:, None]
+        mask = total_mask & g_mask
         if not np.any(mask):
-            raise ValueError("复频响计算没有有效值；需先重跑后处理")
+            raise ValueError("统一左侧一维参考复频响没有有效值；需检查一维参考")
         g_field[~mask] = np.nan + 1j * np.nan
         total_field[~mask] = np.nan + 1j * np.nan
         phase = unwrap_frequency_phase(g_field, mask)
@@ -371,6 +447,7 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
             "phase": phase,
             "group_delay": delay,
             "spatial_phase_gradient": spatial_gradient,
+            "reference_source": reference_source,
         }
     finally:
         package.close()
@@ -594,12 +671,14 @@ def main(argv=None):
     write_csv(args.output / "layer_correction_metrics.csv", correction_rows)
     write_csv(args.output / "parameter_effects.csv", effect_rows)
     metadata = {
-        "definition": "G_h=A_2D/A_1D_crest",
+        "definition": "G_h=A_2D/A_1D_left_global",
+        "reference_scope": "single left upper-platform 1D free field for the entire surface",
+        "reference_sources": sorted(set(case["reference_source"] for case in cases)),
         "frequency_grid_hz": [FREQUENCY_MIN, FREQUENCY_MAX, FREQUENCY_STEP],
         "s_grid": [S_MIN, S_MAX, S_STEP],
         "phase": "frequency-unwrapped only on contiguous valid runs",
         "group_delay": "-d(phi)/df/(2*pi), smoothed within contiguous valid runs",
-        "spatial_phase_gradient": "continuous d(phi)/ds across surface array",
+        "spatial_phase_gradient": "segment-wise d(phi)/ds; corners are not differentiated across",
         "loaded_case_count": len(cases),
         "skipped_case_count": len(skipped),
     }

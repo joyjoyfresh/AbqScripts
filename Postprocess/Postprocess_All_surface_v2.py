@@ -397,6 +397,27 @@ def compute_side_reference_H(acc_h, xs, x_toe, ref_left, ref_right, dt, freqs,
     return transfer, valid
 
 
+def compute_uniform_reference_H(acc_h, reference, dt, freqs, excitation_valid,
+                                fc=None, fmax_hz=None):
+    """计算全地表相对同一个一维参考时程的复谱比。"""
+    acc_h = np.atleast_2d(np.asarray(acc_h, dtype=float))
+    freqs = np.asarray(freqs, dtype=float)
+    excitation_valid = np.asarray(excitation_valid, dtype=bool)
+    transfer = np.empty((acc_h.shape[0], freqs.size), dtype=np.complex128)
+    transfer[:] = complex(float('nan'), float('nan'))
+    valid = np.zeros(transfer.shape, dtype=bool)
+    if reference is None:
+        return transfer, valid
+    ref_freqs, ref_transfer, ref_valid, _unused = compute_complex_H(
+        acc_h, reference, dt, fc=fc, fmax_hz=fmax_hz)
+    if ref_freqs.shape != freqs.shape or not np.allclose(ref_freqs, freqs):
+        raise RuntimeError('统一左侧一维参考谱比频轴与入射频响不一致')
+    shared = excitation_valid & ref_valid
+    transfer[:, shared] = ref_transfer[:, shared]
+    valid[:, shared] = True
+    return transfer, valid
+
+
 def _safe_ratio(num, den):  # 安全除法
     """只在分母真实有效时计算比值；无效时返回 NaN，避免 epsilon 分母制造假峰值。"""
     if den is None:  # 分母缺失
@@ -1318,11 +1339,19 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         H_over_1d, valid_over_1d = compute_side_reference_H(
             a1_mat, xs, x_toe, ref_left, ref_right, dt, freqs, input_valid,
             fc=fc, fmax_hz=frf_fmax_hz)
+        H_over_1d_left, valid_over_1d_left = compute_uniform_reference_H(
+            a1_mat, ref_left, dt, freqs, input_valid,
+            fc=fc, fmax_hz=frf_fmax_hz)
         frf_payload['H_surface_over_1D_h'] = H_over_1d
         frf_payload['one_d_valid_mask'] = valid_over_1d
+        frf_payload['H_surface_over_1D_left_h'] = H_over_1d_left
+        frf_payload['one_d_left_valid_mask'] = valid_over_1d_left
         write_H_csv('FSAF_1D_h_%s.csv' % record, freqs[input_valid], xs,
                     np.abs(H_over_1d[:, input_valid]))
+        write_H_csv('FSAF_1D_left_h_%s.csv' % record, freqs[input_valid], xs,
+                    np.abs(H_over_1d_left[:, input_valid]))
         frf_metadata['one_d_reference_available'] = bool(np.any(valid_over_1d))
+        frf_metadata['one_d_left_global_reference_available'] = bool(np.any(valid_over_1d_left))
         possible_1d = int(len(xs) * np.sum(input_valid))
         frf_metadata['one_d_valid_fraction'] = (float(np.sum(valid_over_1d)) / float(possible_1d)
                                                 if possible_1d else 0.0)
@@ -2127,6 +2156,7 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             (('FSAF_inc_h_%s.csv', 'H_surface_h_%s.csv'), 'sgrid_FSAF_inc_h_%s.csv', 'f_Hz', True),
             (('FSAF_inc_v_%s.csv', 'H_surface_v_%s.csv'), 'sgrid_FSAF_inc_v_%s.csv', 'f_Hz', True),
             (('FSAF_1D_h_%s.csv',), 'sgrid_FSAF_1D_h_%s.csv', 'f_Hz', False),
+            (('FSAF_1D_left_h_%s.csv',), 'sgrid_FSAF_1D_left_h_%s.csv', 'f_Hz', True),
             (('FSAF_station_h_%s.csv', 'H_topo_h_%s.csv'), 'sgrid_FSAF_station_h_%s.csv', 'f_Hz', False),
             (('PSA_surface_h_%s.csv',), 'sgrid_PSA_surface_h_%s.csv', 'T_s', True),
             (('PSA_surface_v_%s.csv',), 'sgrid_PSA_surface_v_%s.csv', 'T_s', True),
@@ -2162,10 +2192,14 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             frf['sgrid_s'] = np.asarray(s_grid, dtype=float)
             frf['sgrid_x'] = np.asarray(x_phys, dtype=float)
             frf['sgrid_segment'] = segment_array
-            for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'):
+            for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h',
+                          'H_surface_over_1D_left_h', 'H_station_h'):
+                if field not in frf:
+                    continue
                 aligned = resample_H_matrix(
                     frf[field], frf_s, s_grid, seg_labels,
-                    fill_short_gaps=field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h', 'H_station_h'))  # 全复频响场启用短缺口填补，修复坡脚 s∈[0.95,1.10] 段界死区
+                    fill_short_gaps=field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h',
+                                              'H_surface_over_1D_left_h', 'H_station_h'))  # 全复频响场启用短缺口填补，修复坡脚 s∈[0.95,1.10] 段界死区
                 frf['sgrid_%s' % field] = aligned
                 frf['sgrid_%s_valid_mask' % field] = np.isfinite(aligned.real) & np.isfinite(aligned.imag)
             frf_metadata = frf.get('metadata') or {}

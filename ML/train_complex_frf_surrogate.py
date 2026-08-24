@@ -452,8 +452,9 @@ def main(argv=None):
         "training_case_ids": case_ids[train_indices],
         "training_X": X[train_indices],
         "G_h_model": primary_model,
-        "target_definition": "G_h=A_2D/A_1D_same_side",
-        "reconstruction_requirement": "真实波重构必须另给同工况一维左右参考时程",
+        "target_definition": "G_h=A_2D/A_1D_left_global",
+        "reference_scope": "全地表统一使用左侧上平台一维自由场",
+        "reconstruction_requirement": "真实波重构必须提供同工况左侧上平台一维自由场时程",
         "configuration": {
             "pod_energy": args.pod_energy,
             "max_components": args.max_components,

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""独立评价复频响数据完整性和V001—V003数值敏感性。
+"""独立评价复频响数据完整性和V001—V004数值敏感性。
 
 本脚本只读取已经生成的 ``surface_results.npz``，不打开ODB、不改写后处理
-状态，也不影响批处理是否完成。V002先消除对应归一化地表点因坐标平移引入的
+状态，也不影响批处理是否完成。V003先消除对应归一化地表点因坐标平移引入的
 理论水平传播相位，再把幅值、相对相位形态和群时延残差写成数值不确定性诊断。
 评价结果写入独立JSON/CSV，供研究者判读；旧参考线仅保留作兼容性记录，不再作为
 V002的自动放行条件。
@@ -135,7 +135,7 @@ def coordinate_phase_alignment(reference, candidate, frequency, s_values):
     ``p_x=sin(theta_s)/Vs_bedrock``。因此候选工况相对于参考工况的理论
     相位差为 ``-omega*delta_t_x``，校正候选复频响时乘以
     ``exp(+i*omega*delta_t_x)``。一维参考时程的竖向时间平移不在这里重复
-    校正，因为每个工况的G_h已经使用了自己的同侧一维参考。
+    校正，因为每个工况的G_h已经统一使用自己的左侧上平台一维参考。
     """
     reference_meta = _load_case_json(reference, "case_meta.json")
     candidate_meta = _load_case_json(candidate, "case_meta.json")
@@ -378,6 +378,69 @@ def _comparison_metrics(reference, candidate, frequency, s_values, mask, weight)
     return row
 
 
+def _peak_at_surface_position(case, frequency, s_values, target_s):
+    """提取最接近指定地表坐标的有效幅值峰值与频率。"""
+    index = int(np.argmin(np.abs(np.asarray(s_values, dtype=float) - float(target_s))))
+    values = np.abs(np.asarray(case["G"], dtype=np.complex128)[:, index])
+    valid = (
+        np.asarray(case["mask"], dtype=bool)[:, index]
+        & np.isfinite(values)
+        & np.isfinite(frequency)
+    )
+    if not np.any(valid):
+        return float("nan"), float("nan"), float(s_values[index])
+    candidates = np.where(valid, values, -np.inf)
+    peak_index = int(np.argmax(candidates))
+    return (
+        float(values[peak_index]),
+        float(frequency[peak_index]),
+        float(s_values[index]),
+    )
+
+
+def key_location_metrics(reference, candidate, frequency, s_values):
+    """计算坡顶主峰频率和坡面中部峰值变化两项主要判据。"""
+    crest_ref_amp, crest_ref_frequency, crest_s = _peak_at_surface_position(
+        reference, frequency, s_values, 0.0
+    )
+    crest_candidate_amp, crest_candidate_frequency, _ = _peak_at_surface_position(
+        candidate, frequency, s_values, 0.0
+    )
+    midslope_ref_amp, midslope_ref_frequency, midslope_s = _peak_at_surface_position(
+        reference, frequency, s_values, 0.5
+    )
+    midslope_candidate_amp, midslope_candidate_frequency, _ = _peak_at_surface_position(
+        candidate, frequency, s_values, 0.5
+    )
+    midslope_change = (
+        midslope_candidate_amp / midslope_ref_amp - 1.0
+        if np.isfinite(midslope_ref_amp) and midslope_ref_amp > 0.0
+        else float("nan")
+    )
+    crest_frequency_error = abs(crest_candidate_frequency - crest_ref_frequency)
+    primary_met = bool(
+        np.isfinite(crest_frequency_error)
+        and np.isfinite(midslope_change)
+        and crest_frequency_error <= 0.20
+        and abs(midslope_change) <= 0.05
+    )
+    return {
+        "crest_s": crest_s,
+        "crest_peak_amplitude_reference": crest_ref_amp,
+        "crest_peak_amplitude_candidate": crest_candidate_amp,
+        "crest_peak_frequency_reference_hz": crest_ref_frequency,
+        "crest_peak_frequency_candidate_hz": crest_candidate_frequency,
+        "crest_peak_frequency_error_hz": crest_frequency_error,
+        "midslope_s": midslope_s,
+        "midslope_peak_amplitude_reference": midslope_ref_amp,
+        "midslope_peak_amplitude_candidate": midslope_candidate_amp,
+        "midslope_peak_amplitude_relative_change": midslope_change,
+        "midslope_peak_frequency_reference_hz": midslope_ref_frequency,
+        "midslope_peak_frequency_candidate_hz": midslope_candidate_frequency,
+        "primary_reference_lines_met": primary_met,
+    }
+
+
 COMPARISON_METRIC_FIELDS = (
     "valid_fraction", "weighted_complex_error", "log_amplitude_rmse",
     "log_amplitude_median_abs", "log_amplitude_p90_abs",
@@ -432,7 +495,7 @@ def compare_cases(
     candidate_for_metrics=None,
     alignment_info=None,
 ):
-    """比较一对工况，V002主指标使用相位校正后的残余变化。"""
+    """比较一对工况，V003主指标使用相位校正后的残余变化。"""
     mask = reference["mask"] & candidate["mask"]
     weight = np.minimum(reference["weight"], candidate["weight"])
     raw_metrics = _comparison_metrics(
@@ -448,9 +511,10 @@ def compare_cases(
         "surface_tail_p95_ratio": tail_ratio,
     }
     row.update(metrics)
+    row.update(key_location_metrics(reference, metric_candidate, frequency, s_values))
     legacy_pass = legacy_reference_lines(raw_metrics, variation_id, tail_ratio)
     row["legacy_reference_lines_met"] = legacy_pass
-    if variation_id == "V002":
+    if variation_id == "V003":
         row["comparison_basis"] = (
             "phase_aligned_residual"
             if alignment_info and alignment_info.get("applied")
@@ -477,15 +541,15 @@ def compare_cases(
     return row
 
 
-def build_v002_uncertainty(row, alignment_info):
-    """生成V002相位校正后的数值不确定性摘要。"""
+def build_v003_uncertainty(row, alignment_info):
+    """生成V003相位校正后的数值不确定性摘要。"""
     residual = {field: row.get(field) for field in COMPARISON_METRIC_FIELDS}
     raw = {field: row.get("raw_" + field) for field in COMPARISON_METRIC_FIELDS}
     return {
         "schema_version": 1,
         "reference": row["reference"],
         "candidate": row["variation"],
-        "scope": "P061与V002单个压力工况的域不确定性诊断",
+        "scope": "P061与V003侧向净空单因素工况的域不确定性诊断",
         "comparison_basis": row.get("comparison_basis"),
         "phase_alignment": alignment_info or {},
         "residual_metrics": residual,
@@ -513,7 +577,7 @@ def write_csv(path, rows):
 
 
 def parse_args(argv=None):
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description="独立复频响数据与数值敏感性评价")
     parser.add_argument("--root", type=Path, default=repo_root / "Run/ch4_sp_01_V")
     parser.add_argument("--output", type=Path, default=None)
@@ -528,7 +592,7 @@ def main(argv=None):
     inspections = [inspect_case(path) for path in case_dirs]
     by_suffix = {}
     for path in case_dirs:
-        for suffix in ("P061", "V001", "V002", "V003"):
+        for suffix in ("P061", "V001", "V002", "V003", "V004"):
             if path.name.endswith(suffix):
                 by_suffix[suffix] = path
     frequency = regular_grid(FREQUENCY_MIN, FREQUENCY_MAX, FREQUENCY_STEP)
@@ -541,7 +605,7 @@ def main(argv=None):
         except Exception as exc:
             load_errors[suffix] = str(exc)
     comparisons = []
-    v002_uncertainty = None
+    v003_uncertainty = None
     inspection_by_suffix = {}
     for suffix in by_suffix:
         for item in inspections:
@@ -549,14 +613,14 @@ def main(argv=None):
                 inspection_by_suffix[suffix] = item
                 break
     if "P061" in loaded:
-        for suffix in ("V001", "V002", "V003"):
+        for suffix in ("V001", "V002", "V003", "V004"):
             if suffix in loaded:
                 tail_ratio = float(inspection_by_suffix.get(suffix, {}).get(
                     "surface_tail_p95_ratio", float("nan")
                 ))
                 alignment_info = None
                 candidate_for_metrics = None
-                if suffix == "V002":
+                if suffix == "V003":
                     candidate_for_metrics, alignment_info = coordinate_phase_alignment(
                         loaded["P061"], loaded[suffix], frequency, s_values
                     )
@@ -571,8 +635,8 @@ def main(argv=None):
                     alignment_info=alignment_info,
                 )
                 comparisons.append(comparison)
-                if suffix == "V002":
-                    v002_uncertainty = build_v002_uncertainty(
+                if suffix == "V003":
+                    v003_uncertainty = build_v003_uncertainty(
                         comparison, alignment_info
                     )
     write_csv(output / "case_data_completeness.csv", inspections)
@@ -580,30 +644,41 @@ def main(argv=None):
     all_data_complete = bool(
         inspections
         and all(item.get("data_complete", False) for item in inspections)
-        and len(comparisons) == 3
+        and len(comparisons) == 4
     )
     all_legacy_reference_lines_met = bool(
         all_data_complete
         and all(item.get("legacy_reference_lines_met", False) for item in comparisons)
     )
+    all_primary_reference_lines_met = bool(
+        all_data_complete
+        and all(item.get("primary_reference_lines_met", False) for item in comparisons)
+    )
     payload = {
         "all_data_complete": all_data_complete,
         "all_legacy_reference_lines_met": all_legacy_reference_lines_met,
-        "all_reference_lines_met": all_legacy_reference_lines_met,
+        "all_primary_reference_lines_met": all_primary_reference_lines_met,
+        "all_reference_lines_met": all_primary_reference_lines_met,
         "case_data": inspections,
         "validation_comparisons": comparisons,
         "comparison_load_errors": load_errors,
-        "v002_uncertainty_available": bool(v002_uncertainty),
-        "note": "本评价独立于后处理执行状态；V002主指标为消除理论坐标相位后的残余不确定性，旧参考线字段仅作兼容性记录，不作为自动放行条件，也不改写postprocess_status.json",
+        "v003_uncertainty_available": bool(v003_uncertainty),
+        "note": "本评价独立于后处理执行状态；全地表统一使用左侧上平台一维自由场，主要判据为坡顶主峰频率误差不超过0.2 Hz且坡面中部峰值变化不超过5%；V003复场指标先消除理论横向坐标相位，旧参考线字段仅作兼容性记录，也不改写postprocess_status.json",
     }
     with (output / "evaluation_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, allow_nan=True)
-    if v002_uncertainty is not None:
-        with (output / "v002_domain_uncertainty.json").open("w", encoding="utf-8") as handle:
-            json.dump(v002_uncertainty, handle, ensure_ascii=False, indent=2, allow_nan=True)
+    if v003_uncertainty is not None:
+        with (output / "v003_domain_uncertainty.json").open("w", encoding="utf-8") as handle:
+            json.dump(v003_uncertainty, handle, ensure_ascii=False, indent=2, allow_nan=True)
     print(
-        "评价完成：数据完整=%s，旧参考线结果=%s，V002残余不确定性=%s，输出=%s"
-        % (all_data_complete, all_legacy_reference_lines_met, bool(v002_uncertainty), output)
+        "评价完成：数据完整=%s，主要判据=%s，旧参考线结果=%s，V003残余不确定性=%s，输出=%s"
+        % (
+            all_data_complete,
+            all_primary_reference_lines_met,
+            all_legacy_reference_lines_met,
+            bool(v003_uncertainty),
+            output,
+        )
     )
     return 0
 
