@@ -127,14 +127,13 @@ run_cfg = {
 
 # 人工边界配置
 boundary_cfg = {
-    'R_mode': 'half_diagonal',          # R取值方式：given=读取R/half_diagonal=按计算域半对角线计算
-    'R': 600.0,                         # R_mode=given时的弹簧刚度参考距离 R(m)
-    'alpha_N': 1.0 / (2.0 * (1.0 + 0.8)),  # 法向弹簧系数：K_N=alpha_N*(lambda+2G)*A_l/R
-    'alpha_T': 1.0 / (2.0 * (1.0 + 0.8)),  # 切向弹簧系数：K_T=alpha_T*G*A_l/R
-    'beta_N': 1.1,                      # 法向阻尼系数：C_N=beta_N*rho*cp*A_l
-    'beta_T': 1.1,                      # 切向阻尼系数：C_T=beta_T*rho*cs*A_l
-    'dashpot_scale': 1.0,               # 阻尼器整体缩放；0=关闭阻尼器，可用于吸收性能对照
-    'spring_scale': 1.0,                # 弹簧整体缩放；0=关闭弹簧，可用于吸收性能对照
+    'dashpot_scale': 1.0,               # 阻尼器(吸收)cn,ct 缩放：1.0=全吸收(Liu)/0<k<1=弱吸收/0=纯弹簧全反射
+    'spring_scale': 1.0,                # 弹簧(恢复)kn,kt 缩放：1.0=现行(α0.5/0.25)/2.0=标准Liu/0=纯黏性(弹簧关)
+    'sponge_enable': False,             # 边界内侧阻尼海绵层开关(opt-in)：L/R/B 内侧加渐变阻尼带吸收残余反射
+    'sponge_sides': ('left', 'right', 'bottom'),  # 海绵作用边界：left/right/bottom，可由工况配置覆盖
+    'sponge_width': 0.0,                # 海绵带宽 m：0=自动 max(10×基准网格,8%域宽)；graded 网格远场粗须用域宽项
+    'sponge_grades': 5,                 # 海绵分级数：阻尼从内缘 0 渐增到贴边界，级越多越平滑
+    'sponge_xi_max': 0.3,               # 贴边界处附加阻尼比(占主频 fc)：海绵最外层 ξ 附加量，0.3≈强吸收
 }
 
 # 土体非线性：等效线性(EQL) 配置
@@ -1601,6 +1600,96 @@ def _assign_sections_by_band(part, band_sections, surface_y_fn=None):
     return counts
 
 
+def _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name):
+    """边界内侧阻尼海绵层(opt-in)：对距 sponge_sides 指定人工边界 sponge_width 内的单元，按到边界归一距离分级，
+    在该带原材料上叠加渐增的刚度比例瑞利阻尼 β，吸收漏过 VAB 的残余外行波。
+
+    默认关闭(boundary_cfg['sponge_enable']=False)→直接返回，不改变既有行为。分级 0(海绵内缘,无附加)
+    → ngrade-1(贴边界, ξ 附加=sponge_xi_max)，渐变避免阻尼突变自身反射。每个(材料带,级)组合复制带材料
+    并叠加 β，按单元集 SectionAssignment 覆盖原面截面(后赋材覆盖先赋材)。顶为自由面，不设海绵。
+    注：与 eql_cfg['mode']='2d_element' 同时启用时，软层重叠单元以后运行者为准(EQL 在分析后外迭代赋材)。
+    """
+    if not boundary_cfg.get('sponge_enable', False):  # 未启用→零风险返回
+        return
+    if not fc or float(fc) <= 0.0:  # 海绵 β 需主频换算，缺 fc 则跳过并告警
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：缺主频 fc，未生效(需输入波主频)', model_name)
+        return
+    ngrade = max(1, int(boundary_cfg.get('sponge_grades', 5)))  # 分级数
+    xi_max = float(boundary_cfg.get('sponge_xi_max', 0.3))      # 贴边界处附加阻尼比(占主频)
+    xs = [n.coordinates[0] for n in part.nodes]; ys_all = [n.coordinates[1] for n in part.nodes]  # 域包围盒
+    xmin, xmax, ymin = min(xs), max(xs), min(ys_all)
+    raw_sides = boundary_cfg.get('sponge_sides', ('left', 'right', 'bottom'))  # 读取海绵作用边界
+    if isinstance(raw_sides, basestring):  # 兼容 JSON 字符串形式，如 "left,right"
+        raw_sides = raw_sides.split(',')
+    side_alias = {'l': 'left', 'r': 'right', 'b': 'bottom'}  # 支持简写，内部统一为完整名称
+    sides = []  # 规范化后的去重边界列表
+    for side in raw_sides if isinstance(raw_sides, (list, tuple)) else []:
+        key = side_alias.get(str(side).strip().lower(), str(side).strip().lower())
+        if key in ('left', 'right', 'bottom') and key not in sides:
+            sides.append(key)
+    if not sides:  # 空或非法配置不能静默把海绵扩展到所有边界
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：sponge_sides=%s 无有效边界，未生效', model_name, str(raw_sides))
+        return
+    sw = float(boundary_cfg.get('sponge_width', 0.0))           # 海绵带宽 m
+    if sw <= 0.0:  # 0=自动：max(10×基准网格, 8%域宽)——graded 网格远场单元粗，纯 10×网格常过小、捕不到单元
+        sw = max(10.0 * float(mesh_size), 0.08 * (xmax - xmin))
+    groups = {}  # (带idx, 级) -> [单元标签]
+    for el in part.elements:
+        node_idx = el.connectivity  # 单元节点内部索引元组
+        coords = [part.nodes[i].coordinates for i in node_idx]  # 各节点坐标
+        xc = sum([p[0] for p in coords]) / len(coords)  # 质心 x（用列表避免通配 sum 拒收生成器）
+        yc = sum([p[1] for p in coords]) / len(coords)  # 质心 y
+        distances = []  # 仅计入显式指定的人工边界，顶部自由面始终不计
+        if 'left' in sides:
+            distances.append(xc - xmin)
+        if 'right' in sides:
+            distances.append(xmax - xc)
+        if 'bottom' in sides:
+            distances.append(yc - ymin)
+        d = min(distances)  # 到指定边界的最近距离
+        if d >= sw:  # 海绵带外→保持原材料
+            continue
+        g = min(ngrade - 1, int((1.0 - d / sw) * ngrade))  # 归一深度 0(内缘)→1(边界) 映射到级
+        ys = surf_fn(xc)  # 该柱地表高程(落带用)
+        bi = 0  # 兜底归基岩
+        for i, b in enumerate(strat):  # 质心落入哪条材料带
+            y0, y1 = _band_bounds_at(b, ys)
+            if y0 - 1e-4 <= yc < y1 + 1e-4:
+                bi = i; break
+        groups.setdefault((bi, g), []).append(el.label)
+    if not groups:  # 海绵带内无单元(sw 过小或网格过粗)
+        if logger:
+            log_step(logger, '%s 阻尼海绵层：带宽 %.2fm 内无单元，未生效(增大 sponge_width)', model_name, sw)
+        return
+    n_assigned = 0
+    for (bi, g), labs in groups.items():  # 逐(带,级)复制材料+叠加 β+按单元集赋材
+        band = strat[bi]; mat = band['mat']
+        EE = _compute_elastic_modulus_from_wave_speed(mat.cs, mat.vv, mat.density)  # 该带弹模
+        if damping and damping.get('enable'):  # 复刻该带原瑞利阻尼(_create_band_materials_sections 同口径)
+            is_bedrock = (bi == 0)
+            xi0 = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, band['name'])
+            f_layer = None if is_bedrock else _band_resonance_freq(band)
+            a0, b0 = _rayleigh_coeffs(xi0, damping, damping['fc'], f_layer)
+        else:  # 原本无阻尼→海绵附加为唯一阻尼
+            a0, b0 = 0.0, 0.0
+        b_extra = (xi_max * (g + 0.5) / ngrade) / (math.pi * float(fc))  # 刚度比例 β：ξ_add=βπf → β=ξ_add/(πf)
+        mname = _next_available_name('Mat-Sponge_b%d_g%d' % (bi, g), model.materials)
+        m = model.Material(name=mname); m.Elastic(table=((EE, mat.vv),)); m.Density(table=((mat.density,),))
+        m.Damping(alpha=a0, beta=b0 + b_extra)  # 原阻尼 + 海绵附加 β
+        sname = _next_available_name('Sec-Sponge_b%d_g%d' % (bi, g), model.sections)
+        model.HomogeneousSolidSection(name=sname, material=mname, thickness=1.0)
+        setname = _next_available_name('Sponge_b%d_g%d' % (bi, g), part.sets)
+        part.SetFromElementLabels(name=setname, elementLabels=tuple(sorted(labs)))  # 该(带,级)单元集
+        part.SectionAssignment(region=part.sets[setname], sectionName=sname,  # 覆盖原面截面
+                               offset=0.0, offsetType=MIDDLE_SURFACE, offsetField='', thicknessAssignment=FROM_SECTION)
+        n_assigned += len(labs)
+    if logger:
+        log_step(logger, '%s 阻尼海绵层已施加：边界=%s, 带宽=%.1fm, %d级, 贴边界附加ξ=%.0f%%, 覆盖 %d 单元/%d 组',
+                 model_name, '/'.join(sides), sw, ngrade, 100 * xi_max, n_assigned, len(groups))
+
+
 def _band_graded_sizes(strat, mesh_used, mcfg, fc=None):  # 各带目标单元尺寸（波速比缩放 + 软层谐波/穿层加密）
     """返回与 strat 等长的各带目标尺寸列表（从下到上）。纯函数，便于单测。
 
@@ -1818,6 +1907,9 @@ def create_model(site, geom, mesh_size, cae_name=None, logger=None, damping=None
     log_step(logger, '%s 截面属性分配完成: %s', model_name,
              ', '.join('%s=%d' % (n, c) for n, c in counts))
 
+    # 边界内侧阻尼海绵层（opt-in，默认关闭→不改变既有行为；在带截面之后覆盖边界区单元截面）
+    _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name)
+
     # 重新生成装配体以同步网格
     assembly.regenerate()
 
@@ -1929,7 +2021,7 @@ def create_flat_validation_model(site, geom, mesh_size, cae_name=None, logger=No
 
     mesh_cfg = mesh_cfg or {}  # 缺省配置采用均匀网格
     picked_regions = part.faces
-    surf_fn = lambda _xc: H_flat  # 平坦地表函数，供分层赋材使用
+    surf_fn = lambda _xc: H_flat  # 平坦地表函数，供分层赋材和海绵层共用
     graded = bool(mesh_cfg.get('graded', False)) and len(strat) > 1
     if graded:  # 分层非均匀网格
         ginfo = _seed_graded_mesh(part, strat, surf_fn, mesh_size, mesh_cfg, elem_name, logger, model_name, fc)
@@ -1948,6 +2040,7 @@ def create_flat_validation_model(site, geom, mesh_size, cae_name=None, logger=No
     counts = _assign_sections_by_band(part, band_sections, surf_fn)  # 按平坦地表高程分配截面
     log_step(logger, '%s 平场截面属性分配完成: %s', model_name,
              ', '.join('%s=%d' % (n, c) for n, c in counts))
+    _apply_damping_sponge(model, part, strat, damping, surf_fn, mesh_size, fc, logger, model_name)
     assembly.regenerate()
 
     x_list = [node.coordinates[0] for node in part.nodes]
@@ -1979,44 +2072,14 @@ def create_flat_validation_model(site, geom, mesh_size, cae_name=None, logger=No
 # ==========================================================
 
 
-def _resolve_boundary_R(geom):
-    """解析人工边界公式中的参考距离R。
-
-    ``R_mode='given'`` 时直接采用 ``boundary_cfg['R']``；
-    ``R_mode='half_diagonal'`` 时将计算域左下角作为坐标参考，
-    以几何包络矩形的中心为O，按 R=sqrt((L/2)^2+(H/2)^2) 计算。
-
-    返回
-    ----
-    tuple
-        (R, mode, L, H)，其中L为计算域总宽度，H为最大地表高程对应的包络高度。
-    """
-    mode = str(boundary_cfg.get('R_mode', 'given')).strip().lower()
-    L = float(geom.total_L)
-    H = float(geom.H_upper)
-    if not (L > 0.0 and H > 0.0):
-        raise ValueError('计算域几何尺寸必须满足 L>0 且 H>0: L=%.6f, H=%.6f' % (L, H))
-    if mode in ('given', 'explicit'):
-        R = float(boundary_cfg.get('R', 0.0))
-        mode = 'given'
-    elif mode in ('half_diagonal', 'geometry_half_diagonal', 'auto'):
-        R = math.sqrt((0.5 * L) ** 2 + (0.5 * H) ** 2)
-        mode = 'half_diagonal'
-    else:
-        raise ValueError('boundary_cfg["R_mode"] 仅支持 given 或 half_diagonal，当前为 %r' % mode)
-    if not (R > 0.0):
-        raise ValueError('人工边界参考距离R必须为正数，当前为 %.6f' % R)
-    return R, mode, L, H
-
-
-def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, R, logger=None, model_name='Model-1', boundary_tag='?', quadratic=False):
+def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, ymax, logger=None, model_name='Model-1', boundary_tag='?', quadratic=False):
     """对一条边界的实例节点排序、计算影响长度(权重)与弹簧/阻尼系数，返回 BoundaryNode 列表。
 
     nodes       : Abaqus 实例节点序列
     sort_axis   : 'x' 或 'y'，沿该轴排序并据相邻间距求影响长度
     ascending   : 是否升序（底边升序、侧边降序，沿用现有行为）
     pick_material: 函数 (x, y) -> 材料参数 dict，用于按节点所在层取系数
-    R           : 弹簧刚度公式中的显式参考距离，单位 m
+    ymax        : 弹簧刚度公式中的参考长度 R
     quadratic   : 是否二次单元(CPE8/8R)。True 时边界节点为 角-中-角 交替，
                   须用二次单元边一致权重(角:中=1/6:2/3)，否则黏弹性边界/等效力注入失真。
 
@@ -2052,33 +2115,29 @@ def _make_boundary_nodes(nodes, sort_axis, ascending, pick_material, R, logger=N
         if n > 2:
             influence[1:-1] = np.abs(coord[:-2] - coord[2:]) / 2.0
 
-    alpha_n = float(boundary_cfg.get('alpha_N', 0.5))  # 法向弹簧公式系数
-    alpha_t = float(boundary_cfg.get('alpha_T', 0.5))  # 切向弹簧公式系数
-    beta_n = float(boundary_cfg.get('beta_N', 1.0))    # 法向阻尼公式系数
-    beta_t = float(boundary_cfg.get('beta_T', 1.0))    # 切向阻尼公式系数
-    dscale = float(boundary_cfg.get('dashpot_scale', 1.0))  # 阻尼器整体缩放系数
-    sscale = float(boundary_cfg.get('spring_scale', 1.0))   # 弹簧整体缩放系数
+    dscale = float(boundary_cfg.get('dashpot_scale', 1.0))  # 边界阻尼器(吸收)缩放系数（1=全吸收/0=全反射）
+    sscale = float(boundary_cfg.get('spring_scale', 1.0))   # 边界弹簧(恢复)缩放系数（1=现行/2=标准Liu/0=纯黏性）
     dnscale = float(boundary_cfg.get('dashpot_normal_scale', dscale))  # 可选法向系数；缺省保持旧行为
     dtscale = float(boundary_cfg.get('dashpot_tangential_scale', dscale))  # 可选切向系数；缺省保持旧行为
-    snscale = float(boundary_cfg.get('spring_normal_scale', sscale))  # 可选法向整体缩放；用于对照实验
-    stscale = float(boundary_cfg.get('spring_tangential_scale', sscale))  # 可选切向整体缩放；用于对照实验
+    snscale = float(boundary_cfg.get('spring_normal_scale', sscale))  # 可选法向系数；用于文献边界精确复现
+    stscale = float(boundary_cfg.get('spring_tangential_scale', sscale))  # 可选切向系数；用于文献边界精确复现
     result = []
     for idx in range(n):
         x0 = arr[idx, 1]
         y0 = arr[idx, 2]
         inf = influence[idx]
         mat = pick_material(x0, y0)
-        kn = alpha_n * (mat['lam'] + 2.0 * mat['GG']) / R * inf * snscale  # 法向弹簧(恢复) × 缩放
-        cn = beta_n * mat['density'] * mat['cp'] * inf * dnscale  # 法向阻尼器(吸收) × 缩放
-        kt = alpha_t * mat['GG'] / R * inf * stscale  # 切向弹簧(恢复) × 缩放
-        ct = beta_t * mat['density'] * mat['cs'] * inf * dtscale  # 切向阻尼器(吸收) × 缩放
+        kn = mat['GG'] / 2.0 / ymax * inf * snscale  # 法向弹簧(恢复) × 缩放
+        cn = mat['density'] * mat['cp'] * inf * dnscale  # 法向阻尼器(吸收) × 缩放
+        kt = mat['GG'] / 4.0 / ymax * inf * stscale  # 切向弹簧(恢复) × 缩放
+        ct = mat['density'] * mat['cs'] * inf * dtscale  # 切向阻尼器(吸收) × 缩放
         result.append(BoundaryNode(label=int(arr[idx, 0]), x=x0, y=y0, influence=inf,
                                    kn=kn, cn=cn, kt=kt, ct=ct))
-    if logger and abs(dscale - 1.0) > 1e-9:  # 非基准阻尼缩放时显式留痕
-        log_step(logger, '%s 边界[%s] 阻尼器整体缩放 dashpot_scale=%.3f',
+    if logger and abs(dscale - 1.0) > 1e-9:  # 非标准吸收时显式告警（对照实验留痕）
+        log_step(logger, '%s 边界[%s] 阻尼器吸收缩放 dashpot_scale=%.3f（1=全吸收/0=纯弹簧全反射）',
                  model_name, boundary_tag, dscale)
-    if logger and abs(sscale - 1.0) > 1e-9:  # 非基准弹簧缩放时显式留痕
-        log_step(logger, '%s 边界[%s] 弹簧整体缩放 spring_scale=%.3f',
+    if logger and abs(sscale - 1.0) > 1e-9:  # 非现行弹簧系数时显式告警（对照实验留痕）
+        log_step(logger, '%s 边界[%s] 弹簧恢复缩放 spring_scale=%.3f（1=现行α_n0.5/α_t0.25, 2=标准Liu, 0=纯黏性）',
                  model_name, boundary_tag, sscale)
     if logger and n > 0:
         kns = [b.kn for b in result]; cns = [b.cn for b in result]
@@ -2313,25 +2372,7 @@ def VAB_oblique(site, geom, angle,
     r_nodes = get_instance_nodes_from_part_set('Right_boundary')
     ymax_r = max(r_nodes, key=lambda node: node.coordinates[1]).coordinates[1]
 
-    # R 可直接给定，也可按计算域包络矩形半对角线自动计算
-    R, R_mode, R_L, R_H = _resolve_boundary_R(geom)
-    alpha_n = float(boundary_cfg.get('alpha_N', 0.5))
-    alpha_t = float(boundary_cfg.get('alpha_T', 0.5))
-    beta_n = float(boundary_cfg.get('beta_N', 1.0))
-    beta_t = float(boundary_cfg.get('beta_T', 1.0))
-    for _name, _value in (('alpha_N', alpha_n), ('alpha_T', alpha_t),
-                          ('beta_N', beta_n), ('beta_T', beta_t)):
-        if not (_value >= 0.0):
-            raise ValueError('boundary_cfg["%s"] 不能为负数' % _name)
-    if R_mode == 'half_diagonal':
-        log_step(logger, '%s R按计算域半对角线计算: L=%.3fm, H=%.3fm, O=(%.3f, %.3f), R=%.3fm',
-                 model_name, R_L, R_H, 0.5 * R_L, 0.5 * R_H, R)
-    else:
-        log_step(logger, '%s R采用 boundary_cfg 显式给定值: R=%.3fm (计算域L=%.3fm, H=%.3fm)',
-                 model_name, R, R_L, R_H)
-    log_step(logger, '%s VAB公式参数: R=%.3fm, K_N=alpha_N(lambda+2G)A_l/R, K_T=alpha_T*G*A_l/R, '
-                    'C_N=beta_N*rho*cp*A_l, C_T=beta_T*rho*cs*A_l; alpha_N=%.6g, alpha_T=%.6g, beta_N=%.6g, beta_T=%.6g',
-             model_name, R, alpha_n, alpha_t, beta_n, beta_t)
+    ymax = max(ymax_l, ymax_r)
 
     # 按节点所在材质层选择材料参数（v7：经 _band_bounds_at 按局部柱落带，支持任意层数与 terrain 模式）
     def pick_material(x_coord, y_coord):
@@ -2345,14 +2386,14 @@ def VAB_oblique(site, geom, angle,
     # 构建三条边界的节点列表（含影响长度/一致权重与弹簧-阻尼系数）
     _, _, _is_quad = _elem_codes(elem_name)  # 是否二次单元(决定边界节点权重口径)
     nodes_by_boundary = {  # 各边界 -> BoundaryNode 列表
-        'l': _make_boundary_nodes(l_nodes, 'y', False, pick_material, R, logger, model_name, 'l', quadratic=_is_quad),  # 左边界（沿 y 降序）
-        'r': _make_boundary_nodes(r_nodes, 'y', False, pick_material, R, logger, model_name, 'r', quadratic=_is_quad),  # 右边界（沿 y 降序）
-        'b': _make_boundary_nodes(b_nodes, 'x', True, pick_material, R, logger, model_name, 'b', quadratic=_is_quad),  # 底边界（沿 x 升序）
+        'l': _make_boundary_nodes(l_nodes, 'y', False, pick_material, ymax, logger, model_name, 'l', quadratic=_is_quad),  # 左边界（沿 y 降序）
+        'r': _make_boundary_nodes(r_nodes, 'y', False, pick_material, ymax, logger, model_name, 'r', quadratic=_is_quad),  # 右边界（沿 y 降序）
+        'b': _make_boundary_nodes(b_nodes, 'x', True, pick_material, ymax, logger, model_name, 'b', quadratic=_is_quad),  # 底边界（沿 x 升序）
     }
     _n_bn = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
     log_step(logger, '%s 边界节点影响长度与弹簧-阻尼系数已计算: 左=%d, 右=%d, 底=%d (合计=%d, 参考长度R=%.2f)',
              model_name, len(nodes_by_boundary['l']), len(nodes_by_boundary['r']),  # 左右底节点数
-             len(nodes_by_boundary['b']), _n_bn, R)  # 合计数与参考长度
+             len(nodes_by_boundary['b']), _n_bn, ymax)  # 合计数与参考长度
 
     _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logger)  # 施加接地弹簧-阻尼器
 
@@ -2857,7 +2898,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                      sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
                      validation_geometry='slope'):  # 写出统一工况元数据（含验证几何模式）
     """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
-    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、人工边界、自由场配置及同侧一维场地放大基准等参数，
+    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、自由场配置及同侧一维场地放大基准等参数，
     供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
     返回：
         同侧一维自由场场地放大基准(ff_theory)字典（计算成功时），否则返回 None。
@@ -2902,7 +2943,6 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'a0_base': _meta_f(a0_base),  # a0 换算基数（v9.1：按最软层 vs_min）
             'a0': _meta_f(a0_val),  # v7：无量纲频率 a0（与论文工况对位用）
         }
-        R_meta, R_mode_meta, R_L_meta, R_H_meta = _resolve_boundary_R(geom)  # 记录实际采用的R及其几何来源
         out_dir = os.path.abspath(os.getcwd())  # 当前工况文件夹（建模运行目录）
         meta = {
             'schema_version': 1,  # schema 版本号
@@ -2917,23 +2957,6 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'layers': layers,
             'derived': derived,  # 派生量
             'damping': _damping_meta(site, damping, geom),  # 材料阻尼块（逐层 xi/f_layer/alpha/beta，可复现；v9 传 geom 算共振频率）
-            'boundary': {  # 粘弹性人工边界公式参数（与 boundary_cfg 同步，便于结果追溯）
-                'R': _meta_f(R_meta),
-                'R_mode': R_mode_meta,
-                'R_input': _meta_f(boundary_cfg.get('R')),
-                'R_geometry_L': _meta_f(R_L_meta),
-                'R_geometry_H': _meta_f(R_H_meta),
-                'alpha_N': _meta_f(boundary_cfg.get('alpha_N')),
-                'alpha_T': _meta_f(boundary_cfg.get('alpha_T')),
-                'beta_N': _meta_f(boundary_cfg.get('beta_N')),
-                'beta_T': _meta_f(boundary_cfg.get('beta_T')),
-                'dashpot_scale': _meta_f(boundary_cfg.get('dashpot_scale')),
-                'spring_scale': _meta_f(boundary_cfg.get('spring_scale')),
-                'dashpot_normal_scale': _meta_f(boundary_cfg.get('dashpot_normal_scale', boundary_cfg.get('dashpot_scale', 1.0))),
-                'dashpot_tangential_scale': _meta_f(boundary_cfg.get('dashpot_tangential_scale', boundary_cfg.get('dashpot_scale', 1.0))),
-                'spring_normal_scale': _meta_f(boundary_cfg.get('spring_normal_scale', boundary_cfg.get('spring_scale', 1.0))),
-                'spring_tangential_scale': _meta_f(boundary_cfg.get('spring_tangential_scale', boundary_cfg.get('spring_scale', 1.0))),
-            },
             'eql': (eql_info if eql_info else {'enable': False}),  # v2 土体非线性 EQL 结果(各非线性层 γ_eff/G_Gmax/Vs0→Vs/ξ)
             'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
             'extra': {},  # 附加自定义键值

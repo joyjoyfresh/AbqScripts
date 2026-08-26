@@ -8,7 +8,6 @@
 ## 文档
 
 - 用户提及 `docs/` 中的内容时，执行前先阅读相关文档；默认只读 Markdown，明确提及的参考文献或其他格式除外。
-- 修改项目功能、逻辑、参数或代码后，同步更新 `docs/` 中的相关文档；计划变更或完成后同步更新状态。
 - 文档统一放入 `docs/<类型>/`：`交接文档`、`技术文档`、`计划文档`、`论文材料`、`进度汇报`、`参考文献`。生成文档的脚本与其输出放在同一子目录。
 - 技术报告、指南、计划等采用描述性中文文件名，不加 `_v1`、`_v2` 等版本后缀，直接更新现有最新版。
 - `进度汇报/` 文件名以 `YYYY-MM-DD_` 开头。
@@ -24,8 +23,7 @@
 
 ## 测试
 
-- 不调用 Abaqus/OpenSees 求解器的纯 Python 测试放入 `test/<模块>/`，可正常入库。
-- OpenSees 脚本及产物统一放入 `test/OpenSees/`；Abaqus 脚本及产物统一放入 `test/Abaqus/`。两目录整体由 `.gitignore` 排除。
+- 不调用 Abaqus求解器的纯 Python 测试放入 `test/<模块>/`，可正常入库。Abaqus 脚本及产物统一放入 `test/Abaqus/`，目录整体由 `.gitignore` 排除。
 - Abaqus 测试入口放入 `test/Batch/`，以 `Batch/Autorun_template_v2.py` 为模板，可由普通 Python 直接启动：`sys.argv[1]` 接收工况根目录，缺省时使用脚本所在目录；脚本路径和工况路径均使用绝对路径；产物写入 `test/Abaqus/<工况>/`。
 - 运行形式：`python <仓库绝对路径>\test\Batch\Autorun_xxx_v1.py <仓库绝对路径>\test\Abaqus\xxx-test`。
 
