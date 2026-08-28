@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""训练小论文完整复频响代理：最近邻、POD-Ridge与POD-GPR。
+"""训练小论文相位对齐总波场响应代理：最近邻、POD-Ridge与POD-GPR。
 
 输入为 ``analyze_complex_frf.py`` 生成的 ``complex_frf_dataset.npz``。
 训练/验证按完整物理工况划分；标准化、缺失值处理、POD和回归均在当前训练折
@@ -86,7 +86,7 @@ def prepare_output(field, valid_mask, minimum_valid_fraction=0.95):
     finite = valid_mask & np.isfinite(field.real) & np.isfinite(field.imag)
     pixel_mask = np.mean(finite, axis=0) >= float(minimum_valid_fraction)
     if int(np.sum(pixel_mask)) < 2:
-        raise ValueError("训练折共同有效的复频响网格点不足")
+        raise ValueError("训练折共同有效的总波场响应网格点不足")
     complex_values = field[:, pixel_mask]
     values = np.concatenate([complex_values.real, complex_values.imag], axis=1)
     finite_values = np.isfinite(values)
@@ -377,7 +377,7 @@ def summary_rows(cv_rows):
 
 def parse_args(argv=None):
     repo_root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="训练完整复频响POD代理")
+    parser = argparse.ArgumentParser(description="训练相位对齐总波场响应POD代理")
     parser.add_argument("--dataset", type=Path, default=repo_root / "Run/ch4_sp_analysis/complex_frf_dataset.npz")
     parser.add_argument("--output", type=Path, default=repo_root / "Run/ch4_sp_ml")
     parser.add_argument("--folds", type=int, default=5)
@@ -403,6 +403,13 @@ def main(argv=None):
         s_values = np.asarray(package["s"], dtype=float)
         segments = decode_strings(package["segments"])
         feature_names = decode_strings(package["feature_names"])
+        horizontal_slowness = np.asarray(package["horizontal_slowness_s_m"], dtype=float)
+        phase_origin_x = np.asarray(package["phase_origin_x_m"], dtype=float)
+        incident_angle = np.asarray(package["incident_angle_deg"], dtype=float)
+        bedrock_vs = np.asarray(package["bedrock_vs_m_s"], dtype=float)
+        slope_height = np.asarray(package["slope_height_m"], dtype=float)
+        crest_window = np.asarray(package["crest_window_h"], dtype=float)
+        side_clearance = np.asarray(package["side_clearance_h"], dtype=float)
     finally:
         package.close()
     train_indices = np.where(groups == "P")[0]
@@ -442,6 +449,20 @@ def main(argv=None):
         minimum_valid_fraction=args.minimum_valid_fraction,
         seed=args.seed,
     )
+    phase_fields = {
+        "horizontal_slowness_s_m": horizontal_slowness,
+        "phase_origin_x_m": phase_origin_x,
+        "incident_angle_deg": incident_angle,
+        "bedrock_vs_m_s": bedrock_vs,
+        "slope_height_m": slope_height,
+        "crest_window_h": crest_window,
+        "side_clearance_h": side_clearance,
+    }
+    horizontal_phase = {}
+    for name, values in phase_fields.items():
+        if not np.allclose(values, values[0], rtol=1.0e-12, atol=1.0e-12):
+            raise SystemExit("当前代理要求所有工况的%s一致" % name)
+        horizontal_phase[name] = float(values[0])
     bundle = {
         "schema_version": 2,
         "selected_model": selected_model,
@@ -452,9 +473,11 @@ def main(argv=None):
         "training_case_ids": case_ids[train_indices],
         "training_X": X[train_indices],
         "G_h_model": primary_model,
-        "target_definition": "G_h=A_2D/A_1D_left_global",
-        "reference_scope": "全地表统一使用左侧上平台一维自由场",
-        "reconstruction_requirement": "真实波重构必须提供同工况左侧上平台一维自由场时程",
+        "target_definition": "G_h=(A_total/A_ff_left)*exp(+i*2*pi*f*p*(x-x_ref))",
+        "response_name": "扣除斜入射水平传播相位后的总波场响应函数",
+        "reference_scope": "左侧上平台自由场及其传播至各地表位置的确定性水平相位",
+        "horizontal_phase": horizontal_phase,
+        "reconstruction_requirement": "真实波重构需提供同工况左侧上平台自由场时程，并乘回水平传播相位",
         "configuration": {
             "pod_energy": args.pod_energy,
             "max_components": args.max_components,

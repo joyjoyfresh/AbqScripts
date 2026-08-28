@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成图22：训练外好、中、难工况的复频响真值、预测与残差场。脚本可独立运行。"""
+"""生成图22：训练外工况相位对齐总波场响应的真值、预测与残差场。"""
 
 import pickle
 from pathlib import Path
@@ -55,7 +55,7 @@ def decode_strings(values):
 
 
 def predict_field(model, X):
-    """按冻结模型字典预测完整复频响场。"""
+    """按冻结模型字典预测完整相位对齐总波场响应。"""
     X = np.atleast_2d(np.asarray(X, dtype=float))
     X_scaled = model["feature_scaler"].transform(X)
     if model["model_name"] == "nearest":
@@ -89,9 +89,9 @@ def weighted_complex_error(truth, prediction, valid, frequency_weight):
 
 
 def save_figure(fig):
-    """同时输出300 dpi PNG和矢量PDF。"""
+    """输出300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for suffix in (".png", ".pdf"):
+    for suffix in (".png",):
         path = OUTPUT_DIR / (OUTPUT_STEM + suffix)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         print("已生成：%s" % path)
@@ -101,7 +101,7 @@ def main():
     """读取统一左参考数据集和冻结代理包并绘制三类训练外工况。"""
     set_journal_style()
     if not DATA_PATH.exists() or not MODEL_PATH.exists():
-        raise FileNotFoundError("缺少复频响数据集或冻结代理包。")
+        raise FileNotFoundError("缺少总波场响应数据集或冻结代理包。")
 
     dataset = np.load(DATA_PATH, allow_pickle=True)
     case_ids = decode_strings(dataset["case_ids"])
@@ -209,7 +209,7 @@ def main():
         axes[-1, column].set_xlabel("归一化地表坐标 $s$")
 
     cbar_amp = fig.colorbar(images[0], ax=axes[:, :2].ravel().tolist(), orientation="horizontal", shrink=0.52, pad=0.035)
-    cbar_amp.set_label("复频响幅值 $|G_h|$")
+    cbar_amp.set_label("相位对齐总波场响应幅值 $|G_h|$")
     cbar_log = fig.colorbar(images[2], ax=axes[:, 2].ravel().tolist(), orientation="horizontal", shrink=0.78, pad=0.035)
     cbar_log.set_label(r"$\ln(|\widehat{G}_h|/|G_h|)$")
     cbar_phase = fig.colorbar(images[3], ax=axes[:, 3].ravel().tolist(), orientation="horizontal", shrink=0.78, pad=0.035)

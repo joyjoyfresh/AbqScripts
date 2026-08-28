@@ -146,14 +146,11 @@ def annotate_values(ax, x_values, y_values, frequency=False, offsets=None):
 
 
 def save_figure(fig):
-    """保存300 dpi PNG与PDF。"""
+    """保存300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUTPUT_DIR / (OUTPUT_STEM + ".png")
-    pdf_path = OUTPUT_DIR / (OUTPUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def main():

@@ -51,6 +51,11 @@ import zipfile
 from xml.sax.saxutils import escape as xml_escape
 import numpy as np
 
+try:
+    string_types = (basestring,)  # Python 2 字符串类型
+except NameError:
+    string_types = (str,)  # Python 3 兼容
+
 openOdb = None  # 占位
 is_abaqus = False  # 是否成功加载 Abaqus ODB 接口
 
@@ -416,6 +421,53 @@ def compute_uniform_reference_H(acc_h, reference, dt, freqs, excitation_valid,
     transfer[:, shared] = ref_transfer[:, shared]
     valid[:, shared] = True
     return transfer, valid
+
+
+def remove_incident_horizontal_phase(transfer, xs, freqs, case_cfg, meta):
+    """扣除斜入射平面波相对统一相位原点的水平传播相位。
+
+    ``transfer`` 为总波场相对固定左侧自由场的复谱比。修正因子
+    ``exp(+i*2π*f*p*(x-x_ref))`` 的模恒为1，只改变相位；其中
+    ``p=sin(theta)/Vs_bedrock``。返回修正场及其追溯参数。
+    """
+    material = (case_cfg or {}).get('material_cfg') or {}
+    bedrock = material.get('bedrock') or {}
+    angle_deg = material.get('angle')
+    if angle_deg is None:
+        angle_deg = (meta or {}).get('incident_angle')
+    vs_bedrock = bedrock.get('vs')
+    if angle_deg is None or vs_bedrock is None or float(vs_bedrock) <= 0.0:
+        raise ValueError('水平传播相位修正缺少入射角或基岩剪切波速')
+    freefield = (case_cfg or {}).get('freefield_cfg') or {}
+    x_ref = freefield.get('phase_origin_x')
+    if x_ref is None:
+        x_ref = ((meta or {}).get('freefield') or {}).get('phase_origin_x', 0.0)
+    if isinstance(x_ref, string_types) and x_ref.lower() == 'center':
+        meta_geometry = (meta or {}).get('geometry') or {}
+        total_length = meta_geometry.get('total_L')
+        if total_length is None:
+            geometry = (case_cfg or {}).get('geometry_cfg') or {}
+            total_length = geometry.get('total_L')
+        if total_length is None:
+            raise ValueError('phase_origin_x=center，但元数据中缺少模型总长度')
+        x_ref = 0.5 * float(total_length)
+    else:
+        x_ref = float(x_ref or 0.0)
+    p_horiz = math.sin(math.radians(float(angle_deg))) / float(vs_bedrock)
+    xs = np.asarray(xs, dtype=float).reshape(-1)
+    freqs = np.asarray(freqs, dtype=float).reshape(-1)
+    values = np.asarray(transfer, dtype=np.complex128)
+    if values.shape != (xs.size, freqs.size):
+        raise ValueError('水平传播相位修正的复频响、坐标和频率维度不一致')
+    correction = np.exp(1j * 2.0 * math.pi *
+                        (xs - x_ref)[:, None] * p_horiz * freqs[None, :])
+    return values * correction, {
+        'incident_angle_deg': float(angle_deg),
+        'bedrock_vs_m_s': float(vs_bedrock),
+        'horizontal_slowness_s_m': float(p_horiz),
+        'phase_origin_x_m': x_ref,
+        'operation': 'G_phase_aligned=G_fixed*exp(+i*2*pi*f*p*(x-x_ref))',
+    }
 
 
 def _safe_ratio(num, den):  # 安全除法
@@ -1342,16 +1394,22 @@ def process_one_odb(odb_path, meta, case_cfg, logger=None):
         H_over_1d_left, valid_over_1d_left = compute_uniform_reference_H(
             a1_mat, ref_left, dt, freqs, input_valid,
             fc=fc, fmax_hz=frf_fmax_hz)
+        H_phase_aligned, phase_alignment = remove_incident_horizontal_phase(
+            H_over_1d_left, xs, freqs, case_cfg, meta)
         frf_payload['H_surface_over_1D_h'] = H_over_1d
         frf_payload['one_d_valid_mask'] = valid_over_1d
         frf_payload['H_surface_over_1D_left_h'] = H_over_1d_left
         frf_payload['one_d_left_valid_mask'] = valid_over_1d_left
+        frf_payload['H_total_over_freefield_phase_aligned_h'] = H_phase_aligned
+        frf_payload['phase_aligned_valid_mask'] = valid_over_1d_left.copy()
         write_H_csv('FSAF_1D_h_%s.csv' % record, freqs[input_valid], xs,
                     np.abs(H_over_1d[:, input_valid]))
         write_H_csv('FSAF_1D_left_h_%s.csv' % record, freqs[input_valid], xs,
                     np.abs(H_over_1d_left[:, input_valid]))
         frf_metadata['one_d_reference_available'] = bool(np.any(valid_over_1d))
         frf_metadata['one_d_left_global_reference_available'] = bool(np.any(valid_over_1d_left))
+        frf_metadata['primary_response_definition'] = 'total_wavefield/freefield_after_horizontal_phase_removal'
+        frf_metadata['horizontal_phase_removal'] = phase_alignment
         possible_1d = int(len(xs) * np.sum(input_valid))
         frf_metadata['one_d_valid_fraction'] = (float(np.sum(valid_over_1d)) / float(possible_1d)
                                                 if possible_1d else 0.0)
@@ -2193,13 +2251,16 @@ def resample_outputs(meta, case_cfg, logger=None):  # 重采样主控制函数
             frf['sgrid_x'] = np.asarray(x_phys, dtype=float)
             frf['sgrid_segment'] = segment_array
             for field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h',
-                          'H_surface_over_1D_left_h', 'H_station_h'):
+                          'H_surface_over_1D_left_h',
+                          'H_total_over_freefield_phase_aligned_h', 'H_station_h'):
                 if field not in frf:
                     continue
                 aligned = resample_H_matrix(
                     frf[field], frf_s, s_grid, seg_labels,
                     fill_short_gaps=field in ('H_surface_h', 'H_surface_v', 'H_surface_over_1D_h',
-                                              'H_surface_over_1D_left_h', 'H_station_h'))  # 全复频响场启用短缺口填补，修复坡脚 s∈[0.95,1.10] 段界死区
+                                              'H_surface_over_1D_left_h',
+                                              'H_total_over_freefield_phase_aligned_h',
+                                              'H_station_h'))  # 全复频响场启用短缺口填补，修复坡脚 s∈[0.95,1.10] 段界死区
                 frf['sgrid_%s' % field] = aligned
                 frf['sgrid_%s_valid_mask' % field] = np.isfinite(aligned.real) & np.isfinite(aligned.imag)
             frf_metadata = frf.get('metadata') or {}

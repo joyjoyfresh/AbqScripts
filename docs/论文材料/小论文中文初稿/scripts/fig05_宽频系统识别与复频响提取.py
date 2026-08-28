@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成图5：宽频系统识别与复频响提取。"""
+"""生成图5：宽频系统识别与相位对齐总波场响应提取。"""
 
 from pathlib import Path
 
@@ -75,7 +75,7 @@ def find_case_dir(case_id):
 
 
 def load_data():
-    """读取P061原始时程与统一左侧参考复频响数据。"""
+    """读取P061原始时程与统一左侧自由场参考数据。"""
     case_dir = find_case_dir(CASE_ID)
     surface_file = case_dir / "surface_results.npz"
     freefield_files = sorted(case_dir.glob("freefield_reference_*.npz"))
@@ -140,18 +140,15 @@ def add_panel_label(ax, label):
 
 
 def save_figure(fig):
-    """保存300 dpi PNG与矢量PDF。"""
+    """保存300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUTPUT_DIR / (OUTPUT_STEM + ".png")
-    pdf_path = OUTPUT_DIR / (OUTPUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def main():
-    """绘制宽频输入、参考响应与复频响提取结果。"""
+    """绘制宽频输入、自由场参考与总波场响应函数提取结果。"""
     set_journal_style()
     (
         time_2d,
@@ -192,8 +189,8 @@ def main():
     common_end = min(float(time_2d[-1]), float(time_1d[-1]))
     mask_2d = time_2d <= common_end
     mask_1d = time_1d <= common_end
-    ax.plot(time_2d[mask_2d], crest_acc[mask_2d], color=BLUE, lw=0.7, label="二维坡顶")
-    ax.plot(time_1d[mask_1d], left_acc[mask_1d], color=ORANGE, lw=0.7, alpha=0.85, label="左侧一维自由场")
+    ax.plot(time_2d[mask_2d], crest_acc[mask_2d], color=BLUE, lw=0.7, label="坡顶总波场")
+    ax.plot(time_1d[mask_1d], left_acc[mask_1d], color=ORANGE, lw=0.7, alpha=0.85, label="左侧自由场")
     ax.set_xlim(0.0, common_end)
     ax.set_xlabel("时间 $t$ (s)")
     ax.set_ylabel("水平加速度 (m/s$^2$)")
@@ -202,20 +199,20 @@ def main():
     add_panel_label(ax, "(c)")
 
     ax = axes[1, 0]
-    ax.plot(frequency[valid], np.abs(h_2d[valid]), color=BLUE, lw=1.35, label="$|H_{2D}|$")
+    ax.plot(frequency[valid], np.abs(h_2d[valid]), color=BLUE, lw=1.35, label=r"$|H_{\mathrm{tot}}|$")
     ax.plot(
         frequency[valid],
         np.abs(h_1d_left[valid]),
         color=ORANGE,
         lw=1.35,
         ls="--",
-        label="$|H_{1D,L}|$",
+        label=r"$|H_{\mathrm{ff},L}|$",
     )
     ax.set_xlim(0.5, 10.0)
     ax.set_xlabel("频率 $f$ (Hz)")
     ax.set_ylabel("相对基岩输入的传递幅值")
     ax.legend(loc="upper right")
-    ax.set_title("二维与一维传递函数")
+    ax.set_title("总波场与自由场传递函数")
     add_panel_label(ax, "(d)")
 
     ax = axes[1, 1]
@@ -224,7 +221,7 @@ def main():
     ax.set_xlim(0.5, 10.0)
     ax.set_xlabel("频率 $f$ (Hz)")
     ax.set_ylabel("幅值 $|G_h|$")
-    ax.set_title("复比值幅值：$G_h=H_{2D}/H_{1D,L}$")
+    ax.set_title("相位对齐总波场响应幅值 $|G_h|$")
     add_panel_label(ax, "(e)")
 
     ax = axes[1, 2]
@@ -234,13 +231,13 @@ def main():
     ax.set_xlim(0.5, 10.0)
     ax.set_xlabel("频率 $f$ (Hz)")
     ax.set_ylabel(r"展开相位 $\Phi_h$ ($^\circ$)")
-    ax.set_title("复比值保留相位信息")
+    ax.set_title("扣除水平传播相位后的相位")
     add_panel_label(ax, "(f)")
 
     for axis in axes.ravel():
         axis.grid(True)
     fig.suptitle(
-        r"P061工况的宽频系统识别与复频响提取（$i=60^\circ$, $d/h=1.40$, $r_v=0.30$）",
+        r"P061工况的宽频系统识别与总波场响应函数提取（$i=60^\circ$, $d/h=1.40$, $r_v=0.30$）",
         fontsize=11,
         y=0.995,
     )

@@ -109,14 +109,11 @@ def add_panel_label(ax, label):
 
 
 def save_figure(fig):
-    """保存300 dpi PNG与PDF。"""
+    """保存300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUTPUT_DIR / (OUTPUT_STEM + ".png")
-    pdf_path = OUTPUT_DIR / (OUTPUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def main():
@@ -154,7 +151,7 @@ def main():
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 0.945))
     fig.suptitle(
-        "统一左侧参考下不同频率的地表空间响应（虚线位置为坡顶 $s=0$ 与坡脚 $s=1$）",
+        "扣除斜入射水平传播相位后的地表空间响应（虚线为坡顶 $s=0$ 与坡脚 $s=1$）",
         fontsize=11,
         y=0.995,
     )

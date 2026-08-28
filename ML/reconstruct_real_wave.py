@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""用代理完整复频响和真实波一维参考重构二维坡地地表响应。
+"""用代理总波场响应函数和真实波自由场参考重构坡地地表响应。
 
-物理链为 ``A_2D(f,s)=G_h(f,s)*A_1D,left(f)``。全地表统一使用左侧
-上平台一维自由场；一维参考由建模脚本生成的
+代理目标已扣除斜入射波的水平传播相位。重构时先将该相位乘回左侧上平台
+自由场，再与代理响应相乘；自由场参考由建模脚本生成的
 ``freefield_reference_<record>.npz`` 提供。给定C池直接有限元工况时，程序
 同时计算时程、峰值时刻、PGA、TAF和5%阻尼反应谱误差。
 """
@@ -51,8 +51,32 @@ def infer_parameters(config: dict) -> dict[str, float]:
     }
 
 
+def physical_x_from_s(s_values, slope_angle_deg, phase_config):
+    """按建模与后处理采用的三段定义，将归一坐标 ``s`` 还原为物理横坐标。"""
+    s_values = np.asarray(s_values, dtype=float)
+    height = float(phase_config["slope_height_m"])
+    x_crest = (
+        float(phase_config["crest_window_h"])
+        + float(phase_config["side_clearance_h"])
+    ) * height
+    tangent = math.tan(math.radians(float(slope_angle_deg)))
+    if abs(tangent) <= 1.0e-12:
+        raise ValueError("坡角过小，无法恢复坡面物理横坐标")
+    width = height / tangent
+    x_toe = x_crest + width
+    return np.where(
+        s_values <= 0.0,
+        x_crest + s_values * height,
+        np.where(
+            s_values <= 1.0,
+            x_crest + s_values * width,
+            x_toe + (s_values - 1.0) * height,
+        ),
+    )
+
+
 def predict_field(model, X):
-    """按训练脚本保存的模型字典预测复频响场。"""
+    """按训练脚本保存的模型字典预测相位对齐总波场响应。"""
     X = np.atleast_2d(np.asarray(X, dtype=float))
     X_scaled = model["feature_scaler"].transform(X)
     if model["model_name"] == "nearest":
@@ -439,7 +463,29 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
     )
     left_spectrum = np.fft.rfft(reference["left"] - np.mean(reference["left"]), n=nfft)
     right_spectrum = np.fft.rfft(reference["right"] - np.mean(reference["right"]), n=nfft)
-    response_spectrum = transfer * left_spectrum[None, :]
+    phase_config = bundle.get("horizontal_phase")
+    phase_removed_target = "exp(+i*2*pi*f*p*(x-x_ref))" in str(
+        bundle.get("target_definition", "")
+    )
+    if phase_removed_target:
+        if not phase_config:
+            raise ValueError("模型声明已扣除水平传播相位，但未保存相位还原参数")
+        physical_x = physical_x_from_s(
+            s_values, parameters["slope_angle_deg"], phase_config
+        )
+        horizontal_slowness = float(phase_config["horizontal_slowness_s_m"])
+        phase_origin_x = float(phase_config["phase_origin_x_m"])
+        local_reference_phase = np.exp(
+            -1j * 2.0 * math.pi
+            * (physical_x - phase_origin_x)[:, None]
+            * horizontal_slowness
+            * fft_frequency[None, :]
+        )
+    else:
+        physical_x = np.full(s_values.shape, np.nan, dtype=float)
+        local_reference_phase = np.ones(transfer.shape, dtype=np.complex128)
+    response_transfer = transfer * local_reference_phase
+    response_spectrum = response_transfer * left_spectrum[None, :]
     acceleration = np.fft.irfft(response_spectrum, n=nfft, axis=1)[:, :len(time)]
     acceleration_raw = acceleration.copy()
     left_band = np.fft.irfft(left_spectrum * taper, n=nfft)[:len(time)]
@@ -475,7 +521,8 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "parameters": {name: float(value) for name, value in parameters.items()},
         "model": str(args.model.resolve()),
         "reference": reference["path"],
-        "definition": "A_2D=G_h_surrogate*A_1D_left_global",
+        "definition": "A_total=G_h_phase_aligned*A_ff_left*exp(-i*2*pi*f*p*(x-x_ref))",
+        "response_name": bundle.get("response_name", "总波场响应函数"),
         "reported_time_domain_band_hz": [float(model_frequency[0]), float(model_frequency[-1])],
         "edge_taper_hz": float(args.edge_taper_hz),
         "note": "时程、PGA、TAF和反应谱均按代理公共频带重构；直接有限元比较采用同一频带窗",
@@ -489,6 +536,9 @@ def run_reconstruction(bundle, parameters, reference_path, output, args, truth_c
         "predicted_G_h_valid_mask": G_mask,
         "fft_frequency_hz": fft_frequency,
         "fft_transfer_valid_mask": transfer_mask,
+        "physical_x_m": physical_x,
+        "local_freefield_horizontal_phase": local_reference_phase,
+        "fft_response_transfer": response_transfer,
         "one_d_left_acc_h_bandlimited": left_band,
         "one_d_right_acc_h_bandlimited": right_band,
         "pga_1d_left": pga_1d_crest,
@@ -574,7 +624,7 @@ def discover_reference(case_dir: Path, requested_record=None) -> Path:
 
 def parse_args(argv=None):
     repo_root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="代理复频响驱动的真实波重构")
+    parser = argparse.ArgumentParser(description="代理总波场响应驱动的真实波重构")
     parser.add_argument("--model", type=Path, default=repo_root / "Run/ch4_sp_ml/complex_frf_surrogate.pkl")
     parser.add_argument("--output", type=Path, default=repo_root / "Run/ch4_sp_reconstruction")
     parser.add_argument("--truth-case", type=Path, default=None, help="一个C池直接有限元工况目录")

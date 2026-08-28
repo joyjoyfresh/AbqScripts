@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成图9：代表地表位置的复频响幅值、相位与群时延谱。"""
+"""生成图9：代表地表位置相位对齐总波场响应的幅值、相位与群时延谱。"""
 
 import json
 from pathlib import Path
@@ -110,14 +110,11 @@ def add_panel_label(ax, label):
 
 
 def save_figure(fig):
-    """保存300 dpi PNG与PDF。"""
+    """保存300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUTPUT_DIR / (OUTPUT_STEM + ".png")
-    pdf_path = OUTPUT_DIR / (OUTPUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def main():
@@ -163,7 +160,7 @@ def main():
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=5, bbox_to_anchor=(0.5, 0.935))
     fig.suptitle(
-        "P061工况不同地表位置的复频响谱（统一左侧一维参考）",
+        "P061工况不同地表位置的相位对齐总波场响应谱",
         fontsize=11,
         y=0.995,
     )

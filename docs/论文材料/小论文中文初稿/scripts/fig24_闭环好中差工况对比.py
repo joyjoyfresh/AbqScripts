@@ -110,9 +110,9 @@ def shade_segments(ax, labels=False):
 
 
 def save_figure(fig):
-    """同时输出300 dpi PNG和矢量PDF。"""
+    """输出300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    for suffix in (".png", ".pdf"):
+    for suffix in (".png",):
         path = OUTPUT_DIR / (OUTPUT_STEM + suffix)
         fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
         print("已生成：%s" % path)

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成图7：代表工况复频响幅值、相位与群时延联合场。"""
+"""生成图7：代表工况相位对齐总波场响应的幅值、相位与群时延联合场。"""
 
 from pathlib import Path
 
@@ -60,7 +60,7 @@ def set_journal_style():
 
 
 def load_fields():
-    """读取H004与P061统一左参考复频响联合场。"""
+    """读取H004与P061相位对齐总波场响应联合场。"""
     rows = []
     with np.load(DATA_FILE, allow_pickle=False) as data:
         case_ids = [str(value) for value in data["case_ids"]]
@@ -116,14 +116,11 @@ def mark_regions(ax, top_row=False):
 
 
 def save_figure(fig):
-    """保存300 dpi PNG与PDF。"""
+    """保存300 dpi PNG。"""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUTPUT_DIR / (OUTPUT_STEM + ".png")
-    pdf_path = OUTPUT_DIR / (OUTPUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def main():
@@ -204,7 +201,7 @@ def main():
         colorbar.set_label(title, fontsize=8.5)
         colorbar.ax.tick_params(labelsize=7.5)
 
-    fig.suptitle("统一左侧一维自由场参考下的代表工况复频响联合场", fontsize=11, y=0.985)
+    fig.suptitle("扣除斜入射水平传播相位后的代表工况总波场响应", fontsize=11, y=0.985)
     fig.supxlabel("归一化地表坐标 $s$", fontsize=9, y=0.025)
     save_figure(fig)
     plt.close(fig)

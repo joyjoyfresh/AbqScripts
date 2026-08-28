@@ -169,14 +169,11 @@ def load_metrics() -> dict[str, dict[str, float]]:
 
 
 def save_figure(fig: plt.Figure) -> None:
-    """保存同名 PNG 和 PDF。"""
+    """保存同名300 dpi PNG。"""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     png_path = OUT_DIR / (OUT_STEM + ".png")
-    pdf_path = OUT_DIR / (OUT_STEM + ".pdf")
     fig.savefig(png_path, dpi=300, bbox_inches="tight", pad_inches=0.05, facecolor="white")
-    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.05, facecolor="white")
     print("已生成：%s" % png_path)
-    print("已生成：%s" % pdf_path)
 
 
 def draw_figure() -> None:

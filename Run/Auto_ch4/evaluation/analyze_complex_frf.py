@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
-"""小论文复频响幅值—相位联合分析与机器学习数据集生成。
+"""小论文相位对齐总波场响应分析与机器学习数据集生成。
 
-程序读取各工况 ``surface_results.npz``，将完整复频响统一到
-``0.5:0.1:10 Hz``、``s=-4:0.05:4`` 网格，输出幅值、展开相位、群时延、
-空间相位梯度、层状/均质坡复数修正量和逐工况统计表。
+程序读取各工况 ``surface_results.npz``，将总波场相对统一左侧自由场的复谱比
+扣除斜入射平面波的确定性水平传播相位，再统一到 ``0.5:0.1:10 Hz``、
+``s=-4:0.05:4`` 网格，输出幅值、展开相位、群时延、空间相位梯度、
+层状/均质坡复数修正量和逐工况统计表。
 
 运行示例：
     python Run/evaluation/analyze_complex_frf.py
     python Run/evaluation/analyze_complex_frf.py --figures representative
 
-默认只接受相对于一维自由场的 ``H_surface_over_1D_h``。该字段无有效值时
-工况会被明确跳过，不会用入射波传函或端点传函冒充研究定义中的 ``G_h``。
+固定左侧自由场复谱比仅作为计算中间量；研究定义中的 ``G_h`` 为其乘以
+``exp(+i*2*pi*f*p*(x-x_ref))`` 后的相位对齐总波场响应。参考字段无有效值时
+工况会被明确跳过，不会用入射波传函或端点传函冒充 ``G_h``。
 """
 
 from __future__ import annotations
@@ -97,6 +99,51 @@ def physical_parameters(config: dict) -> tuple[float, float, float]:
     thickness_ratio = sum(float(layer.get("thickness", 0.0)) for layer in layers) / slope_height
     velocity_ratio = float(layers[0]["vs"]) / float(bedrock["vs"])
     return slope_angle, thickness_ratio, velocity_ratio
+
+
+def horizontal_phase_parameters(config: dict) -> dict[str, float]:
+    """返回斜入射水平相位修正及 ``s-x`` 映射所需参数。"""
+    material = config.get("material_cfg") or {}
+    bedrock = material.get("bedrock") or {}
+    geometry = config.get("geometry_cfg") or {}
+    angle_deg = float(material["angle"])
+    bedrock_vs = float(bedrock["vs"])
+    if bedrock_vs <= 0.0:
+        raise ValueError("基岩剪切波速必须为正数")
+    freefield = config.get("freefield_cfg") or {}
+    raw_x_ref = freefield.get("phase_origin_x", 0.0)
+    if isinstance(raw_x_ref, str) and raw_x_ref.lower() == "center":
+        total_length = geometry.get("total_L")
+        if total_length is None:
+            raise ValueError("phase_origin_x=center，但工况配置缺少模型总长度")
+        x_ref = 0.5 * float(total_length)
+    else:
+        x_ref = float(raw_x_ref or 0.0)
+    return {
+        "incident_angle_deg": angle_deg,
+        "bedrock_vs_m_s": bedrock_vs,
+        "horizontal_slowness_s_m": math.sin(math.radians(angle_deg)) / bedrock_vs,
+        "phase_origin_x_m": x_ref,
+        "slope_height_m": float(geometry["slope_height"]),
+        "crest_window_h": float(geometry.get("crest_window", 4.0)),
+        "side_clearance_h": float(geometry.get("side_clearance", 1.0)),
+    }
+
+
+def remove_incident_horizontal_phase(field, frequency, x_values, parameters):
+    """对节点×频率复场乘单位模相位因子，扣除斜入射水平传播相位。"""
+    values = np.asarray(field, dtype=np.complex128)
+    frequency = np.asarray(frequency, dtype=float).reshape(-1)
+    x_values = np.asarray(x_values, dtype=float).reshape(-1)
+    if values.shape != (x_values.size, frequency.size):
+        raise ValueError("水平传播相位修正的复场、坐标和频率维度不一致")
+    p_horiz = float(parameters["horizontal_slowness_s_m"])
+    x_ref = float(parameters["phase_origin_x_m"])
+    correction = np.exp(
+        1j * 2.0 * math.pi *
+        (x_values - x_ref)[:, None] * p_horiz * frequency[None, :]
+    )
+    return values * correction
 
 
 def discover_record(package, requested: str | None = None) -> str:
@@ -317,7 +364,7 @@ def case_metrics(case, frequency, s_values) -> dict:
     mask = case["mask"]
     amplitude = case["amplitude"]
     if not np.any(mask):
-        raise ValueError("统一网格没有有效复频响")
+        raise ValueError("统一网格没有有效总波场响应")
     peak_flat = int(np.nanargmax(np.where(mask, amplitude, np.nan)))
     f_index, s_index = np.unravel_index(peak_flat, amplitude.shape)
     log_amplitude = case["log_amplitude"]
@@ -363,6 +410,10 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
         config = load_case_config(case_dir, package)
         source_frequency = np.asarray(package[prefix + "frequency"], dtype=float)
         source_s = np.asarray(package[prefix + "sgrid_s"], dtype=float)
+        source_x = np.asarray(package[prefix + "sgrid_x"], dtype=float)
+        if source_x.shape != source_s.shape:
+            raise ValueError("s网格与物理横坐标维度不一致")
+        phase_parameters = horizontal_phase_parameters(config)
         source_segments = decode_segments(
             package[prefix + "sgrid_segment"] if prefix + "sgrid_segment" in package else None,
             source_s,
@@ -370,7 +421,7 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
         total_key = prefix + "sgrid_H_surface_h"
         total_mask_key = total_key + "_valid_mask"
         if total_key not in package or total_mask_key not in package:
-            raise ValueError("NPZ缺少基岩参考水平复频响字段 %s" % total_key)
+            raise ValueError("NPZ缺少基岩参考水平响应字段 %s" % total_key)
         source_total = np.asarray(package[total_key], dtype=np.complex128)
         source_total_mask = np.asarray(package[total_mask_key], dtype=bool)
         total_field, total_mask = interpolate_complex_field(
@@ -385,8 +436,8 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
         left_key = prefix + "sgrid_H_surface_over_1D_left_h"
         left_mask_key = left_key + "_valid_mask"
         if left_key in package and left_mask_key in package:
-            source_g = np.asarray(package[left_key], dtype=np.complex128)
-            source_g_mask = np.asarray(package[left_mask_key], dtype=bool)
+            source_g_fixed = np.asarray(package[left_key], dtype=np.complex128)
+            source_g_fixed_mask = np.asarray(package[left_mask_key], dtype=bool)
             reference_source = "explicit_left_1d_field"
         else:
             same_side_key = prefix + "sgrid_H_surface_over_1D_h"
@@ -400,26 +451,52 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
                 package[same_side_mask_key],
                 source_s,
             )
-            source_g = np.full(source_total.shape, np.nan + 1j * np.nan, dtype=np.complex128)
-            source_g_mask = source_total_mask & left_reference_mask[None, :]
+            source_g_fixed = np.full(source_total.shape, np.nan + 1j * np.nan, dtype=np.complex128)
+            source_g_fixed_mask = source_total_mask & left_reference_mask[None, :]
             safe_reference = np.where(left_reference_mask, left_reference, 1.0 + 0.0j)
-            source_g[source_g_mask] = (
+            source_g_fixed[source_g_fixed_mask] = (
                 source_total / safe_reference[None, :]
-            )[source_g_mask]
+            )[source_g_fixed_mask]
             reference_source = "derived_left_1d_from_legacy_fields"
-        g_field, g_mask = interpolate_complex_field(
+        corrected_key = prefix + "sgrid_H_total_over_freefield_phase_aligned_h"
+        corrected_mask_key = corrected_key + "_valid_mask"
+        if corrected_key in package and corrected_mask_key in package:
+            source_g = np.asarray(package[corrected_key], dtype=np.complex128)
+            source_g_mask = np.asarray(package[corrected_mask_key], dtype=bool)
+            reference_source += "+explicit_horizontal_phase_removal"
+        else:
+            source_g = remove_incident_horizontal_phase(
+                source_g_fixed, source_frequency, source_x, phase_parameters
+            )
+            source_g_mask = source_g_fixed_mask.copy()
+            reference_source += "+derived_horizontal_phase_removal"
+        common_source_mask = source_g_mask & source_g_fixed_mask
+        if np.any(common_source_mask):
+            magnitude_difference = np.nanmax(
+                np.abs(np.abs(source_g[common_source_mask]) - np.abs(source_g_fixed[common_source_mask]))
+            )
+            magnitude_scale = max(float(np.nanmax(np.abs(source_g_fixed[common_source_mask]))), 1.0)
+            if magnitude_difference > 1.0e-10 * magnitude_scale:
+                raise ValueError("水平相位修正改变了复响应幅值")
+        g_fixed_field, g_fixed_mask = interpolate_complex_field(
             source_frequency,
             source_s,
-            source_g,
-            source_g_mask,
+            source_g_fixed,
+            source_g_fixed_mask,
             source_segments,
             frequency,
             s_values,
         )
+        physical_x = np.interp(s_values, source_s, source_x)
+        g_field = remove_incident_horizontal_phase(
+            g_fixed_field.T, frequency, physical_x, phase_parameters
+        ).T
+        g_mask = g_fixed_mask.copy()
         mask = total_mask & g_mask
         if not np.any(mask):
-            raise ValueError("统一左侧一维参考复频响没有有效值；需检查一维参考")
+            raise ValueError("统一左侧自由场参考响应没有有效值；需检查自由场参考")
         g_field[~mask] = np.nan + 1j * np.nan
+        g_fixed_field[~mask] = np.nan + 1j * np.nan
         total_field[~mask] = np.nan + 1j * np.nan
         phase = unwrap_frequency_phase(g_field, mask)
         segments = segment_labels_from_s(s_values)
@@ -439,7 +516,10 @@ def load_case(case_dir, frequency, s_values, requested_record=None):
             "case_dir": str(case_dir.resolve()),
             "X": np.asarray(physical_parameters(config), dtype=float),
             "G": g_field,
+            "G_fixed_left_reference": g_fixed_field,
             "H_total": total_field,
+            "physical_x": physical_x,
+            "horizontal_phase": phase_parameters,
             "mask": mask,
             "weight": weight,
             "amplitude": amplitude,
@@ -597,7 +677,30 @@ def save_dataset(path, cases, frequency, s_values, metadata):
         s=s_values,
         segments=segment_labels_from_s(s_values),
         G_h=np.stack([case["G"] for case in cases]),
+        G_h_fixed_left_reference=np.stack([case["G_fixed_left_reference"] for case in cases]),
         H_total=np.stack([case["H_total"] for case in cases]),
+        physical_x_m=np.stack([case["physical_x"] for case in cases]),
+        incident_angle_deg=np.asarray([
+            case["horizontal_phase"]["incident_angle_deg"] for case in cases
+        ], dtype=float),
+        bedrock_vs_m_s=np.asarray([
+            case["horizontal_phase"]["bedrock_vs_m_s"] for case in cases
+        ], dtype=float),
+        horizontal_slowness_s_m=np.asarray([
+            case["horizontal_phase"]["horizontal_slowness_s_m"] for case in cases
+        ], dtype=float),
+        phase_origin_x_m=np.asarray([
+            case["horizontal_phase"]["phase_origin_x_m"] for case in cases
+        ], dtype=float),
+        slope_height_m=np.asarray([
+            case["horizontal_phase"]["slope_height_m"] for case in cases
+        ], dtype=float),
+        crest_window_h=np.asarray([
+            case["horizontal_phase"]["crest_window_h"] for case in cases
+        ], dtype=float),
+        side_clearance_h=np.asarray([
+            case["horizontal_phase"]["side_clearance_h"] for case in cases
+        ], dtype=float),
         valid_mask=np.stack([case["mask"] for case in cases]),
         input_weight=np.stack([case["weight"] for case in cases]),
         amplitude=np.stack([case["amplitude"] for case in cases]),
@@ -627,7 +730,7 @@ def discover_case_dirs(roots):
 
 def parse_args(argv=None):
     repo_root = Path(__file__).resolve().parents[3]
-    parser = argparse.ArgumentParser(description="复频响幅值—相位联合分析")
+    parser = argparse.ArgumentParser(description="相位对齐总波场响应幅值—相位联合分析")
     parser.add_argument(
         "--input-roots",
         nargs="+",
@@ -662,7 +765,7 @@ def main(argv=None):
             if args.strict:
                 raise
     if not cases:
-        raise SystemExit("没有可用于联合分析的有效复频响工况")
+        raise SystemExit("没有可用于联合分析的有效总波场响应工况")
     cases.sort(key=lambda item: item["case_id"])
     metric_rows = [case_metrics(case, frequency, s_values) for case in cases]
     correction_rows = build_layer_corrections(cases, frequency, s_values)
@@ -671,8 +774,10 @@ def main(argv=None):
     write_csv(args.output / "layer_correction_metrics.csv", correction_rows)
     write_csv(args.output / "parameter_effects.csv", effect_rows)
     metadata = {
-        "definition": "G_h=A_2D/A_1D_left_global",
-        "reference_scope": "single left upper-platform 1D free field for the entire surface",
+        "definition": "G_h=(A_total/A_ff_left)*exp(+i*2*pi*f*p*(x-x_ref))",
+        "response_name": "total wavefield response after removing oblique-incidence horizontal propagation phase",
+        "reference_scope": "left upper-platform free field with local horizontal propagation phase",
+        "horizontal_phase_removal": "p=sin(theta)/Vs_bedrock; unit-modulus correction preserves amplitude",
         "reference_sources": sorted(set(case["reference_source"] for case in cases)),
         "frequency_grid_hz": [FREQUENCY_MIN, FREQUENCY_MAX, FREQUENCY_STEP],
         "s_grid": [S_MIN, S_MAX, S_STEP],
