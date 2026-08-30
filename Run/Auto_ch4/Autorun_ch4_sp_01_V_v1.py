@@ -48,7 +48,7 @@ ABAQUS_SCRIPTS = ABAQUS_CAE_SCRIPTS | ABAQUS_PYTHON_SCRIPTS  # 兼容既有检�
 # 注入配置的顶层键白名单
 ALLOWED_CONFIG_KEYS = {
     'material_cfg', 'geometry_cfg', 'damping_cfg', 'mesh_cfg',
-    'time_cfg', 'freefield_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
+    'time_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
 }
 
 MODEL_SCRIPT_SEQUENCE = [  # 建模线程池连续执行的脚本绝对路径
@@ -102,7 +102,6 @@ def base_config(slope_angle, layers, wave_files, extra=None):
                          'side_clearance': 1.0, 'base_depth': 3.0},  # 观测窗4h/3h + 侧向净距1H + 基底深度3H
         'damping_cfg': {'constant_xi': COVER_XI, 'bedrock_xi': BEDROCK_XI},  # 覆盖层 3% / 基岩 0.05%
         'time_cfg': {'tail_seconds': TAIL_SECONDS},  # 静默尾段
-        'freefield_cfg': {'reference_field_mode': 'global_upper', 'initial_state_mode': 'incremental'},  # 参考场与初态
         'run_cfg': {
             'wave_files': list(wave_files),
             'frf_cfg': {'fmax_hz': 12.0},  # 复频响输出上限

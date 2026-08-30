@@ -67,7 +67,7 @@ job_cfg = {
 
 # 材料阻尼配置
 damping_cfg = {
-    'enable': True,                     #! 是否施加材料阻尼（False 则退化为无阻尼行为）
+    'enable': False,                    #! 是否施加材料阻尼（默认无阻尼、聚焦地形效应；恢复带阻尼基线时经 case_config 注入 enable:true）
     'method': 'rayleigh',               # 'rayleigh'=双频拟合(α+β，两端 ξ 相等≈恒定阻尼比) / 'stiffness'=仅刚度比例(β)
     'constant_xi': 0.01,                #! 统一恒定阻尼比(如 0.05)：对所有有限土层施加统一阻尼
     'bedrock_xi': 5.0e-4,               #! 基岩阻尼比（近无衰减）；显式指定，不受 constant_xi 影响
@@ -98,18 +98,6 @@ time_cfg = {
     'check': True,                      # True=仅诊断：输入 dt 偏粗(步/周期不足)时输出警告，但【不】改变 dt；False=连诊断也跳过
     'min_steps_per_fmax_period': 20,    # 诊断阈值：每 fmax 周期建议的最少步数（dt <= 1/(fmax*20) 视为充足）
     'tail_seconds': 0.0,                #! 静默尾段时长(s)——分析步与 fd 自由场时窗同步延长（H(f) 提取用）
-}
-
-# 自由场引擎配置
-freefield_cfg = {
-    'engine': 'fd',                     #! 'fd'=频域精确分层自由场（默认，含界面 SV<->P 与全部多次波）；'ray'=射线法（回归对比用）
-    'include_damping': True,            # fd 引擎是否在自由场中计入与模型介质一致的瑞利阻尼
-    'spectrum_tol': 1e-7,               # 仅求解幅值谱 > tol*max 的频率分量（其余置零，省时且高频数值稳定）
-    'fcut': None,                       # 频率上限(Hz)：None=仅按谱幅值掩码自适应截断
-    'pad_factor': 4,                    # FFT 补零倍数（>=2，防止时域卷绕污染响应窗口）
-    'reference_field_mode': 'global_upper',  #! 参考场：global_upper=三边界统一上平台平场/local_columns=旧局部柱（仅历史复现）
-    'bottom_ymax_mode': 'local',         # 底边界自由场柱高：local=按 x 上方地表/upper=上平台柱/lower=下平台柱
-    'initial_state_mode': 'raw',         # fd 初态：raw=保留频域绝对基线/incremental=转为 t=0 起算的增量场
 }
 
 # 运行控制配置
@@ -253,8 +241,6 @@ GRAVITY_G = 9.81  # 重力加速度（m/s²，重力两步法与楼层节点力�
 BOUNDARY_SET_NAMES = ('Left_boundary', 'Right_boundary', 'Bottom_boundary')  # 边界节点集名称
 BOUNDARY_SEQUENCE = ('l', 'r', 'b')  # 边界处理顺序(左/右/底)
 
-MAX_REFLECT_ORDER = 3   # ray 覆盖层多次反射截断阶数(默认3，可由 case_config.json 顶层 max_reflect_order 覆盖)
-_REFL_COEFF_CACHE = {}  # ray 等效反射/转换系数缓存(运行时填充)
 _FD_SOLVER_CACHE = {}  # fd 引擎缓存：键=round(ymax_col,4) 的柱解；另含 '_input' 键缓存输入谱
 _UNICODE_TYPE = type(u'')  # Abaqus Python 2 下为 unicode；避免编辑器把 unicode 名称报未定义
 
@@ -276,14 +262,12 @@ Geometry = namedtuple('Geometry', [
 # BoundaryNode：单个边界节点的几何与粘弹性边界参数（取代裸 numpy 列索引）
 BoundaryNode = namedtuple('BoundaryNode',
                           ['label', 'x', 'y', 'influence', 'kn', 'cn', 'kt', 'ct'])  # 边界节点
-# FreeFieldCtx：射线法等效力计算所需的上下文（一次打包，避免长参数列表）
-#   推广要点：自由场按每个节点"所在水平成层柱"逐层计算，故携带场地分层(strat)而非单一覆盖层。
+# FreeFieldCtx：fd 频域引擎等效节点力计算所需的上下文（一次打包，避免长参数列表）
+#   自由场按每个节点"所在水平成层柱"逐层计算，故携带场地分层(strat)。
 FreeFieldCtx = namedtuple('FreeFieldCtx', [  # 自由场上下文命名元组
-    'site', 'geom', 'strat', 'ymax_l', 'ymax_r', 'ymin',  # 场地、几何、分层带、各边界高度信息
-    'alpha', 'beta_p', 'p_horiz',  # 基岩 SV 入射角、基岩 P 反射角、水平慢度（Snell 守恒）
-    'GG', 'lam', 'cs', 'cp',  # 基岩剪切模量/拉梅常数/波速（投影与应力公式使用基岩标量）
-    'VEL', 'DIS', 'dt', 'time_arr', 'max_reflect_order',  # 速度/位移时程、步长、时间轴、反射阶数
-    'acc', 'damp_terms', 'ffcfg'])  # 原始加速度记录、各带瑞利系数表、自由场引擎配置
+    'geom', 'strat', 'ymin',  # 几何、分层带、底边界 y
+    'p_horiz',  # 水平慢度（Snell 守恒，全场不变）
+    'dt', 'acc', 'damp_terms', 'tail_seconds'])  # 时间步长、原始加速度记录、各带瑞利系数表、静默尾段时长
 
 
 # ==========================================================
@@ -524,25 +508,6 @@ def _material_resonance_freq(mat, site, geom):  # 由材料层厚估算共振基
     return float(mat.cs) / (4.0 * d)  # 四分之一波长共振基频
 
 
-def _compute_interface_sv_coeff(alpha1, mat1, mat2):
-    """计算 SV 波在两层界面的等效反射/透射系数（阻抗近似，忽略 SV<->P 转换）。
-
-    alpha1 : 在 mat1 中的 SV 入射角（弧度）
-    mat1   : 入射侧材料参数字典；mat2：透射侧材料参数字典
-    返回 dict：Rss/Rsp/Tss/Tsp 与透射角 alpha2（Rsp=Tsp=0，阻抗近似的关键简化）
-    """
-    z1s = mat1['density'] * mat1['cs'] * max(1e-8, math.cos(alpha1))
-    sin_a2 = mat2['cs'] * math.sin(alpha1) / mat1['cs']  # Snell 定律算透射角正弦
-    alpha2 = _safe_arcsin(sin_a2)
-    z2s = mat2['density'] * mat2['cs'] * max(1e-8, math.cos(alpha2))
-    denom = z1s + z2s if abs(z1s + z2s) > 1e-12 else 1e-12  # 避免除零
-    rss = (z2s - z1s) / denom
-    tss = 2.0 * z2s / denom
-    rsp = 0.0
-    tsp = 0.0
-    return {'Rss': rss, 'Rsp': rsp, 'Tss': tss, 'Tsp': tsp, 'alpha2': alpha2}
-
-
 def _compute_free_surface_sv_coeff(alpha, cp, cs):
     """计算 SV 波在自由面的反射系数 A1（SV->SV）与转换系数 A2（SV->P）。"""
     beta_p = _safe_arcsin(cp * math.sin(alpha) / cs)  # 自由面 P 波转换角
@@ -553,34 +518,6 @@ def _compute_free_surface_sv_coeff(alpha, cp, cs):
     a1 = numerator_a1 / denominator
     a2 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator
     return {'A1': a1, 'A2': a2, 'beta': beta_p}
-
-
-def _compute_free_surface_p_coeff(beta, cp, cs):
-    """计算 P 波在自由面的反射系数 B2（P->P）与转换系数 B1（P->SV）。"""
-    alpha = _safe_arcsin(cs * math.sin(beta) / cp)
-    numerator_b2 = cp ** 2 * math.cos(2 * alpha) ** 2 - cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)
-    denominator = cp ** 2 * math.cos(2 * alpha) ** 2 + cs ** 2 * math.sin(2 * alpha) * math.sin(2 * beta)
-    if abs(denominator) < 1e-12:
-        denominator = 1e-12  # 避免除零
-    b2 = numerator_b2 / denominator
-    b1 = (2 * cp * cs * math.sin(2 * alpha) * math.cos(2 * alpha)) / denominator
-    return {'B1': b1, 'B2': b2, 'alpha': alpha}
-
-
-def _integrate_acc_to_velocity(acc, dt, time_arr):
-    """加速度梯形积分为速度并做基线校正（去零偏 + 线性去趋势），抑制低频漂移。
-
-    acc      : 加速度时程数组
-    dt       : 时间步长 (s)
-    time_arr : 与 acc 对应的时间轴数组
-    返回 (vel, slope)：校正后的速度数组与被扣除的速度线性趋势斜率
-    """
-    acc = acc - np.mean(acc)  # 去均值，避免积分后速度线性漂移
-    vel = np.zeros_like(acc)
-    vel[1:] = np.cumsum((acc[:-1] + acc[1:]) / 2 * dt)  # 梯形积分
-    trend = np.polyfit(time_arr, vel, 1)
-    vel = vel - (trend[0] * time_arr + trend[1])  # 扣除线性趋势（位移=速度/(iω) 会放大低频误差）
-    return vel, trend[0]
 
 
 def _surface_y_at(x, H_upper, H_lower, left_flat, w_slope):
@@ -836,71 +773,8 @@ def find_acc_txt(logger=None, wave_files=None):
 
 
 # ============================================================
-#  多层自由场计算核心（基于“射线反射与时延叠加”的任意多层土波动算法）
+#  多层自由场计算核心（fd 频域分层柱求解器）
 # ============================================================
-
-
-def _delay_signal(u0, n_delay, dt):
-    """将时程 u0(Nx2) 整体延迟 n_delay 个时间步，返回延长后的 (N+n_delay)x2 数组。"""
-    N = u0.shape[0]  # 原始序列长度
-    new_len = N + n_delay  # 延迟后总长度
-    delayed = np.zeros((new_len, 2))
-    delayed[:, 0] = np.arange(new_len) * dt
-    delayed[n_delay:, 1] = u0[:, 1]
-    return delayed
-
-
-def _make_delay_cache(timeseries, dt):
-    """返回一个按延迟步数缓存延迟信号的访问器，跨节点复用以减少重复构造。"""
-    cache = {}
-    def get_delayed(delay_t):
-        n_delay = int(np.round(delay_t / dt))
-        if n_delay not in cache:  # 缓存未命中
-            cache[n_delay] = _delay_signal(timeseries, n_delay, dt)
-        return cache[n_delay]
-    return get_delayed
-
-
-def _pad_to(arr, length, dt):
-    """将 arr(Mx2) 末尾补零延长到 length 行，补零段补充时间轴。"""
-    if arr.shape[0] < length:
-        pad = np.zeros((length - arr.shape[0], 2))
-        pad[:, 0] = np.arange(arr.shape[0], length) * dt  # 补齐时间轴
-        arr = np.vstack([arr, pad])
-    return arr
-
-
-def _calc_node_delay(boundary, x0, y0, Ly, Lx,
-                     alpha, beta_p, cs, cp, alpha2, beta2, cs2, cp2, ymax_col):
-    """计算单个边界节点的三段到时 (tA, tB, tC)：入射 SV、反射 SV、反射/转换 P。
-
-    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；Ly：界面相对底边高度；Lx：模型横向跨度
-    返回 (t1, t2, t3) 三段延迟时间（秒）。基岩段用 cs/cp/alpha/beta_p，
-    覆盖层段用 cs2/cp2/alpha2/beta2（射线法口径）。
-    """
-    if boundary in ('l', 'r'):
-        if y0 <= Ly:  # 节点位于基岩段
-            t1 = y0 * np.cos(alpha) / cs  # 入射 SV 到时
-            t2 = (2 * Ly - y0) * np.cos(alpha) / cs  # 反射 SV 到时
-            t3 = ((Ly - y0) / (cp * np.cos(beta_p))  # 反射 P 到时（第一部分）
-                  + (Ly - (Ly - y0) * np.tan(alpha) * np.tan(beta_p)) * np.cos(alpha) / cs)  # 第二部分
-        else:  # 节点位于覆盖层段
-            t1 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(alpha2) / cs2  # 入射 SV 到时
-            t2 = Ly * np.cos(alpha) / cs + (2 * ymax_col - Ly - y0) * np.cos(alpha2) / cs2  # 反射 SV 到时
-            t3 = Ly * np.cos(alpha) / cs + (y0 - Ly) * np.cos(beta2) / cp2  # 反射 P 到时
-        if boundary == 'r':  # 右边界叠加横向传播延迟
-            shift = Lx * np.sin(alpha) / cs  # 横向传播延迟量
-            t1 += shift; t2 += shift; t3 += shift  # 三段同时叠加
-        return t1, t2, t3
-    elif boundary == 'b':
-        t4 = x0 * np.sin(alpha) / cs  # 入射 SV 到时
-        t5 = (2 * Ly + x0 * np.tan(alpha)) * np.cos(alpha) / cs  # 反射 SV 到时
-        t6 = (Ly / (cp * np.cos(beta_p))  # 反射 P 到时（第一部分）
-              + (Ly * np.cos(alpha) + x0 * np.sin(alpha)  # 第二部分
-                 - Ly * np.tan(beta_p) * np.sin(alpha)) / cs)  # 第三部分
-        return t4, t5, t6
-    else:
-        raise ValueError("boundary must be 'l', 'r', or 'b'")  # 抛出异常
 
 
 def _column_seg(cs, vv, density, alpha_p, y0, y1, name):
@@ -938,236 +812,6 @@ def _build_column(strat, ymax_col, alpha_p, ymin):
     return column
 
 
-def _seg_at(column, y0):  # 定义在柱中按 y 坐标查找对应层段的辅助函数
-    """返回柱 column 中包含 y0 的层段 dict（键同 _column_seg：alpha/beta/GG/cs/lam/cp 等）。
-
-    column 从下到上排列（_build_column 产物）；y0 在某段 [seg['y0'], seg['y1']] 内则返回该段。
-    找不到时退回最顶层段（兜底，不应发生）。
-    用于项①自由场层内材料一致化：对有限层侧边节点，改用本层材料而非基岩标量。
-    """
-    for seg in reversed(column):
-        if seg['y0'] - 1e-6 <= y0 <= seg['y1'] + 1e-6:  # 节点 y 落入该层段范围
-            return seg
-    return column[-1]  # 兜底返回最顶层段（正常不走此分支）
-
-
-def _effective_refl_coeffs(column, oc):
-    """自顶向下递归求基岩中上行 SV 的等效自由面反射 Rss_eff 与 SV->P 转换 Rsp_eff。
-
-    沿用界面 SV 阻抗近似与自由面完整 SV 反射/转换；M=1 时严格退化为单腔几何级数。
-    column：从下到上的柱层段（column[0]=基岩，column[-1]=最顶有限层或均质介质）。
-    """
-    topL = column[-1]
-    free_sv = _compute_free_surface_sv_coeff(topL['alpha'], topL['cp'], topL['cs'])  # 顶面 SV 反射/转换系数
-    if len(column) == 1:  # 均质柱（无有限层覆盖）
-        return free_sv['A1'], free_sv['A2']  # 直接返回自由面 SV 反射与 SV->P 转换
-    free_p = _compute_free_surface_p_coeff(topL['beta'], topL['cp'], topL['cs'])  # 顶面 P 反射/转换系数
-    nseg = len(column)  # 柱层段总数
-    Rtop = free_sv['A1']  # 当前层顶反射（从最顶层的自由面 A1 起）
-    A2_top = free_sv['A2']  # 顶面 SV->P 转换系数
-    B2_top = free_p['B2']  # 顶面 P->P 反射系数
-    T_up = 1.0  # SV 自下而上穿过各界面的累计透射
-    T_down = 1.0  # P（用 SV 近似）自上而下穿过各界面的累计透射
-    Rbot_top_layer = None  # 顶层腔底界面反射（P 混响用）
-    for k in range(nseg - 1, 0, -1):  # 自顶层向下遍历各界面（column[k] 上、column[k-1] 下）
-        upper = column[k]  # 界面上方层段
-        lower = column[k - 1]  # 界面下方层段
-        intf_lo = _compute_interface_sv_coeff(lower['alpha'], lower['mat'], upper['mat'])  # 下方入射：反射回下方 Rss + 上透 Tss
-        intf_hi = _compute_interface_sv_coeff(upper['alpha'], upper['mat'], lower['mat'])  # 上方下行：反射回上方 Rss + 下透 Tss
-        Rbot = intf_hi['Rss']  # 本层底界面反射（下行反射回上行）
-        if k == nseg - 1:
-            Rbot_top_layer = Rbot  # 供 P 混响使用
-        cyc = Rtop * Rbot  # 本层腔一次 SV 混响幅值因子
-        sum_cyc = sum([cyc ** j for j in range(oc + 1)])  # 截断几何级数和（用列表避免通配 sum 拒收生成器）
-        Rbottom = intf_lo['Rss'] + intf_lo['Tss'] * Rtop * intf_hi['Tss'] * sum_cyc  # 本层底界面等效反射
-        T_up *= intf_lo['Tss']  # 累计上行透射
-        T_down *= intf_hi['Tss']  # 累计下行透射
-        Rtop = Rbottom  # 该等效反射成为下一层（更低层）看到的顶反射
-    Rss_eff = Rtop
-    cyc_p = B2_top * Rbot_top_layer  # 顶层腔一次 P 混响幅值因子
-    sum_cyc_p = sum([cyc_p ** j for j in range(oc + 1)])  # P 混响截断几何级数和
-    Rsp_eff = T_up * A2_top * T_down * sum_cyc_p  # 等效 SV->P 转换（上透→顶面转换→下透→顶腔混响）
-    return Rss_eff, Rsp_eff
-
-
-def _column_cavities(column, oc):  # 定义柱内各混响腔（用于时域延迟叠加）的计算函数
-    """返回 (cavities_sv, cavities_p)：各有限层 SV 混响腔 (cycle, cdelay) 列表 + 顶层 P 混响腔。
-
-    cycle = 该层腔顶反射×底反射（幅值）；cdelay = 该层往返垂直走时。M=1 时退化为单腔。
-    """
-    nseg = len(column)  # 柱层段总数
-    cavities_sv = []
-    cavities_p = []
-    for k in range(1, nseg):
-        layer = column[k]  # 当前有限层段
-        lower = column[k - 1]  # 其下方层段
-        thick = layer['y1'] - layer['y0']  # 该层厚度
-        if thick <= 0:  # 厚度无效则跳过
-            continue
-        Rbot = _compute_interface_sv_coeff(layer['alpha'], layer['mat'], lower['mat'])['Rss']  # 底界面反射（下行反射回上行）
-        if k == nseg - 1:  # 顶层：顶反射取自由面 SV 反射
-            Rtop = _compute_free_surface_sv_coeff(layer['alpha'], layer['cp'], layer['cs'])['A1']  # 自由面 SV 反射
-        else:  # 内层：顶反射取上界面反射
-            upper = column[k + 1]  # 其上方层段
-            Rtop = _compute_interface_sv_coeff(layer['alpha'], layer['mat'], upper['mat'])['Rss']  # 上界面反射
-        cdelay_sv = 2.0 * thick * layer['cos_alpha'] / layer['cs']  # 该层 SV 往返垂直走时
-        cavities_sv.append((Rtop * Rbot, cdelay_sv))
-        if k == nseg - 1:  # 顶层腔额外贡献 P 混响（转换在顶面发生）
-            B2 = _compute_free_surface_p_coeff(layer['beta'], layer['cp'], layer['cs'])['B2']  # 自由面 P 反射
-            cdelay_p = 2.0 * thick * layer['cos_beta'] / layer['cp']  # 该层 P 往返垂直走时
-            cavities_p.append((B2 * Rbot, cdelay_p))
-    return cavities_sv, cavities_p
-
-
-def _tt(column, y_lo, y_hi, wave):
-    """逐层累加从 y_lo 到 y_hi（y_lo<y_hi）的垂直走时；wave='SV' 用 cos_alpha/cs，'P' 用 cos_beta/cp。"""
-    t = 0.0
-    for seg in column:
-        lo = max(y_lo, seg['y0'])  # 本层段内的下限
-        hi = min(y_hi, seg['y1'])  # 本层段内的上限
-        if hi > lo:  # 区间有效时累加
-            if wave == 'SV':  # SV 波
-                t += (hi - lo) * seg['cos_alpha'] / seg['cs']
-            else:  # P 波
-                t += (hi - lo) * seg['cos_beta'] / seg['cp']
-    return t
-
-
-def _superpose_paths(get_delayed, tA, tB, tC, cavities_sv, cavities_p, order_count, dt):
-    """对一个节点叠加主路径与各有限层混响，返回 (时间轴, A路径值, B路径累加, C路径累加)。
-
-    A：主到时 tA 的延迟信号；B：反射 SV 路径在各腔往返组合下的混响累加；
-    C：反射/转换 P 路径在顶层腔混响下的累加。各腔几何级数按 order_count 截断，腔间取乘积枚举。
-    单腔（M=1）时严格退化为单腔 Σ_k cycle^k·delayed(t + k·cdelay) 形式。
-    """
-    def _combos(cavities):
-        combo = [(1.0, 0.0)]  # 初始组合：无混响（幅值1、零延迟）
-        for (cyc, cd) in cavities:  # 逐腔做几何级数与已有组合的乘积
-            new = []  # 新组合容器
-            for (amp, dl) in combo:
-                for j in range(order_count + 1):  # 该腔的截断阶数
-                    new.append((amp * (cyc ** j), dl + j * cd))  # 叠加该腔第 j 阶（幅值相乘、延迟相加）
-            combo = new
-        return combo
-    combo_b = _combos(cavities_sv)  # B 路径各腔组合
-    combo_c = _combos(cavities_p)  # C 路径各腔组合（仅顶层 P 腔）
-    sig_b = [(amp, get_delayed(tB + dl)) for amp, dl in combo_b]  # B 路径各组合的延迟信号
-    sig_c = [(amp, get_delayed(tC + dl)) for amp, dl in combo_c]  # C 路径各组合的延迟信号
-    u0_tA = get_delayed(tA)  # 主到时延迟信号
-    max_len = u0_tA.shape[0]
-    for _amp, arr in sig_b + sig_c:
-        max_len = max(max_len, arr.shape[0])
-    u0_tA = _pad_to(u0_tA, max_len, dt)  # 补齐主路径
-    sumB = np.zeros(max_len)  # B 路径累加器
-    sumC = np.zeros(max_len)  # C 路径累加器
-    for amp, arr in sig_b:  # 叠加 B 路径各组合
-        sumB += amp * _pad_to(arr, max_len, dt)[:, 1]
-    for amp, arr in sig_c:  # 叠加 C 路径各组合
-        sumC += amp * _pad_to(arr, max_len, dt)[:, 1]
-    return u0_tA[:, 0], u0_tA[:, 1], sumB, sumC
-
-
-def _compute_freefield_at_node(boundary, x0, y0, ymax_col, ctx, get_vel, get_dis):
-    """射线法计算单节点自由场时程，返回 dict：time/ux/uy/dotux/dotuy/sigmax/sigmay。
-
-    boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度（决定层组成、层厚与到时）；
-    ctx      : FreeFieldCtx（含基岩角度、水平慢度、场地分层、基岩材料标量、VEL/DIS、dt 等）；
-    get_vel/get_dis：速度/位移时程的延迟缓存访问器（跨节点复用）。
-    多层推广：按该柱层栈求等效系数与各腔混响；投影/应力沿用基岩角度 + 基岩材料标量。
-    """
-    geom = ctx.geom
-    Lx = geom.total_L  # 模型横向跨度（xmin=0）
-    bt = geom.bedrock_thickness  # 基岩界面 y
-    dt = ctx.dt  # 时间步长
-    oc = max(0, int(ctx.max_reflect_order))  # 反射阶数上限
-    p = ctx.p_horiz  # 水平慢度
-
-    column = _build_column(ctx.strat, ymax_col, p, ctx.ymin)
-    nseg = len(column)  # 柱层段数
-    key = (round(ymax_col, 4), round(p, 12))  # 等效系数缓存键（同一柱地表高度+入射角复用）
-    cached = _REFL_COEFF_CACHE.get(key)  # 查缓存
-    if cached is None:
-        cached = _effective_refl_coeffs(column, oc)
-        _REFL_COEFF_CACHE[key] = cached  # 写入缓存
-    Rss_eff, Rsp_eff = cached
-    cavities_sv, cavities_p = _column_cavities(column, oc)
-
-    if boundary == 'b' or y0 <= bt + 1e-6:  # 基岩节点或均质节点：沿用单层到时公式
-        Ly = bt if nseg >= 2 else ymax_col  # 反射点：有基岩界面取界面，否则（均质）取自由面
-        col0 = column[0]  # 最底层段（基岩或均质介质）
-        tA, tB, tC = _calc_node_delay(boundary, x0, y0, Ly, Lx,  # 计算三段到时（单层公式）
-                                      ctx.alpha, ctx.beta_p, ctx.cs, ctx.cp,  # 基岩角度/波速
-                                      col0['alpha'], col0['beta'], col0['cs'], col0['cp'], ymax_col)  # 占位（基岩分支不用）
-    else:  # 有限层节点：穿层走时累加（反射点为自由面）
-        tA = _tt(column, ctx.ymin, y0, 'SV')  # 入射 SV：自底到节点
-        tB = _tt(column, ctx.ymin, ymax_col, 'SV') + _tt(column, y0, ymax_col, 'SV')  # 反射 SV：自底到自由面 + 自由面回节点
-        tC = _tt(column, ctx.ymin, bt, 'SV') + _tt(column, bt, y0, 'P')
-        if boundary == 'r':  # 右边界叠加横向传播延迟
-            shift = Lx * math.sin(ctx.alpha) / ctx.cs  # 横向传播延迟量（基岩角度）
-            tA += shift; tB += shift; tC += shift  # 三段同时叠加
-
-    # 位移自由场：对位移时程 DIS 做多腔混响叠加
-    td, dA, dB, dC = _superpose_paths(get_dis, tA, tB, tC, cavities_sv, cavities_p, oc, dt)  # 位移路径叠加
-    # 速度自由场：对速度时程 VEL 做多腔混响叠加（速度与应力共用此叠加结果）
-    _tv, vA, vB, vC = _superpose_paths(get_vel, tA, tB, tC, cavities_sv, cavities_p, oc, dt)  # 速度路径叠加
-
-    A1 = Rss_eff  # 等效自由面 SV 反射系数（该柱）
-    A2 = Rsp_eff  # 等效自由面 SV->P 转换系数（该柱）
-
-    # ── 项①：层内材料/角度一致化 ────────────────────────────────────────────────
-    # 底边节点或基岩段侧边节点：沿用基岩标量（与单层模型完全等价，单层退化精确）
-    # 有限层侧边节点（y0 > bedrock_interface）：改用本层 alpha/beta/GG/cs/lam/cp，
-    #   使面力计算与已按本层取值的弹簧/阻尼系数口径一致（单层模型此处用基岩标量，存在矛盾）。
-    # 注意：等效反射幅值 Rss_eff/Rsp_eff 仍用阻抗近似层栈递归（射线近似，不因本修改改变）。
-    use_local = (boundary in ('l', 'r')) and (y0 > bt + 1e-6)  # 是否为有限层侧边节点
-    if use_local:  # 有限层侧边节点：取本层 alpha/beta 与本层材料标量
-        local_seg = _seg_at(column, y0)
-        a = local_seg['alpha']   # 本层 SV 入射角（Snell 守恒折射角）
-        bp = local_seg['beta']   # 本层 P 角（Snell 守恒折射 P 角）
-        GG = local_seg['GG']     # 本层剪切模量
-        cs = local_seg['cs']     # 本层剪切波速
-        lam = local_seg['lam']   # 本层拉梅常数
-        cp = local_seg['cp']     # 本层纵波波速
-    else:  # 基岩节点或底边节点：沿用基岩标量（与单层模型等价）
-        a = ctx.alpha    # 基岩 SV 入射角
-        bp = ctx.beta_p  # 基岩 P 反射角
-        GG = ctx.GG      # 基岩剪切模量
-        cs = ctx.cs      # 基岩剪切波速
-        lam = ctx.lam    # 基岩拉梅常数
-        cp = ctx.cp      # 基岩纵波波速
-    # ── 层内一致化结束 ──────────────────────────────────────────────────────────
-
-    ux = dA * np.cos(a) - A1 * dB * np.cos(a) + A2 * dC * np.sin(bp)  # x 向位移
-    uy = -dA * np.sin(a) - A1 * dB * np.sin(a) - A2 * dC * np.cos(bp)  # y 向位移
-    dotux = vA * np.cos(a) - A1 * vB * np.cos(a) + A2 * vC * np.sin(bp)  # x 向速度
-    dotuy = -vA * np.sin(a) - A1 * vB * np.sin(a) - A2 * vC * np.cos(bp)  # y 向速度
-
-    sin2a = np.sin(2 * a)    # 双角正弦（基于上方选定的 a）
-    cos2a = np.cos(2 * a)    # 双角余弦
-    sin2bp = np.sin(bp) ** 2  # P 角正弦平方
-    sin2bp_2 = np.sin(2 * bp)  # 双倍 P 角正弦
-    cosbp2 = np.cos(bp) ** 2  # P 角余弦平方
-
-    if boundary == 'l':  # 左边界应力（外法向已内嵌）
-        sigmax = (GG / cs * sin2a * (vA - A1 * vB)  # σ_xx
-                  + A2 * (lam + 2 * GG * sin2bp) / cp * vC)  # 叠加转换项
-        sigmay = (GG / cs * cos2a * (vA + A1 * vB)  # σ_yy
-                  - A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
-    elif boundary == 'r':  # 右边界应力
-        sigmax = (GG / cs * sin2a * (-vA + A1 * vB)  # σ_xx
-                  - A2 * (lam + 2 * GG * sin2bp) / cp * vC)  # 叠加转换项
-        sigmay = (GG / cs * cos2a * (-vA - A1 * vB)  # σ_yy
-                  + A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
-    else:  # 底边界应力（基岩节点，始终用基岩标量，已由上方 use_local 保证）
-        sigmax = (GG / cs * cos2a * (vA + A1 * vB)  # σ_xx
-                  - A2 * GG * sin2bp_2 / cp * vC)  # 叠加转换项
-        sigmay = (GG / cs * sin2a * (-vA + A1 * vB)  # σ_yy
-                  + A2 * (lam + 2 * GG * cosbp2) / cp * vC)  # 叠加转换项
-
-    return {'time': td, 'ux': ux, 'uy': uy, 'dotux': dotux, 'dotuy': dotuy,
-            'sigmax': sigmax, 'sigmay': sigmay}  # 应力分量
-
-
 def _next_pow2(n):  # 求不小于 n 的最小 2 的幂
     """返回不小于 n 的最小 2 的整数次幂（FFT 长度用）。"""
     m = 1
@@ -1203,25 +847,21 @@ def _fd_input_spectrum(ctx):
     cached = _FD_SOLVER_CACHE.get('_input')  # 查输入谱缓存
     if cached is not None:
         return cached  # 直接返回
-    ffcfg = ctx.ffcfg or freefield_cfg  # 自由场引擎配置
     acc = np.asarray(ctx.acc, dtype=float)  # 输入加速度记录
     dt = float(ctx.dt)  # 时间步长
     N = acc.shape[0]  # 原始记录长度
-    pad = max(2, int(ffcfg.get('pad_factor', 4)))  # 补零倍数（防时域卷绕）
+    pad = 4  # FFT 补零倍数（防时域卷绕污染响应窗口）
     Nfft = _next_pow2(N * pad)  # FFT 长度（2 的幂）
     A = np.fft.rfft(acc, n=Nfft)  # 加速度单边谱
     freqs = np.fft.rfftfreq(Nfft, dt)  # 频率轴 (Hz)
-    tol = float(ffcfg.get('spectrum_tol', 1e-7))  # 谱幅值掩码阈值
+    tol = 1e-7  # 谱幅值掩码阈值（仅求解幅值谱 > tol*max 的频点）
     amax = float(np.max(np.abs(A))) if A.size else 0.0  # 谱峰值
     mask = np.abs(A) > tol * amax  # 幅值显著的频点掩码
     mask[0] = False  # 排除直流分量（ω=0 不可除）
-    fcut = ffcfg.get('fcut')  # 显式频率上限
-    if fcut:  # 给定上限时附加截断
-        mask = mask & (freqs <= float(fcut))  # 截断高频
     idx = np.nonzero(mask)[0]  # 被求解频点索引
     omega = 2.0 * math.pi * freqs[idx]  # 对应圆频率数组
     U0 = -A[idx] / (omega ** 2)  # 位移谱（加速度谱两次积分）
-    tail = float(ffcfg.get('tail_seconds', 0.0) or 0.0)  # 静默尾段时长（捕捉混响衰减，H(f) 提取用）
+    tail = float(ctx.tail_seconds or 0.0)  # 静默尾段时长（捕捉混响衰减，H(f) 提取用）
     Nout = min(Nfft, N + int(round(tail / dt))) if tail > 0 else N
     cached = {'Nfft': Nfft, 'Nout': Nout, 'dt': dt, 'nfreq': len(freqs),
               'idx': idx, 'omega': omega, 'U0': U0}  # 频点索引/圆频率/位移谱
@@ -1229,7 +869,7 @@ def _fd_input_spectrum(ctx):
     return cached
 
 
-def _fd_layer_params(seg, omega, p, damp_terms, include_damping):
+def _fd_layer_params(seg, omega, p, damp_terms):
     """返回该层段逐频复数材料与垂直慢度 dict：{'qs','qp','mu','lam','csC','cpC','p'}。
 
     瑞利阻尼以复模量/复密度计入：ρ̃=ρ(1−iα/ω)、μ̃=μ(1+iωβ)、λ̃=λ(1+iωβ)，
@@ -1239,10 +879,7 @@ def _fd_layer_params(seg, omega, p, damp_terms, include_damping):
     rho = float(seg['density'])  # 该层密度
     mu0 = rho * seg['cs'] ** 2  # 实剪切模量
     lam0 = rho * (seg['cp'] ** 2 - 2.0 * seg['cs'] ** 2)  # 实拉梅常数
-    if include_damping:  # 自由场计入与 FE 介质一致的阻尼
-        a_ray, b_ray = damp_terms.get(seg['name'], (0.0, 0.0))  # 该带 (α,β)
-    else:  # 自由场按弹性计算
-        a_ray, b_ray = 0.0, 0.0  # 无阻尼
+    a_ray, b_ray = damp_terms.get(seg['name'], (0.0, 0.0))  # 该带 (α,β)（无阻尼工况恒为零）
     rhoC = rho * (1.0 - 1j * a_ray / omega)  # 复密度（质量比例阻尼）
     sfac = 1.0 + 1j * omega * b_ray  # 刚度比例阻尼因子 (1+iωβ)
     muC = mu0 * sfac  # 复剪切模量
@@ -1291,7 +928,7 @@ def _fd_field_coeffs(wave, la, omega, p, y):  # 某波在高程 y 处的 5 个�
     return dx, dy, syy, sxy, sxx
 
 
-def _fd_solve_column(column, p, omega, damp_terms, include_damping):  # 柱频域全局矩阵求解
+def _fd_solve_column(column, p, omega, damp_terms):  # 柱频域全局矩阵求解
     """对一根成层柱逐频求解【单位入射上行 SV】的全部波幅，返回柱解 dict。
 
     column：从下到上层段（column[0]=基岩半空间段，_build_column 产物）。
@@ -1301,7 +938,7 @@ def _fd_solve_column(column, p, omega, damp_terms, include_damping):  # 柱频�
     """
     nseg = len(column)  # 柱层段数
     M = nseg - 1  # 有限层数
-    las = [_fd_layer_params(seg, omega, p, damp_terms, include_damping) for seg in column]  # 各层逐频复参数
+    las = [_fd_layer_params(seg, omega, p, damp_terms) for seg in column]  # 各层逐频复参数
     waves = []  # 各层未知波参数表：waves[m] = [(未知量列号, 波参数), ...]
     waves.append([(0, _fd_wave_params(column[0], las[0], 'Pd')),  # 基岩反射下行 P
                   (1, _fd_wave_params(column[0], las[0], 'Sd'))])  # 基岩反射下行 SV
@@ -1384,27 +1021,21 @@ def _fd_eval_column(sol, omega, p, y):  # 在柱内高程 y 处评估单位入�
 
 
 def _fd_freefield_at_node(boundary, x0, y0, ymax_col, ctx):  # fd 引擎单节点自由场
-    """fd 引擎：计算单个边界节点的自由场时程，返回 dict（接口与射线法引擎一致）。
+    """fd 引擎：计算单个边界节点的自由场时程，返回 dict。
 
     boundary : 'l'/'r'/'b'；x0,y0：节点坐标；ymax_col：该柱地表高度；ctx：FreeFieldCtx。
     步骤：①取输入谱缓存 ②取/解该柱频域解 ③节点谱 = 单位解 × U0(ω) × e^{−iωp·x0}
-          ④逆 FFT 截断回原时长 ⑤按边界外法向嵌入应力符号。
+          ④逆 FFT 截断回原时长 ⑤转为相对 t=0 的增量场 ⑥按边界外法向嵌入应力符号。
     """
     inp = _fd_input_spectrum(ctx)  # 输入谱缓存（全模型共享）
     key = round(ymax_col, 4)  # 柱解缓存键（同地表高度柱复用）
     sol = _FD_SOLVER_CACHE.get(key)  # 查柱解缓存
     if sol is None:
         column = _build_column(ctx.strat, ymax_col, ctx.p_horiz, ctx.ymin)
-        sol = _fd_solve_column(column, ctx.p_horiz, inp['omega'], ctx.damp_terms,  # 频域求解
-                               bool((ctx.ffcfg or {}).get('include_damping', True)))  # 是否计入阻尼
+        sol = _fd_solve_column(column, ctx.p_horiz, inp['omega'], ctx.damp_terms)  # 频域求解
         _FD_SOLVER_CACHE[key] = sol  # 写入缓存
     fields = _fd_eval_column(sol, inp['omega'], ctx.p_horiz, y0)  # 单位入射场量谱
-    phase_origin = (ctx.ffcfg or {}).get('phase_origin_x', 0.0)  # V2 可将相位原点固定到模型中点，避免有限记录在端部被截断
-    if isinstance(phase_origin, basestring) and phase_origin.lower() == 'center':  # 统一使用模型域中点
-        phase_origin = 0.5 * float(ctx.geom.total_L)
-    else:
-        phase_origin = float(phase_origin or 0.0)
-    shift = np.exp(-1j * inp['omega'] * ctx.p_horiz * (x0 - phase_origin))  # 水平传播相位（相对预注册原点）
+    shift = np.exp(-1j * inp['omega'] * ctx.p_horiz * x0)  # 水平传播相位（原点固定为左边界 x=0）
     scale = inp['U0'] * shift  # 输入位移谱 × 水平相位
     out = {}  # 时域结果容器
     for name in ('ux', 'uy', 'vx', 'vy', 'sxx', 'syy', 'sxy'):  # 逐场量逆变换
@@ -1412,19 +1043,15 @@ def _fd_freefield_at_node(boundary, x0, y0, ymax_col, ctx):  # fd 引擎单节�
         spec[inp['idx']] = fields[name] * scale
         out[name] = np.fft.irfft(spec, n=inp['Nfft'])[:inp['Nout']]  # 逆 FFT 并截断回原时长
     t_out = np.arange(inp['Nout']) * inp['dt']
-    initial_state_mode = str((ctx.ffcfg or {}).get('initial_state_mode', 'raw')).lower()
-    if initial_state_mode not in ('raw', 'incremental'):
-        raise ValueError("freefield_cfg.initial_state_mode 必须为 'raw'/'incremental'，当前为 %s" % initial_state_mode)
-    if initial_state_mode == 'incremental':
-        # 频域两次积分的位移零点和匀速参考系不唯一。Abaqus 动力步从 u=v=0 起算时，
-        # 需把自由场改写为相对 t=0 的增量场，否则边界弹簧会把任意位移常数解释成瞬时外力。
-        for dis_name, vel_name in (('ux', 'vx'), ('uy', 'vy')):
-            dis0 = float(out[dis_name][0])
-            vel0 = float(out[vel_name][0])
-            out[dis_name] = out[dis_name] - dis0 - vel0 * t_out
-            out[vel_name] = out[vel_name] - vel0
-        for stress_name in ('sxx', 'syy', 'sxy'):
-            out[stress_name] = out[stress_name] - float(out[stress_name][0])
+    # 频域两次积分的位移零点和匀速参考系不唯一。Abaqus 动力步从 u=v=0 起算，
+    # 自由场必须是相对 t=0 的增量场，否则边界弹簧会把任意位移常数解释成瞬时外力。
+    for dis_name, vel_name in (('ux', 'vx'), ('uy', 'vy')):
+        dis0 = float(out[dis_name][0])
+        vel0 = float(out[vel_name][0])
+        out[dis_name] = out[dis_name] - dis0 - vel0 * t_out
+        out[vel_name] = out[vel_name] - vel0
+    for stress_name in ('sxx', 'syy', 'sxy'):
+        out[stress_name] = out[stress_name] - float(out[stress_name][0])
     if boundary == 'l':  # 左边界外法向 n=(−1,0)：面力 = −σxx, −σxy
         sigmax = -out['sxx']; sigmay = -out['sxy']  # 嵌入外法向符号
     elif boundary == 'r':  # 右边界外法向 n=(+1,0)：面力 = +σxx, +σxy
@@ -1445,14 +1072,14 @@ def _fd_engine_selfcheck(logger=None):  # fd 引擎建模前内置自检（验�
     # ① 半空间退化：均质基岩柱（Vs=2000, ν=0.3），地表 |ux| 应=2.0（自由面放大）
     col1 = [_column_seg(2000.0, 0.3, 2500.0, p0, 0.0, 400.0, 'bedrock')]  # 均质柱
     om1 = 2.0 * math.pi * np.array([1.0, 3.0, 7.0])  # 三个校核频率
-    sol1 = _fd_solve_column(col1, p0, om1, {'bedrock': (0.0, 0.0)}, True)  # 弹性求解
+    sol1 = _fd_solve_column(col1, p0, om1, {'bedrock': (0.0, 0.0)})  # 弹性求解
     f1 = _fd_eval_column(sol1, om1, p0, 400.0)  # 地表场量谱
     err1 = float(np.max(np.abs(np.abs(f1['ux']) - 2.0))) / 2.0  # 相对误差
     # ② 单层对拍：200m/Vs=800 覆盖层 + Vs=2000 基岩，1Hz，|ux| vs SH 解析 2/|cos(kh)+i·α·sin(kh)|
     col2 = [_column_seg(2000.0, 0.3, 2500.0, p0, 0.0, 200.0, 'bedrock'),  # 基岩段
             _column_seg(800.0, 0.3, 2500.0, p0, 200.0, 400.0, 'cover')]
     om2 = np.array([2.0 * math.pi * 1.0])  # 单频 1Hz
-    sol2 = _fd_solve_column(col2, p0, om2, {'bedrock': (0.0, 0.0), 'cover': (0.0, 0.0)}, True)  # 弹性求解
+    sol2 = _fd_solve_column(col2, p0, om2, {'bedrock': (0.0, 0.0), 'cover': (0.0, 0.0)})  # 弹性求解
     f2 = _fd_eval_column(sol2, om2, p0, 400.0)  # 地表场量谱
     kh = 2.0 * math.pi * 1.0 * 200.0 / 800.0  # 层内相位角 ωh/Vs
     ana = 2.0 / abs(complex(math.cos(kh), (800.0 / 2000.0) * math.sin(kh)))  # SH 解析地表幅值（阻抗比=0.4）
@@ -2127,83 +1754,41 @@ def _add_spring_dashpots(assembly, instance, nodes_by_boundary, model_name, logg
     log_step(logger, '%s 弹簧-阻尼器创建完成: 合计 %d 个元件', model_name, total_created)
 
 
-def _reference_column_surface_y(boundary, x_coord, y_coord, ctx):
-    """返回人工边界节点采用的参考自由场柱顶高程。
+def _reference_column_surface_y(y_coord, ctx):
+    """返回人工边界节点采用的参考自由场柱顶高程（唯一口径：上平台平场）。
 
-    ``global_upper`` 让左、右、底三条人工边界取自同一个以上平台为自由面的平场解；
+    左、右、底三条人工边界取自同一个以上平台为自由面的平场解；
     坡面与下平台相对该背景场的反射、转换和散射统一由有限元域产生。
-    ``local_columns`` 保留旧口径：左右侧边分别取当地平台，底边再按
-    ``bottom_ymax_mode`` 选局部/上平台/下平台柱，仅用于历史复现和单因素对照。
     """
-    geom = ctx.geom
-    ffcfg = ctx.ffcfg or {}
-    mode = str(ffcfg.get('reference_field_mode', 'global_upper')).lower()
-    if mode == 'global_upper':
-        ymax_col = geom.H_upper
-    elif mode == 'global_lower':
-        ymax_col = geom.H_lower
-    elif mode == 'local_columns':
-        bottom_mode = str(ffcfg.get('bottom_ymax_mode', 'local')).lower()
-        if bottom_mode not in ('local', 'upper', 'lower'):
-            raise ValueError("freefield_cfg.bottom_ymax_mode 必须为 'local'/'upper'/'lower'，当前为 %s" %
-                             bottom_mode)
-        if boundary == 'l':
-            ymax_col = ctx.ymax_l
-        elif boundary == 'r':
-            ymax_col = ctx.ymax_r
-        elif bottom_mode == 'upper':
-            ymax_col = geom.H_upper
-        elif bottom_mode == 'lower':
-            ymax_col = geom.H_lower
-        else:
-            ymax_col = _surface_y_at(x_coord, geom.H_upper, geom.H_lower,
-                                     geom.left_flat, geom.w_slope)
-    else:
-        raise ValueError("freefield_cfg.reference_field_mode 必须为 "
-                         "'local_columns'/'global_upper'/'global_lower'，当前为 %s" % mode)
+    ymax_col = ctx.geom.H_upper  # 三边界统一上平台柱顶高程
     if float(y_coord) > float(ymax_col) + 1.0e-6:
-        raise ValueError('参考自由场柱顶低于边界节点: mode=%s boundary=%s node_y=%.6f ymax=%.6f' %
-                         (mode, boundary, y_coord, ymax_col))
+        raise ValueError('参考自由场柱顶低于边界节点: node_y=%.6f ymax=%.6f' %
+                         (y_coord, ymax_col))
     return float(ymax_col)
 
 
 def _build_equivalent_forces(nodes_by_boundary, ctx, logger=None, model_name='Model-1'):
-    """逐边界逐节点用射线法计算自由场并组装等效节点力时程，返回 {'<label>-<边界>-fx/fy': Nx2 数组}。
+    """逐边界逐节点用 fd 频域分层柱求解器计算自由场并组装等效节点力时程，
+    返回 {'<label>-<边界>-fx/fy': Nx2 数组}。
     等效力 = K·u_ff + C·v̇_ff + A·σ_ff，其中应力 σ_ff 的各边界公式已内嵌外法向符号
-      （见 _compute_freefield_at_node），故此处面力项统一取 +A·σ：
+      （见 _fd_freefield_at_node），故此处面力项统一取 +A·σ：
       侧边(l/r)：fx=kn·ux+cn·u̇x+A·σx, fy=kt·uy+ct·u̇y+A·σy；
       底边(b)  ：fx=kt·ux+ct·u̇x+A·σx, fy=kn·uy+cn·u̇y+A·σy。
     角点处理：左下/右下角点同属侧边与底边两个集合，会各算一次并叠加（VAB 角点标准处理，不折半）。
-    时间轴：射线法按到时延迟会延长时程，故各节点力时程取其自身（延长后）时间轴，不截断到原长。
-    """  # 说明函数用途与外法向/角点约定
+    """
     field_data = {}
-    engine = (ctx.ffcfg or {}).get('engine', 'ray')  # 自由场引擎选择（'fd' 或 'ray'）
-    reference_field_mode = str((ctx.ffcfg or {}).get(
-        'reference_field_mode', 'global_upper')).lower()  # 三边界参考自由场口径
-    bottom_ymax_mode = str((ctx.ffcfg or {}).get(
-        'bottom_ymax_mode', 'local')).lower()  # 仅旧局部柱口径使用
-    get_vel = None  # 射线法速度延迟缓存（fd 引擎不需要）
-    get_dis = None  # 射线法位移延迟缓存（fd 引擎不需要）
-    if engine != 'fd':  # 仅射线法路径需要延迟缓存
-        get_vel = _make_delay_cache(ctx.VEL, ctx.dt)  # 速度时程延迟缓存（跨节点复用）
-        get_dis = _make_delay_cache(ctx.DIS, ctx.dt)  # 位移时程延迟缓存（跨节点复用）
     if logger:
         _total_nodes = sum([len(v) for v in nodes_by_boundary.values()])  # 三边界节点总数
-        log_step(logger, '%s 开始计算等效节点力: 引擎=%s, 参考场=%s, 旧底边柱高=%s, 边界节点合计=%d (左=%d/右=%d/底=%d)',
-                 model_name, engine, reference_field_mode, bottom_ymax_mode, _total_nodes,
+        log_step(logger, '%s 开始计算等效节点力: 边界节点合计=%d (左=%d/右=%d/底=%d)',
+                 model_name, _total_nodes,
                  len(nodes_by_boundary['l']), len(nodes_by_boundary['r']), len(nodes_by_boundary['b']))  # 各边界节点数
     for boundary in BOUNDARY_SEQUENCE:
         _t_b = time.time()  # 该边界计算起始时间
         for bn in nodes_by_boundary[boundary]:
-            ymax_col = _reference_column_surface_y(
-                boundary, bn.x, bn.y, ctx)  # 从统一或旧局部参考场取柱顶高程
+            ymax_col = _reference_column_surface_y(bn.y, ctx)  # 参考自由场柱顶高程（统一上平台）
+            ff = _fd_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx)  # fd 自由场时程
 
-            if engine == 'fd':  # v6 默认：频域精确分层自由场
-                ff = _fd_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx)  # fd 引擎自由场时程
-            else:  # 回归对比：v5 射线法
-                ff = _compute_freefield_at_node(boundary, bn.x, bn.y, ymax_col, ctx, get_vel, get_dis)  # 射线法自由场时程
-
-            t_arr = ff['time']  # 延长后的时间轴
+            t_arr = ff['time']  # 时间轴
             ux = ff['ux']; uy = ff['uy']  # 位移分量
             dotux = ff['dotux']; dotuy = ff['dotuy']  # 速度分量
             sigmax = ff['sigmax']; sigmay = ff['sigmay']  # 应力分量（已含外法向符号）
@@ -2254,7 +1839,7 @@ def _apply_amplitudes_and_loads(model_name, inst_name, nodes_by_boundary, field_
 def VAB_oblique(site, geom, angle,
                 model_name='Model-1', part_name='Part-1', inst_name='Part-1-1',
                 acc_file=None, step_name=None, logger=None, tcfg=None, fc_used=None,
-                ffcfg=None, damping=None, surface_geometry='horizontal',
+                damping=None, surface_geometry='horizontal',
                 critical_angle_check=True, elem_name='CPE4'):
     """为二维模型施加粘弹性人工边界（弹簧-阻尼器）与斜入射 SV 波等效节点力。
 
@@ -2263,8 +1848,7 @@ def VAB_oblique(site, geom, angle,
     angle    : SV 波入射角（度）
     tcfg     : time_cfg 配置 dict（项③时间步校验）；None=跳过检查
     fc_used  : 网格/阻尼已用主频(Hz)；提供时用于 fmax 校验（不提供则从记录自动估计）
-    ffcfg    : freefield_cfg 配置 dict（v6：'fd'=频域精确分层自由场 / 'ray'=v5 射线法）
-    damping  : 解析后的阻尼配置 dict（v6：fd 引擎据此使自由场衰减与 FE 介质一致）
+    damping  : 解析后的阻尼配置 dict（据此使自由场衰减与 FE 介质一致）
     surface_geometry: v7 表层几何模式（与建模同口径，决定边界弹簧选材与自由场柱分层）
     critical_angle_check: v8 临界角校验开关（True=超临界拒绝建模 / False=仅告警不中断）
     elem_name: v3 单元类型（'CPE4/4R' 线性 / 'CPE8/8R' 二次）。二次时边界节点含中节点，
@@ -2303,15 +1887,13 @@ def VAB_oblique(site, geom, angle,
     strat = _build_stratigraphy(site, geom, ymin=0.0, surface_geometry=surface_geometry)  # 构造场地分层带（v7：与建模同口径）
     _strat_params = [_compute_material_params(b['mat'].cs, b['mat'].vv, b['mat'].density) for b in strat]  # 各带材料派生参数（弹簧系数用）
 
-    # 获取模型尺寸（左/右边界最高点与底边 y）
+    # 获取模型边界节点集与底边 y
     l_nodes = get_instance_nodes_from_part_set('Left_boundary')
-    ymax_l = max(l_nodes, key=lambda node: node.coordinates[1]).coordinates[1]
 
     b_nodes = get_instance_nodes_from_part_set('Bottom_boundary')
     ymin = b_nodes[0].coordinates[1]
 
     r_nodes = get_instance_nodes_from_part_set('Right_boundary')
-    ymax_r = max(r_nodes, key=lambda node: node.coordinates[1]).coordinates[1]
 
     # R 可直接给定，也可按计算域包络矩形半对角线自动计算
     R, R_mode, R_L, R_H = _resolve_boundary_R(geom)
@@ -2367,7 +1949,7 @@ def VAB_oblique(site, geom, angle,
     cp1 = mat_bedrock['cp']  # 基岩纵波波速
     # ── v8：SV 入射临界角校验（§3.1-A2 硬化，可由 run_cfg['critical_angle_check'] 关闭） ──
     # 基岩中 SV→P 临界角 = asin(cs/cp)（ν=0.3 时≈32.31°）；超临界后自由面反射 P 为非均匀波，
-    # ray 引擎实角公式与 AF 解析分母 factor_h 均失效，故默认达到临界角直接拒绝建模；
+    # 实角公式与 AF 解析分母 factor_h 均失效，故默认达到临界角直接拒绝建模；
     # 关闭校验时仅输出警告、不中断，便于探索超临界工况。论文工况以 30° 为上限。
     crit_deg = math.degrees(math.asin(cs1 / cp1))  # 基岩 SV 临界角（度）
     if angle >= crit_deg - 1e-6:  # 入射角达到/超过临界角
@@ -2380,21 +1962,14 @@ def VAB_oblique(site, geom, angle,
         log_step(logger, '%s 警告: 入射角 %.2f° > 30°（论文上限），已接近临界角 %.2f°，结果须谨慎使用',
                  model_name, angle, crit_deg)
     p_horiz = math.sin(alpha1) / cs1  # 水平慢度（Snell 守恒，全场不变）
-    beta1 = _safe_arcsin(cp1 * math.sin(alpha1) / cs1)  # 基岩 P 波反射角
-    order_count = max(0, int(MAX_REFLECT_ORDER))  # 几何级数截断阶数（仅 ray 引擎使用）
-    _REFL_COEFF_CACHE.clear()  # 清空等效系数缓存（不同模型/入射角不可复用）
-    _FD_SOLVER_CACHE.clear()  # v6：清空 fd 柱解与输入谱缓存（不同模型/输入不可复用）
-    ffcfg_used = dict(freefield_cfg)  # 以全局默认为底
-    if ffcfg:  # 传入了自由场配置
-        ffcfg_used.update(ffcfg)  # 覆盖默认
-    ffcfg_used['tail_seconds'] = float((tcfg or {}).get('tail_seconds', 0.0) or 0.0)  # v8：静默尾段（fd 自由场时窗延长）
-    damp_terms = _band_damping_terms(strat, damping)  # v6：各材料带瑞利系数表（fd 自由场衰减一致化）
-    log_step(logger, '%s 自由场引擎=%s(阻尼一致化=%s, 初态=%s): 入射角=%.4f°, 水平慢度 p=%.6e, 层数(含基岩)=%d',
-             model_name, ffcfg_used.get('engine'), ffcfg_used.get('include_damping'),  # 引擎与阻尼开关
-             ffcfg_used.get('initial_state_mode', 'raw'), angle, p_horiz, len(strat))
+    _FD_SOLVER_CACHE.clear()  # 清空 fd 柱解与输入谱缓存（不同模型/输入不可复用）
+    tail_seconds = float((tcfg or {}).get('tail_seconds', 0.0) or 0.0)  # 静默尾段（fd 自由场时窗延长）
+    damp_terms = _band_damping_terms(strat, damping)  # 各材料带瑞利系数表（自由场衰减一致化）
+    log_step(logger, '%s 自由场(阻尼一致化=%s): 入射角=%.4f°, 水平慢度 p=%.6e, 层数(含基岩)=%d',
+             model_name, bool(damping and damping.get('enable')), angle, p_horiz, len(strat))
 
-    # ============ 读取加速度时程并积分（保留 v7 基线校正）============
-    # [输入幅值约定（#5）] 加速度记录积分得到的速度被当作"基底入射上行 SV 波"幅值 E；
+    # ============ 读取加速度时程 ============
+    # [输入幅值约定（#5）] 加速度记录经 fd 频域积分后的速度被当作"基底入射上行 SV 波"幅值 E；
     #   自由岩面对应 2E（自由面效应），TAF=PGA_slope/PGA_flat 取比值时该归一化抵消。
     if not acc_file:
         raise ValueError('acc_file 不能为空')  # 抛出参数缺失异常
@@ -2424,22 +1999,9 @@ def VAB_oblique(site, geom, angle,
                      model_name, dt, fmax_check, steps_per_period, min_steps)
     # ── 时间步诊断结束 ───────────────────────────────────────────────────────────────
 
-    # 积分得到速度时程（梯形积分 + 基线校正，抑制低频漂移），再积分得到位移时程
-    vel, _vel_slope = _integrate_acc_to_velocity(acc, dt, time_arr)  # 加速度→速度（含基线校正）
-    log_step(logger, '%s 速度基线校正完成: 去趋势斜率=%.3e', model_name, _vel_slope)
-    dis = np.zeros_like(vel)
-    dis[1:] = np.cumsum((vel[:-1] + vel[1:]) / 2 * dt)  # 速度梯形积分得到位移
-    VEL = np.column_stack((time_arr, vel))  # 组合速度时程 [t, v]
-    DIS = np.column_stack((time_arr, dis))  # 组合位移时程 [t, u]
-
-    # ============ 逐节点用射线法计算自由场并组装等效力 ============
-    ctx = FreeFieldCtx(
-        site=site, geom=geom, strat=strat,  # 场地、几何、分层带
-        ymax_l=ymax_l, ymax_r=ymax_r, ymin=ymin,  # 各边界高度信息
-        alpha=alpha1, beta_p=beta1, p_horiz=p_horiz,  # 基岩入射角/P 反射角、水平慢度
-        GG=mat_bedrock['GG'], lam=mat_bedrock['lam'], cs=cs1, cp=cp1,  # 基岩材料标量（投影/应力用）
-        VEL=VEL, DIS=DIS, dt=dt, time_arr=time_arr, max_reflect_order=order_count,  # 时程、步长、阶数
-        acc=acc, damp_terms=damp_terms, ffcfg=ffcfg_used)  # v6：原始加速度、各带瑞利系数、引擎配置
+    # ============ 逐节点计算自由场并组装等效力 ============
+    ctx = FreeFieldCtx(geom=geom, strat=strat, ymin=ymin, p_horiz=p_horiz,
+                       dt=dt, acc=acc, damp_terms=damp_terms, tail_seconds=tail_seconds)
     field_data = _build_equivalent_forces(nodes_by_boundary, ctx, logger, model_name)
     log_step(logger, '%s 所有边界等效节点力计算完成: 共 %d 条力时程', model_name, len(field_data))
 
@@ -2457,7 +2019,7 @@ def VAB_oblique(site, geom, angle,
 def build_models(acc_info, base_model, part_name, inst_name,
                  site, geom, angle, job,
                  step_name=DEFAULT_STEP_NAME, model_scene='slope', logger=None,
-                 tcfg=None, fc_used=None, ffcfg=None, damping=None, surface_geometry='horizontal',
+                 tcfg=None, fc_used=None, damping=None, surface_geometry='horizontal',
                  surface_only=False, critical_angle_check=True, elem_name='CPE4',
                  full_field_frequency=None):
     """根据加速度时程信息批量复制模型、创建分析步、施加人工边界。
@@ -2467,8 +2029,7 @@ def build_models(acc_info, base_model, part_name, inst_name,
     job       : 作业配置 dict，读取 'variables'（场输出变量）与 'frequency'（输出频率）
     tcfg      : time_cfg 配置（项③）；None=跳过时间步校验
     fc_used   : 网格/阻尼已用主频(Hz)，转发给 VAB_oblique 用于 fmax 估计
-    ffcfg     : 自由场引擎配置（v6），转发给 VAB_oblique
-    damping   : 解析后阻尼配置（v6），转发给 VAB_oblique 用于 fd 自由场衰减一致化
+    damping   : 解析后阻尼配置，转发给 VAB_oblique 用于自由场衰减一致化
     surface_geometry: v7 表层几何模式，转发给 VAB_oblique（须与 create_model 同口径）
     full_field_frequency: surface_only=True 时全场输出步距；None 表示仅保留首末场
     """
@@ -2547,7 +2108,7 @@ def build_models(acc_info, base_model, part_name, inst_name,
         VAB_oblique(site=site, geom=geom, angle=angle,  # 调用人工边界构建函数（传入场地与几何对象）
                     model_name=new_model_name, part_name=part_name, inst_name=inst_name,  # 传入模型/零件/实例名称
                     acc_file=acc_file, step_name=step_name, logger=logger,  # 传入加速度文件、分析步与日志器
-                    tcfg=tcfg, fc_used=fc_used, ffcfg=ffcfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼配置
+                    tcfg=tcfg, fc_used=fc_used, damping=damping,  # 时间步校验 + 阻尼配置
                     surface_geometry=surface_geometry,  # v7：表层几何模式（与建模同口径）
                     critical_angle_check=critical_angle_check,  # v8：临界角校验开关透传
                     elem_name=elem_name)  # v3：单元类型(决定边界节点是否用二次一致权重)
@@ -2737,34 +2298,33 @@ def _deep_merge(base, override):
 
 
 def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
-                      mesh_cfg_in=None, time_cfg_in=None, max_reflect_order_in=None):  # 加载工况配置注入
+                      mesh_cfg_in=None, time_cfg_in=None):  # 加载工况配置注入
     """加载并注入用户自定义工况配置（来自 case_config.json），覆盖默认配置。
-    支持对材料、几何、阻尼、网格、时间步、自由场引擎、等效线性化(EQL)、人工边界等配置项进行部分或整体覆盖。
-    返回覆盖后的完整配置元组：(material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg, 
-                          max_reflect_order, freefield_cfg, run_cfg)。
+    支持对材料、几何、阻尼、网格、时间步、等效线性化(EQL)、人工边界等配置项进行部分或整体覆盖。
+    返回覆盖后的完整配置元组：(material_cfg, geometry_cfg, damping_cfg, mesh_cfg, time_cfg, run_cfg)。
     """
     mesh_cfg_out = dict(mesh_cfg_in) if mesh_cfg_in else dict(mesh_cfg)  # 初始化网格自适应配置（用全局默认）
     time_cfg_out = dict(time_cfg_in) if time_cfg_in else dict(time_cfg)  # 初始化时间步校验配置（用全局默认）
-    max_reflect_order_out = max_reflect_order_in if max_reflect_order_in is not None else MAX_REFLECT_ORDER  # 反射阶数
-    ff_cfg_out = dict(freefield_cfg)  # 初始化自由场引擎配置（用全局默认）
     run_cfg_out = dict(run_cfg)  # 初始化运行控制配置（用全局默认）
     path = os.path.join(os.getcwd(), 'case_config.json')  # 约定的配置注入文件
     if not os.path.isfile(path):  # 无注入文件 → 用默认配置单独运行
         if logger:
             log_step(logger, '未发现 case_config.json，使用脚本内默认配置')  # 输出默认配置提示
         return (material_cfg, geometry_cfg, damping_cfg, mesh_cfg_out,  # 原样返回默认
-                time_cfg_out, max_reflect_order_out, ff_cfg_out, run_cfg_out)  # 含 v6 新增两项
+                time_cfg_out, run_cfg_out)
     try:  # 尝试读取并覆盖
         if logger:  # 记录发现注入文件
             log_step(logger, '发现 case_config.json，开始加载并覆盖默认配置: %s', path)
         with io.open(path, 'r', encoding='utf-8') as f:  # 打开配置文件（io.open：Py2 内置 open 不支持 encoding 关键字）
             cfg = _ensure_str(json.load(f))  # 解析并递归转换 unicode→str（Py2 下 Abaqus API 只接受 str）
         _merged_keys = []  # 记录已合并的配置段名（用于日志）
+        if 'freefield_cfg' in cfg and logger:  # 旧配置段已删除（参数全部固化为代码内置口径）
+            log_step(logger, '警告: case_config.json 含已废弃的 freefield_cfg 段，已忽略')
         _cfg_targets = {'material_cfg': material_cfg, 'geometry_cfg': geometry_cfg, 'damping_cfg': damping_cfg,
                         'mesh_cfg': mesh_cfg_out, 'time_cfg': time_cfg_out,
-                        'freefield_cfg': ff_cfg_out, 'run_cfg': run_cfg_out}  # 普通配置段
+                        'run_cfg': run_cfg_out}  # 普通配置段
         for _key in ('material_cfg', 'geometry_cfg', 'damping_cfg', 'mesh_cfg',
-                     'time_cfg', 'freefield_cfg', 'run_cfg'):  # 有覆盖则递归深合并
+                     'time_cfg', 'run_cfg'):  # 有覆盖则递归深合并
             if isinstance(cfg.get(_key), dict):
                 _cfg_targets[_key] = _deep_merge(_cfg_targets[_key], cfg[_key])
                 _merged_keys.append(_key)
@@ -2773,14 +2333,10 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
         damping_cfg = _cfg_targets['damping_cfg']  # 取回合并后的阻尼配置
         mesh_cfg_out = _cfg_targets['mesh_cfg']  # 取回合并后的网格配置
         time_cfg_out = _cfg_targets['time_cfg']  # 取回合并后的时间配置
-        ff_cfg_out = _cfg_targets['freefield_cfg']  # 取回合并后的自由场配置
         run_cfg_out = _cfg_targets['run_cfg']  # 取回合并后的运行配置
         if cfg.get('mesh_size') is not None:  # v9.1：兼容旧写法——顶层 mesh_size 映射到 mesh_cfg['size']
             mesh_cfg_out['size'] = cfg['mesh_size']  # 覆盖基准网格尺寸（向后兼容）
             _merged_keys.append('mesh_size(旧写法)')  # 记录兼容映射
-        if cfg.get('max_reflect_order') is not None:  # 项④：提供了反射阶数覆盖
-            max_reflect_order_out = int(cfg['max_reflect_order'])  # 覆盖反射截断阶数
-            _merged_keys.append('max_reflect_order')
         if isinstance(cfg.get('eql_cfg'), dict):  # 土体非线性 EQL 覆盖
             eql_cfg.update(cfg['eql_cfg'])  # 就地更新全局 eql_cfg(扁平字典)
             _merged_keys.append('eql_cfg')
@@ -2796,16 +2352,15 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
                 _merged_keys.append(_tssi_key)
         if logger:
             log_step(logger, '已合并配置段: %s', ', '.join(_merged_keys) if _merged_keys else '(无)')
-            log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, 坡角=%s, 阻尼=%s/%s, mesh_auto=%s, order=%s, 引擎=%s',  # 输出关键覆盖项
+            log_step(logger, '已加载 case_config.json 覆盖默认配置: 入射角=%s, 层数(有限层)=%d, 坡角=%s, 阻尼=%s/%s, mesh_auto=%s',  # 输出关键覆盖项
                      material_cfg.get('angle'), len(material_cfg.get('layers', [])), geometry_cfg.get('slope_angle'),
                      damping_cfg.get('enable'), damping_cfg.get('method'),
-                     mesh_cfg_out.get('auto'), max_reflect_order_out,
-                     ff_cfg_out.get('engine'))
+                     mesh_cfg_out.get('auto'))
     except Exception as _e:  # 解析失败
         if logger:
             log_step(logger, '加载 case_config.json 失败(改用默认配置): %s', str(_e))
     return (material_cfg, geometry_cfg, damping_cfg, mesh_cfg_out,
-            time_cfg_out, max_reflect_order_out, ff_cfg_out, run_cfg_out)  # 含 v6 新增两项
+            time_cfg_out, run_cfg_out)
 
 
 def _meta_f(value):  # 把数值安全转为内置 float（兼容 numpy 标量）
@@ -2853,7 +2408,7 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
             'layers': per_layer}  # 逐层阻尼明细（基岩在前）
 
 
-def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None, ffcfg=None,
+def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None,
                      sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
                      validation_geometry='slope'):  # 写出统一工况元数据（含验证几何模式）
     """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
@@ -2956,13 +2511,10 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'taf_h_definition': 'TAF_h=AF_h/AF_h_1D_same_side=PGA_h/PGA_h_1D_same_side',  # 纯地形放大
             'note': 'ff_theory.left/right.taf_h/taf_v are legacy keys storing same-side AF_1D references',
         }
-        meta['freefield'] = {  # v6 自由场引擎信息（追溯用）
-            'engine': (ffcfg or {}).get('engine'),  # 引擎类型 fd/ray
-            'include_damping': (ffcfg or {}).get('include_damping'),  # 自由场是否计入阻尼
-            'reference_field_mode': (ffcfg or {}).get('reference_field_mode', 'global_upper'),  # 三边界参考场口径
-            'bottom_ymax_mode': (ffcfg or {}).get('bottom_ymax_mode', 'local'),  # 底边界自由场柱高模式
-            'initial_state_mode': (ffcfg or {}).get('initial_state_mode', 'raw'),  # fd 初态参考口径
-            'phase_origin_x': _meta_f((ffcfg or {}).get('phase_origin_x', 0.0)),  # 水平相位原点（跨域/跨软件对齐）
+        meta['freefield'] = {  # 自由场信息（追溯用）
+            'include_damping': bool(damping and damping.get('enable')),  # 自由场恒与介质阻尼一致
+            'initial_state_mode': 'incremental',  # 自由场初态口径（固定：t=0 起算增量场）
+            'phase_origin_x': 0.0,  # 水平相位原点（固定：左边界 x=0）
         }
         # ── v7：同侧一维场地放大基准 ff_theory（自动 QA 锚点） ──────────────────────
         # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
@@ -2984,17 +2536,16 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
                 mask0[0] = False  # 排除直流分量
                 idx0 = np.nonzero(mask0)[0]  # 被求解频点索引
                 om0 = 2.0 * math.pi * freqs0[idx0]  # 对应圆频率
-                incl = bool((ffcfg or {}).get('include_damping', True))  # 是否计入阻尼（与 fd 引擎一致）
                 denom0 = factor_h * float(np.max(np.abs(acc0)))  # 解析分母 = factor_h × PGA_in
                 ff_theory = {'fc_used': _meta_f((damping or {}).get('fc')),  # 瑞利拟合主频
-                             'damped': bool(damping and damping.get('enable') and incl),  # 理论值是否含阻尼
+                             'damped': bool(damping and damping.get('enable')),  # 理论值是否含阻尼
                              'quantity': 'AF_1D relative to bedrock outcrop motion',  # 一维场地放大基准
                              'legacy_keys': 'taf_h/taf_v retained for compatibility',  # 旧字段名不改
                              'note': 'fd 一维柱 AF_1D；FE 远场 AF 应与之一致(±5%)'}
                 reference_series = {}  # 保存左右一维参考完整时程，供复频响和真实波闭环使用
                 for tag, ys in (('left', geom.H_upper), ('right', geom.H_lower)):  # 左(上平台)/右(下平台)两柱
                     col_t = _build_column(strat_t, ys, p0, 0.0)
-                    sol_t = _fd_solve_column(col_t, p0, om0, damp_terms, incl)  # 频域求解（单位入射）
+                    sol_t = _fd_solve_column(col_t, p0, om0, damp_terms)  # 频域求解（单位入射）
                     fld = _fd_eval_column(sol_t, om0, p0, ys)  # 地表场量谱（单位入射）
                     spec_t = np.zeros(len(freqs0), dtype=complex)  # x 向加速度全频谱容器
                     spec_t[idx0] = fld['ux'] * A0[idx0]  # a(ω) = u_unit × A（位移两次积分与 −ω² 相消）
@@ -3281,7 +2832,7 @@ def _add_soil_strain_output(model_name, part_name, inst_name, soil_labels, step_
 
 
 def _run_2d_element_eql(base_model, part_name, inst_name, site, geom, eql_cfg, damping, fc,
-                        ffcfg, tcfg, sgeom, run_cfg, acc_rec, angle, job_cfg, logger, elem_name='CPE4'):
+                        tcfg, sgeom, run_cfg, acc_rec, angle, job_cfg, logger, elem_name='CPE4'):
     """[需 Abaqus 实测] 逐单元 2D EQL 驱动：对代表性记录迭代 [建/赋材→提交→读ODB应变→更新] 至收敛。
 
     注意：本驱动需建模时对软层单元请求 'E' 应变场输出；mesh 跨外迭代保持不变(只改材料)。
@@ -3295,7 +2846,7 @@ def _run_2d_element_eql(base_model, part_name, inst_name, site, geom, eql_cfg, d
     vv_soil = float(site.layers[0].vv); rho_soil = float(site.layers[0].density)
     # 初始建模(1 条记录, 含边界+分析步)，复用 build_models
     names = build_models([acc_rec], base_model, part_name, inst_name, site, geom, angle, job_cfg,
-                         model_scene='slope', logger=logger, tcfg=tcfg, fc_used=fc, ffcfg=ffcfg,
+                         model_scene='slope', logger=logger, tcfg=tcfg, fc_used=fc,
                          damping=damping, surface_geometry=sgeom,
                          surface_only=bool(run_cfg.get('surface_only', False)),
                          critical_angle_check=bool(run_cfg.get('critical_angle_check', True)),
@@ -4112,17 +3663,17 @@ def _estimate_fc_from_first_record(acc_info, logger):  # 估计首条输入主�
     try:
         acc0 = np.loadtxt(acc_info[0][0])
         fc = _estimate_dominant_freq(acc0[:, 1], acc0[1, 0] - acc0[0, 0])
-        log_step(logger, '阻尼主频自动估计: fc=%.3f Hz（源记录: %s）', fc, acc_info[0][0])
+        log_step(logger, '主频自动估计: fc=%.3f Hz（源记录: %s）', fc, acc_info[0][0])
         return fc
     except Exception as exc:
-        log_step(logger, '阻尼主频估计失败(将依赖显式 fc 或回退): %s', str(exc))
+        log_step(logger, '主频估计失败(将依赖显式 fc 或回退): %s', str(exc))
         return None
 
 
 def _resolve_material_damping(site, geom, damping_cfg, acc_info, surface_geometry, logger):  # 解析材料阻尼
-    """解析阻尼主频、双控锚点与 perband 锚点，返回完整阻尼配置和主频。"""
+    """解析主频、双控锚点与 perband 锚点，返回完整阻尼配置和主频；阻尼关闭时仍估计主频（网格自适应/fmax/a0 共用）。"""
     fc_est = None
-    if damping_cfg.get('enable') and damping_cfg.get('fc') is None:
+    if damping_cfg.get('fc') is None:  # 主频是输入波属性：阻尼关闭时也需估计，供网格自适应与 a0 记录
         fc_est = _estimate_fc_from_first_record(acc_info, logger)
     damping = _resolve_damping(damping_cfg, fc_est)
     fc = damping.get('fc')
@@ -4199,13 +3750,13 @@ def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终�
     return mesh_used
 
 
-def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping, ffcfg,
+def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping,
                                surface_geometry, acc_info, selfcheck, eql_meta,
                                validation_geometry='slope'):  # 写出工况元数据
     """写出 case_meta.json，并输出同侧一维场地放大基准 QA 摘要。"""
     first_rec = acc_info[0][0] if acc_info else None
     ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
-                                 damping=damping, ffcfg=ffcfg, sgeom=surface_geometry, acc_path=first_rec,
+                                 damping=damping, sgeom=surface_geometry, acc_path=first_rec,
                                  selfcheck=selfcheck, eql_info=eql_meta,
                                  validation_geometry=validation_geometry)
     if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
@@ -4347,19 +3898,18 @@ def _add_validation_point_sets(model_name, inst_name, points, mesh_size, logger,
 
 def main():
     """脚本主入口：组织参数、建模、施加边界并提交作业。"""
-    global material_cfg, geometry_cfg, damping_cfg, MAX_REFLECT_ORDER  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
+    global material_cfg, geometry_cfg, damping_cfg  # 声明为全局以便用注入配置整体覆盖（所有 callee 均按值取用，安全）
     logger = log_step()  # 自动使用与脚本同名的日志文件
     total_start = time.time()
 
     try:
         log_step(logger, '脚本开始执行 (slope_frame_ssi_full_v2)')  # 写入脚本启动日志
 
-        # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置（v6 新增自由场引擎/运行控制注入）
+        # 配置注入：若工况文件夹有 case_config.json 则覆盖默认配置
         (material_cfg, geometry_cfg, damping_cfg,
-         _mesh_cfg, _time_cfg, _max_reflect_order, _ff_cfg, _run_cfg) = _load_case_config(  # 加载并覆盖
+         _mesh_cfg, _time_cfg, _run_cfg) = _load_case_config(  # 加载并覆盖
             material_cfg, geometry_cfg, damping_cfg, logger)  # 传入默认配置与日志器
         mesh_size = float(_mesh_cfg.get('size', 4.0))  # v9.1：基准网格尺寸改由 mesh_cfg['size'] 提供（兼容旧顶层 mesh_size）
-        MAX_REFLECT_ORDER = _max_reflect_order  # 全局更新反射截断阶数（仅 ray 引擎使用）
 
         geometry_cfg = _resolve_geometry_cfg(geometry_cfg, logger)  # 无量纲几何设计 → 绝对尺寸（研究计划§2.1，total_L 浮动）
 
@@ -4409,7 +3959,7 @@ def main():
 
         log_step(logger, '====== 阶段: 写出工况元数据 case_meta.json ======')
 
-        _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping, _ff_cfg,
+        _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping,
                                    sgeom, acc_info, selfcheck, _eql_meta,
                                    validation_geometry=validation_geometry)  # 写 case_meta 并输出理论 QA
 
@@ -4418,8 +3968,7 @@ def main():
             log_step(logger, 'reference_only：一维完整参考已生成，不创建或提交有限元模型')
             return
 
-        log_step(logger, '运行控制: 几何=%s, 自由场引擎=%s（TAF 分母用解析自由场）',
-                 validation_geometry, _ff_cfg.get('engine'))
+        log_step(logger, '运行控制: 几何=%s（TAF 分母用解析自由场）', validation_geometry)
 
         # ── 三胞胎场景调度 ────────────────────────────────────────────────────
         scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'
@@ -4470,7 +4019,7 @@ def main():
         if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element' and site.layers and acc_info:  # ② 逐单元 2D EQL(自管迭代提交)
             log_step(logger, '====== 阶段: 逐单元 2D EQL 迭代(自管建/提/读/更新) ======')
             _run_2d_element_eql(base_model, part_name, inst_name, site, geom_for_model, eql_cfg, damping, fc_resolved,
-                                _ff_cfg, _time_cfg, sgeom, _run_cfg, acc_info[0], material_cfg['angle'], job_cfg, logger,
+                                _time_cfg, sgeom, _run_cfg, acc_info[0], material_cfg['angle'], job_cfg, logger,
                                 elem_name=_mesh_cfg.get('elem', 'CPE4'))  # v3：单元类型透传
             model_names = []
         else:  # 1D 应变相容 或 线性: 原批量建模+提交
@@ -4479,7 +4028,7 @@ def main():
                 acc_info=acc_info, base_model=base_model, part_name=part_name, inst_name=inst_name,  # 地震动信息与基础模型/零件/实例
                 site=site, geom=geom_for_model, angle=material_cfg['angle'],  # 场地、当前几何与入射角
                 job=job_cfg, model_scene=validation_geometry, logger=logger,  # 作业配置与场景标签
-                tcfg=_time_cfg, fc_used=fc_resolved, ffcfg=_ff_cfg, damping=damping,  # 时间步校验 + v6 引擎/阻尼
+                tcfg=_time_cfg, fc_used=fc_resolved, damping=damping,  # 时间步校验 + 阻尼配置
                 surface_geometry=sgeom, surface_only=bool(_run_cfg.get('surface_only', False)),  # v7 表层几何 + v8 输出瘦身
                 critical_angle_check=bool(_run_cfg.get('critical_angle_check', True)),  # v8：临界角校验开关
                 elem_name=_mesh_cfg.get('elem', 'CPE4'),  # v3：单元类型透传(CPE8R 时边界自动用二次一致权重)

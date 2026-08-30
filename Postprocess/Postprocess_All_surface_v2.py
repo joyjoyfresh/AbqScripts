@@ -51,11 +51,6 @@ import zipfile
 from xml.sax.saxutils import escape as xml_escape
 import numpy as np
 
-try:
-    string_types = (basestring,)  # Python 2 字符串类型
-except NameError:
-    string_types = (str,)  # Python 3 兼容
-
 openOdb = None  # 占位
 is_abaqus = False  # 是否成功加载 Abaqus ODB 接口
 
@@ -438,21 +433,8 @@ def remove_incident_horizontal_phase(transfer, xs, freqs, case_cfg, meta):
     vs_bedrock = bedrock.get('vs')
     if angle_deg is None or vs_bedrock is None or float(vs_bedrock) <= 0.0:
         raise ValueError('水平传播相位修正缺少入射角或基岩剪切波速')
-    freefield = (case_cfg or {}).get('freefield_cfg') or {}
-    x_ref = freefield.get('phase_origin_x')
-    if x_ref is None:
-        x_ref = ((meta or {}).get('freefield') or {}).get('phase_origin_x', 0.0)
-    if isinstance(x_ref, string_types) and x_ref.lower() == 'center':
-        meta_geometry = (meta or {}).get('geometry') or {}
-        total_length = meta_geometry.get('total_L')
-        if total_length is None:
-            geometry = (case_cfg or {}).get('geometry_cfg') or {}
-            total_length = geometry.get('total_L')
-        if total_length is None:
-            raise ValueError('phase_origin_x=center，但元数据中缺少模型总长度')
-        x_ref = 0.5 * float(total_length)
-    else:
-        x_ref = float(x_ref or 0.0)
+    freefield_meta = (meta or {}).get('freefield') or {}
+    x_ref = float(freefield_meta.get('phase_origin_x') or 0.0)  # 相位原点（新口径固定 0.0；旧工况沿用元数据记录）
     p_horiz = math.sin(math.radians(float(angle_deg))) / float(vs_bedrock)
     xs = np.asarray(xs, dtype=float).reshape(-1)
     freqs = np.asarray(freqs, dtype=float).reshape(-1)

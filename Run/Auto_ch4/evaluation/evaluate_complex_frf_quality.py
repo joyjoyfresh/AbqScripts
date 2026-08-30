@@ -96,19 +96,9 @@ def _load_sgrid_x(case, s_values):
         package.close()
 
 
-def _phase_origin_x(case, meta):
-    """返回自由场相位原点，兼容默认0和已有的center写法。"""
-    config = _load_case_json(case, "case_config.json")
-    freefield = config.get("freefield_cfg") or {}
-    value = freefield.get("phase_origin_x", 0.0)
-    geometry = meta.get("geometry") or {}
-    total_l = geometry.get("total_L")
-    if isinstance(value, str) and value.lower() == "center":
-        return 0.5 * float(total_l) if total_l is not None else None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+def _phase_origin_x():
+    """返回自由场相位原点（建模脚本固定为左边界 x=0）。"""
+    return 0.0
 
 
 def _case_incident_angle_and_bedrock_vs(case, meta):
@@ -141,8 +131,8 @@ def coordinate_phase_alignment(reference, candidate, frequency, s_values):
     candidate_meta = _load_case_json(candidate, "case_meta.json")
     reference_x = _load_sgrid_x(reference, s_values)
     candidate_x = _load_sgrid_x(candidate, s_values)
-    reference_origin = _phase_origin_x(reference, reference_meta)
-    candidate_origin = _phase_origin_x(candidate, candidate_meta)
+    reference_origin = _phase_origin_x()
+    candidate_origin = _phase_origin_x()
     angle, vs = _case_incident_angle_and_bedrock_vs(candidate, candidate_meta)
     info = {
         "applied": False,

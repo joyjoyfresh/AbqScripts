@@ -110,15 +110,7 @@ def horizontal_phase_parameters(config: dict) -> dict[str, float]:
     bedrock_vs = float(bedrock["vs"])
     if bedrock_vs <= 0.0:
         raise ValueError("基岩剪切波速必须为正数")
-    freefield = config.get("freefield_cfg") or {}
-    raw_x_ref = freefield.get("phase_origin_x", 0.0)
-    if isinstance(raw_x_ref, str) and raw_x_ref.lower() == "center":
-        total_length = geometry.get("total_L")
-        if total_length is None:
-            raise ValueError("phase_origin_x=center，但工况配置缺少模型总长度")
-        x_ref = 0.5 * float(total_length)
-    else:
-        x_ref = float(raw_x_ref or 0.0)
+    x_ref = 0.0  # 相位原点（建模脚本固定为左边界 x=0）
     return {
         "incident_angle_deg": angle_deg,
         "bedrock_vs_m_s": bedrock_vs,

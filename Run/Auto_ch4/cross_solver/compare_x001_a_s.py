@@ -126,14 +126,11 @@ def validate_abaqus_identity(case_dir: Path, params: dict,
     require_close("damping_cfg.fc", config["damping_cfg"]["fc"], pulse["f0_hz"])
     require_close("time_cfg.tail_seconds", config["time_cfg"]["tail_seconds"],
                   pulse["abaqus_tail_seconds"])
-    require_close("freefield_cfg.phase_origin_x", config["freefield_cfg"]["phase_origin_x"],
-                  pulse["abaqus_phase_origin_x_m"])
     require_close("mesh_cfg.size", config["mesh_cfg"]["size"], case["mesh_size"])
     require_close("case_meta.geometry.total_L", meta["geometry"]["total_L"], geometry["domain_length"])
     require_close("case_meta.incident_angle", meta["incident_angle"],
                   params["physics"]["incidence_angle_from_vertical_deg"])
-    require_close("case_meta.freefield.phase_origin_x", meta["freefield"]["phase_origin_x"],
-                  pulse["abaqus_phase_origin_x_m"])
+    require_close("case_meta.freefield.phase_origin_x", meta["freefield"]["phase_origin_x"], 0.0)
     if meta["freefield"].get("initial_state_mode") != "incremental":
         raise RuntimeError("X001-A身份校验失败: initial_state_mode不是incremental")
     actual_damping = meta["damping"]["layers"]

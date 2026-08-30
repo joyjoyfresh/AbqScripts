@@ -44,7 +44,7 @@ ABAQUS_SCRIPTS = ABAQUS_CAE_SCRIPTS | ABAQUS_PYTHON_SCRIPTS  # 兼容既有检�
 # 注入配置的顶层键白名单
 ALLOWED_CONFIG_KEYS = {
     'material_cfg', 'geometry_cfg', 'damping_cfg', 'mesh_cfg',
-    'time_cfg', 'freefield_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
+    'time_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
 }
 
 MODEL_SCRIPT_SEQUENCE = [  # 建模线程池连续执行的脚本绝对路径

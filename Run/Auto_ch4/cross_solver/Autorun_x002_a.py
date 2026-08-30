@@ -96,14 +96,6 @@ def build_config(params, case):
             'min_steps_per_fmax_period': 20,
             'tail_seconds': float(pulse['abaqus_tail_seconds']),
         },
-        'freefield_cfg': {
-            'engine': 'fd',
-            'include_damping': True,
-            'reference_field_mode': 'global_upper',
-            'bottom_ymax_mode': 'local',
-            'initial_state_mode': 'incremental',
-            'phase_origin_x': float(pulse['abaqus_phase_origin_x_m']),
-        },
         'run_cfg': {
             'surface_only': True,
             'critical_angle_check': True,

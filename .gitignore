@@ -17,6 +17,8 @@ venv/
 .workbuddy/
 .origin_runtime/
 批量转换工具/
+.qoder/
+.agents/
 
 # 测试目录全部不进版本库
 test/
