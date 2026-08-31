@@ -17,6 +17,9 @@ import shutil  # 导入文件复制与高层级文件操作模块
 import subprocess  # 导入子进程执行模块以运行其他脚本
 import sys  # 导入系统模块用于获取 Python 解释器路径与退出程序
 import concurrent.futures  # 导入并发模块以实现多工况文件夹并行执行
+import hashlib  # 导入哈希模块用于计算配置与源文件散列
+import datetime  # 导入时间模块用于清单追踪
+import math  # 导入数学模块用于临界角计算
 import time  # 导入时间模块用于轮询子进程与进度日志
 import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 
@@ -24,6 +27,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型�
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
 DELETE_FILE_TYPES = [ ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留".odb"
 REQUIRED_RESULT_FILES = ["surface_results.npz", "surface_results.xlsx"]  # 清理前必须同时存在且非空的规范数据产物
+POSTPROCESS_STATUS_FILENAME = "postprocess_status.json"  # 后处理必需QA状态；不依赖可能吞退出码的Abaqus批处理包装器
 MAX_WORKERS = 4  # 单机最多同时运行4个建模/求解工况，已由G1r正式批次验证
 POSTPROCESS_WORKERS = 1  # 单工况后处理并发数，默认1以减少与求解争用内存
 CONFIG_FILENAME = "case_config.json"  # 注入给建模或计算脚本的配置文件名
@@ -34,8 +38,14 @@ _PROGRESS_PRINT_LOCK = threading.Lock()  # 并发工况共用终端输出锁
 # Abaqus 启动路径与需要由 Abaqus Python 运行的脚本名单
 ABAQUS_CMD = os.environ.get('ABAQUS_CMD') or r'C:\SIMULIA\Commands\abaqus.bat'
 ABAQUS_CAE_SCRIPTS = {'slope_frame_ssi_full_v2.py'}
-ABAQUS_PYTHON_SCRIPTS = set()  # 后处理已改读 CSV（纯 Python+matplotlib，无需 Abaqus 解释器）
+ABAQUS_PYTHON_SCRIPTS = {'Postprocess_All_surface_v2.py'}
 ABAQUS_SCRIPTS = ABAQUS_CAE_SCRIPTS | ABAQUS_PYTHON_SCRIPTS  # 兼容既有检查
+
+# 注入配置的顶层键白名单
+ALLOWED_CONFIG_KEYS = {
+    'material_cfg', 'geometry_cfg', 'damping_cfg', 'mesh_cfg',
+    'time_cfg', 'run_cfg', 'eql_cfg', 'tssi_cfg',
+}
 
 MODEL_SCRIPT_SEQUENCE = [  # 建模线程池连续执行的脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Modeling\slope_frame_ssi_full_v2.py",  # 建模脚本（读取 case_config.json，含层内材料一致化/网格自适应/时间步校验）
@@ -45,7 +55,7 @@ CASE_POSTPROCESS_SCRIPT_SEQUENCE = [  # 建模完成后进入独立线程池的�
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Postprocess_All_surface_v2.py",  # 后处理提取脚本路径 / 提取单工况数据
 ]
 
-SCRIPT_SEQUENCE = MODEL_SCRIPT_SEQUENCE + CASE_POSTPROCESS_SCRIPT_SEQUENCE  # 复制进各工况目录的全部脚本
+SCRIPT_SEQUENCE = MODEL_SCRIPT_SEQUENCE + CASE_POSTPROCESS_SCRIPT_SEQUENCE  # 兼容源文件复制与散列清单
 
 POST_SCRIPT_SEQUENCE = [  # 全部工况求解完成后自动在根目录执行的全局后处理脚本绝对路径
     r"C:\Users\12462\Documents\Code\AbqScripts\Postprocess\Collect_All_results_v2.py",  # 汇总各工况 case_meta.json 到 results/index.csv
@@ -74,6 +84,137 @@ PARAMETER_CASES = [  # 变参数工况列表，每项需包含 config 配置覆�
         }
     }
 ]
+
+
+def get_git_commit():
+    """获取当前 Git 提交哈希值。"""
+    try:
+        res = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if res.returncode == 0:
+            return res.stdout.decode('utf-8').strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def compute_file_sha256(path):
+    """计算文件的 SHA-256 哈希值。"""
+    if not os.path.isfile(path):
+        return "missing"
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def compute_dict_sha256(d):
+    """计算字典的 SHA-256 哈希值。"""
+    text = json.dumps(d or {}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def validate_postprocess_status(folder_path):  # 独立核验后处理必需QA
+    """读取后处理状态文件，返回 ``(通过, 原因)``。"""
+    status_path = os.path.join(folder_path, POSTPROCESS_STATUS_FILENAME)
+    if not os.path.isfile(status_path):
+        return False, "缺少{}".format(POSTPROCESS_STATUS_FILENAME)
+    try:
+        with open(status_path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except Exception as exc:
+        return False, "{}无法读取: {}".format(
+            POSTPROCESS_STATUS_FILENAME, str(exc),
+        )
+    if not bool(payload.get('passed', False)):
+        return False, "{}报告必需QA未通过: {}".format(
+            POSTPROCESS_STATUS_FILENAME, payload.get('reason') or 'unknown',
+        )
+    return True, "passed"
+
+
+def validate_config(config):
+    """验证工况配置是否合规。
+
+    根据 G0 生产准备规则：
+    1. 配置段只能使用允许 of 白名单键。对未知键立即失败。
+    2. 临界角校验硬性拦截。
+    """
+    if not config:
+        return
+    for key in config.keys():
+        if key not in ALLOWED_CONFIG_KEYS:
+            raise ValueError("错误：发现了不属于白名单的非法顶层配置键: '{}'。允许的键包括: {}".format(
+                key, sorted(list(ALLOWED_CONFIG_KEYS))))
+
+    # 临界角预检
+    material_cfg = config.get("material_cfg") or {}
+    run_cfg = config.get("run_cfg") or {}
+    critical_angle_check = run_cfg.get("critical_angle_check", True)
+    angle = material_cfg.get("angle")
+    if angle is not None:
+        bedrock = material_cfg.get("bedrock") or {}
+        vs = bedrock.get("vs", 2000.0)
+        pr = bedrock.get("poisson_ratio", 0.3)
+        if 0.0 < pr < 0.5:
+            sin_crit = math.sqrt((1.0 - 2.0 * pr) / (2.0 * (1.0 - pr)))
+            crit_deg = math.degrees(math.asin(sin_crit))
+        else:
+            crit_deg = 32.3115  # 默认 ν=0.3 下的临界角
+        if angle >= crit_deg - 1e-6 and critical_angle_check:
+            raise ValueError("错误：入射角 {}° 达到或超过基岩临界角 {:.2f}°（超临界非均匀波不在方法适用域内，硬性拦截）".format(angle, crit_deg))
+
+
+def _write_run_manifest(root_dir, folder_plan, source_files, status_dict=None):
+    """写出或更新本批次运行的主清单 run_manifest.json。"""
+    manifest_path = os.path.join(root_dir, 'run_manifest.json')
+    manifest_data = {}
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest_data = json.load(f)
+        except Exception:
+            pass
+
+    script_hashes = {}
+    for name, path in source_files.items():
+        script_hashes[name] = compute_file_sha256(path)
+
+    manifest_data.update({
+        'created_at': manifest_data.get('created_at') or datetime.datetime.now().isoformat(),
+        'updated_at': datetime.datetime.now().isoformat(),
+        'git_commit': get_git_commit(),
+        'source_files': script_hashes,
+        'execution_policy': {
+            'pipeline_mode': 'model_then_async_case_postprocess',
+            'model_workers': MAX_WORKERS,
+            'case_postprocess_workers': POSTPROCESS_WORKERS,
+            'global_postprocess_after_all_cases': True,
+            'cleanup_after_required_results': bool(DELETE_FILE_TYPES),
+            'cleanup_file_types': list(DELETE_FILE_TYPES),
+            'cleanup_required_results': list(REQUIRED_RESULT_FILES),
+            'retain_cae': True,
+        },
+    })
+
+    cases = manifest_data.get('cases', {})
+    for folder_name, config in folder_plan:
+        config_hash = compute_dict_sha256(config)
+        case_status = status_dict.get(folder_name, 'planned') if status_dict else 'planned'
+        if folder_name not in cases:
+            cases[folder_name] = {
+                'case_id': folder_name,
+                'config_sha256': config_hash,
+                'status': case_status,
+                'added_at': datetime.datetime.now().isoformat(),
+            }
+        else:
+            cases[folder_name]['status'] = case_status
+            cases[folder_name]['updated_at'] = datetime.datetime.now().isoformat()
+
+    manifest_data['cases'] = cases
+    with open(manifest_path, 'w', encoding='utf-8') as f:
+        json.dump(manifest_data, f, ensure_ascii=False, indent=2, sort_keys=True)
 
 
 def build_source_files(script_sequence):  # 建立脚本文件映射并检测缺失与冲突
@@ -206,6 +347,7 @@ def create_and_fill_folder(folder_path, source_files, config):  # 创建目录�
         source_files (dict): 源文件物理路径映射字典。
         config (dict): 参数覆盖字典。
     """
+    validate_config(config)  # 强校验配置
     os.makedirs(folder_path, exist_ok=True)  # 创建工况目录
     for target_name, src_path in source_files.items():  # 遍历待拷贝的所有文件映射
         shutil.copy2(src_path, os.path.join(folder_path, target_name))  # 拷入工况目录并保留元数据
@@ -379,33 +521,53 @@ def _print_job_progress(folder_path, messages, case_index=None,
             print("[运行状态]{} {}".format(prefix, message), flush=True)
 
 
-def run_scripts_in_folder(folder_path, run_order, case_index=None,
+def run_scripts_in_folder(folder_path, run_order, step_offset=0,
+                          stage_label='stage', case_index=None,
                           case_total=None):  # 在工况文件夹内按顺序执行指定阶段脚本
     """在工况文件夹内按顺序执行指定的脚本，自动分发 Abaqus cae 和普通 Python 解释器。
 
     参数说明:
         folder_path (str): 工况文件夹绝对路径。
         run_order (list): 当前阶段脚本文件名（不含路径）顺序列表。
+        step_offset (int): 当前阶段之前已有的脚本数量。
+        stage_label (str): 日志中的阶段标签。
         case_index (int): 工况在冻结计划中的序号。
         case_total (int): 本批次工况总数。
 
     返回值:
         bool: 若全部顺利执行返回 True，任意脚本执行失败则返回 False。
     """
-    for script_name in run_order:  # 遍历待执行的脚本
+    for local_idx, script_name in enumerate(run_order, start=1):  # 遍历待执行的脚本
+        idx = int(step_offset) + local_idx  # 保持拆分流水线后的全流程步骤编号
         script_path = os.path.join(folder_path, script_name)  # 拼接绝对路径
         if not os.path.isfile(script_path):  # 若物理文件不存在
             print("错误：脚本不存在 -> {}".format(script_path))  # 打印不存在 of 错误提示
             return False  # 返回失败
 
-        # 判断执行命令（子进程 stdout/stderr 直接丢弃：脚本自身日志已含全部阶段信息与异常堆栈）
+        # 判断执行命令
         if script_name in ABAQUS_CAE_SCRIPTS:
             cmd = [ABAQUS_CMD, 'cae', 'noGUI=' + script_name]
+            log_filename = "autorun_step{:02d}_{}_{}.log".format(
+                idx, stage_label, os.path.splitext(script_name)[0],
+            )
         elif script_name in ABAQUS_PYTHON_SCRIPTS:
             cmd = [ABAQUS_CMD, 'python', script_name]
+            log_filename = "autorun_step{:02d}_{}_{}.log".format(
+                idx, stage_label, os.path.splitext(script_name)[0],
+            )
         else:
             cmd = [sys.executable, script_name]
+            log_filename = "autorun_step{:02d}_post_{}.log".format(idx, os.path.splitext(script_name)[0])
 
+        log_path = os.path.join(folder_path, log_filename)
+        postprocess_status_path = os.path.join(
+            folder_path, POSTPROCESS_STATUS_FILENAME,
+        )
+        if (
+            script_name == 'Postprocess_All_surface_v2.py'
+            and os.path.isfile(postprocess_status_path)
+        ):
+            os.remove(postprocess_status_path)  # 当前进程启动前删除旧状态，禁止误用历史通过证据
         _print_case_message(
             folder_path,
             "开始执行: {} (命令: {})".format(script_name, ' '.join(cmd)),
@@ -416,18 +578,36 @@ def run_scripts_in_folder(folder_path, run_order, case_index=None,
         if script_name not in ABAQUS_SCRIPTS:
             env['PYTHONIOENCODING'] = 'utf-8'
 
-        try:
-            started_at = time.time()
-            process = subprocess.Popen(cmd, cwd=folder_path, stdout=subprocess.DEVNULL,
-                                       stderr=subprocess.DEVNULL, env=env)
-            progress_offset = 0
-            progress_log = os.path.join(
-                folder_path, os.path.splitext(script_name)[0] + '.log',
-            ) if script_name == 'slope_frame_ssi_full_v2.py' else None
-            next_progress_poll = started_at + float(TERMINAL_PROGRESS_POLL_SECONDS)
-            while process.poll() is None:
-                now = time.time()
-                if progress_log and now >= next_progress_poll:
+        with open(log_path, 'wb') as handle:
+            handle.write("命令: {}\n工作目录: {}\n\n".format(' '.join(cmd), folder_path).encode('utf-8'))
+            handle.flush()
+            try:
+                started_at = time.time()
+                process = subprocess.Popen(cmd, cwd=folder_path, stdout=handle,
+                                           stderr=subprocess.STDOUT, env=env)
+                progress_offset = 0
+                progress_log = os.path.join(
+                    folder_path, os.path.splitext(script_name)[0] + '.log',
+                ) if script_name == 'slope_frame_ssi_full_v2.py' else None
+                next_progress_poll = started_at + float(TERMINAL_PROGRESS_POLL_SECONDS)
+                while process.poll() is None:
+                    now = time.time()
+                    if progress_log and now >= next_progress_poll:
+                        progress_offset, messages = _read_new_job_progress(
+                            progress_log, progress_offset, started_at,
+                        )
+                        sta_messages = _read_sta_job_progress(
+                            folder_path, started_at, progress_log,
+                        )
+                        if sta_messages:
+                            messages = sta_messages  # sta是求解器当前状态，优先于可能滞后的建模日志
+                        _print_job_progress(
+                            folder_path, messages,
+                            case_index=case_index, case_total=case_total,
+                        )
+                        next_progress_poll = now + float(TERMINAL_PROGRESS_POLL_SECONDS)
+                    time.sleep(max(0.5, float(PROCESS_STATUS_POLL_SECONDS)))
+                if progress_log:
                     progress_offset, messages = _read_new_job_progress(
                         progress_log, progress_offset, started_at,
                     )
@@ -435,34 +615,28 @@ def run_scripts_in_folder(folder_path, run_order, case_index=None,
                         folder_path, started_at, progress_log,
                     )
                     if sta_messages:
-                        messages = sta_messages  # sta是求解器当前状态，优先于可能滞后的建模日志
+                        messages = sta_messages
                     _print_job_progress(
                         folder_path, messages,
                         case_index=case_index, case_total=case_total,
                     )
-                    next_progress_poll = now + float(TERMINAL_PROGRESS_POLL_SECONDS)
-                time.sleep(max(0.5, float(PROCESS_STATUS_POLL_SECONDS)))
-            if progress_log:
-                progress_offset, messages = _read_new_job_progress(
-                    progress_log, progress_offset, started_at,
-                )
-                sta_messages = _read_sta_job_progress(
-                    folder_path, started_at, progress_log,
-                )
-                if sta_messages:
-                    messages = sta_messages
-                _print_job_progress(
-                    folder_path, messages,
-                    case_index=case_index, case_total=case_total,
-                )
-            returncode = process.returncode
-        except Exception as e:
-            print("错误：{} 子进程启动异常: {}".format(script_name, str(e)))
-            returncode = -999
+                returncode = process.returncode
+            except Exception as e:
+                handle.write("\n子进程启动异常: {}\n".format(str(e)).encode('utf-8'))
+                returncode = -999
 
         if returncode != 0:  # 若执行退出码不为 0
-            print("错误：{} 执行失败，返回码={}，详情见脚本自身日志".format(script_name, returncode))  # 打印执行失败提示
+            print("错误：{} 执行失败，返回码={}，详情见日志：{}".format(script_name, returncode, log_path))  # 打印执行失败提示
             return False  # 返回失败
+        if script_name == 'Postprocess_All_surface_v2.py':
+            status_ok, status_reason = validate_postprocess_status(folder_path)
+            if not status_ok:
+                print(
+                    "错误：{} 的必需QA状态未通过，详情={}；保留ODB供诊断。".format(
+                        script_name, status_reason,
+                    )
+                )
+                return False
         _print_case_message(
             folder_path, "完成执行：{}".format(script_name),
             case_index=case_index, case_total=case_total,
@@ -502,10 +676,13 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
     deleted = {t: 0 for t in normalized}  # 初始化各类型删除文件数计数器
     deleted_files = []
     failed = []  # 初始化删除失败文件记录列表
-    retained_results = [
-        {'name': os.path.basename(path), 'size_bytes': os.path.getsize(path)}
-        for path in required_paths
-    ]
+    retained_results = []
+    for path in required_paths:
+        retained_results.append({
+            'name': os.path.basename(path),
+            'size_bytes': os.path.getsize(path),
+            'sha256': compute_file_sha256(path),
+        })
     for name in sorted(os.listdir(folder_path)):  # 遍历工况目录下的所有文件名
         fp = os.path.join(folder_path, name)  # 拼接绝对路径
         if not os.path.isfile(fp):  # 若非文件结构
@@ -526,12 +703,12 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
         print("已删除 {} 文件数量：{}".format(ext, n))  # 打印各类型文件删除数量
     if failed:  # 若存在删除失败的文件
         print("警告：以下文件删除失败：")  # 打印警告标题
-        for fp, err in failed:  # 遍历失败记录
+        for fp, err in failed:  # 遍历打印失败记录
             print("  - {} -> {}".format(fp, err))  # 打印失败的物理路径与错误信息
     released_bytes = sum(item['size_bytes'] for item in deleted_files)
     audit = {
         'schema_version': 1,
-        'cleaned_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'cleaned_at': datetime.datetime.now().isoformat(),
         'case_dir': os.path.abspath(folder_path),
         'status': 'partial' if failed else 'completed',
         'cleanup_file_types': sorted(normalized),
@@ -555,24 +732,24 @@ def delete_files_by_type(folder_path, file_types, run_ok):  # 永久删除指定
     return not failed
 
 
-def run_folder_pipeline(root_dir, folder_plan, source_files,
+def run_folder_pipeline(root_dir, folder_plan, source_files, status_dict,
                         model_run_order, case_post_run_order,
                         types_to_delete):
     """用独立线程池衔接建模与单工况后处理，返回失败目录。"""
     failed_folders = []
+    manifest_lock = threading.Lock()
     total_cases = len(folder_plan)
     case_positions = dict(
         (folder_name, index)
         for index, (folder_name, _config) in enumerate(folder_plan, start=1)
     )
 
-    def update_status(folder_name, status, case_index=None):
-        # 状态迁移直接打印到终端（带工况前缀与序号，替代原 run_manifest.json 记录）
-        _print_case_message(
-            os.path.join(root_dir, folder_name), "状态：{}".format(status),
-            case_index=case_index if case_index is not None else case_positions[folder_name],
-            case_total=total_cases,
-        )
+    def update_status(folder_name, status):
+        with manifest_lock:
+            status_dict[folder_name] = status
+            _write_run_manifest(
+                root_dir, folder_plan, source_files, status_dict,
+            )
 
     def run_model(item):
         folder_name, config = item
@@ -586,7 +763,8 @@ def run_folder_pipeline(root_dir, folder_plan, source_files,
         try:
             create_and_fill_folder(folder_path, source_files, config)
             ok = run_scripts_in_folder(
-                folder_path, model_run_order, case_index=case_index,
+                folder_path, model_run_order, step_offset=0,
+                stage_label='model', case_index=case_index,
                 case_total=total_cases,
             )
         except Exception as err:
@@ -605,7 +783,9 @@ def run_folder_pipeline(root_dir, folder_plan, source_files,
         )
         try:
             ok = run_scripts_in_folder(
-                folder_path, case_post_run_order, case_index=case_index,
+                folder_path, case_post_run_order,
+                step_offset=len(model_run_order),
+                stage_label='postprocess', case_index=case_index,
                 case_total=total_cases,
             )
         except Exception as err:
@@ -679,6 +859,7 @@ def main():  # 批处理主控制流程
 
     folder_plan = []  # 初始化工况目录计划列表
     seen = set()  # 初始化工况文件夹去重名字集合
+    status_dict = {}  # 用于在清单中保存各个工况的运行状态
 
     for idx, case in enumerate(PARAMETER_CASES, start=1):  # 遍历所有定义的工况
         if not isinstance(case, dict) or "config" not in case:  # 校验工况节点合法性
@@ -690,11 +871,15 @@ def main():  # 批处理主控制流程
             sys.exit(1)  # 异常退出
         seen.add(folder_name)  # 加入已生成名称集合中
         folder_plan.append((folder_name, case["config"]))  # 记录到待处理工况目录中
+        status_dict[folder_name] = 'planned'
 
     os.makedirs(root_dir, exist_ok=True)  # 创建结果总输出根目录
 
+    # 写入初始 planned 清单
+    _write_run_manifest(root_dir, folder_plan, source_files, status_dict)
+
     failed_folders = run_folder_pipeline(
-        root_dir, folder_plan, source_files,
+        root_dir, folder_plan, source_files, status_dict,
         model_run_order, case_post_run_order, types_to_delete,
     )
     print("\n==============================")  # 打印批处理结束分隔符

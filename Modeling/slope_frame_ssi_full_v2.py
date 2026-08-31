@@ -53,7 +53,7 @@ geometry_cfg = {
     'slope_angle': 45.0,                # 坡角 (度)
     'crest_window': 4.0,                # 坡顶观测窗（hs 倍数，计划书 A_max；地形放大 x/h≈3~4 已衰减回 1）
     'toe_window': 3.0,                  # 坡脚观测窗（hs 倍数，计划书 C_max）
-    'side_clearance': 0.1,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
+    'side_clearance': 1.0,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
     'base_depth': 2.0,                  # 坡脚面以下模型深度（hs 倍数，恒定不随地层变；土层扣完剩余全归基岩）
     'rect_enable': False,               #! 矩形空间开关：True=建矩形(平场)模型替代坡地，走平场建模路径
     'rect_width': 1800,                 # 矩形宽度(m)，rect_enable=True 时必填（替代窗口派生的 total_L）
@@ -152,7 +152,7 @@ eql_cfg = {
 
 # TSSI 总开关配置
 tssi_cfg = {
-    'enable': False,                     #! 总开关：False=纯场地模型，禁止一切 tssi 流程（无框架/无CREST_REF/无tssi_meta）；True=进入三胞胎流程
+    'enable': False,                     #! 总开关：False=纯场地模型，禁止一切 tssi 流程（无框架/无CREST_REF）；True=进入三胞胎流程
     'scene': 'ssi',                      #! 三胞胎场景（仅 enable=True 时生效）'ssi'=全耦合(默认) / 'freefield'=纯坡地提取坡顶运动 / 'fixed'=固定基础框架单体
     'fixed_input': None,                 #! fixed 场景基底输入加速度 .txt 路径(绝对/相对工况目录); None=自动查找 crest_motion_*.txt
     'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
@@ -461,7 +461,7 @@ def _rayleigh_coeffs(xi, dcfg, fc, f_layer=None):  # 由阻尼比计算瑞利阻
 def _resolve_damping(dcfg, fc_est):  # 解析阻尼配置（补全 fc 字段）
     """拷贝阻尼配置，若 fc 为空则用自动估计值 fc_est 填充，返回解析后的配置 dict。
 
-    供建材（_create_band_materials_sections）与元数据（_write_case_meta）共用同一份解析结果，
+    供建材（_create_band_materials_sections）与 fd 引擎共用同一份解析结果，
     避免 fc 口径漂移。显式给定的 fc 不被覆盖。
     """
     resolved = dict(dcfg)  # 浅拷贝，不就地修改原全局
@@ -1118,6 +1118,167 @@ def _fd_engine_selfcheck(logger=None):  # fd 引擎建模前内置自检（验�
     if err1 > 1e-3 or err2 > 1e-3:  # 任一项超阈值
         raise RuntimeError('fd 引擎自检失败: halfspace_err=%.3e, single_layer_err=%.3e' % (err1, err2))  # 中止建模
     return result
+
+
+def _write_freefield_surface_csv(model, part_name, geom, site, damping, surface_geometry,
+                                 acc_path, tail_seconds, angle_deg, out_dir, logger=None):
+    """输出地表节点集(TOP_SURFACE)逐节点自由场水平加速度时程 CSV（v10）。
+
+    站点=实际网格地表节点 (x,y)，解析解直接在节点坐标求值，无任何插值。
+    两个文件（写入 out_dir，<record> 为输入波记录名）：
+      freefield_background_<record>.csv  背景场——三人工边界统一注入的左柱(H_upper)
+        平场解在节点高程处的取值（坡面/坡脚节点为左柱内部点），即模型实际收到的输入场；
+      freefield_local_1d_<record>.csv    局部一维场——节点当地竖向土柱（按当地地表高程
+        裁剪分层）的地表响应，即一维场地分析在该站的预测（坡面为名义基准）。
+    口径：两量均含水平传播相位 e^{-iωpx}（原点=左边界 x=0，与边界等效力相位约定一致）；
+    相位参考在柱底 y=0（输入波注入处），故地表响应含自柱底的单程走时延迟，时间轴与 FE 分析
+    步/ODB 一致（输入波自底边界出发、延迟到达地表），可逐样本对拍；时间窗=输入持时+tail_seconds；
+    频域容差 1e-7、补零 4 倍与 fd 引擎完全同口径。
+    布局与 surface_acc_x/y 一致：行=节点（按 x 升序），列=node_label/x/y/加速度时程，
+    时程列名=时间（t=秒），时间轴由输入波 dt 等间隔生成。
+    """
+    if not acc_path or not os.path.isfile(acc_path):  # 无输入记录（与 fd 引擎同步跳过）
+        return
+    try:  # PART 级 TOP_SURFACE 节点集（与几何审计同口径，建模期已随网格创建）
+        node_set = model.parts[part_name].sets['TOP_SURFACE']
+    except KeyError:
+        if logger:
+            log_step(logger, '地表自由场 CSV 跳过: 零件 %s 无 TOP_SURFACE 节点集', part_name)
+        return
+    pts = sorted(((float(n.coordinates[0]), float(n.coordinates[1]), int(n.label))
+                  for n in node_set.nodes))  # 按 x 升序（与后处理提取口径一致）
+    if not pts:
+        if logger:
+            log_step(logger, '地表自由场 CSV 跳过: TOP_SURFACE 节点集为空')
+        return
+    xs = np.array([p[0] for p in pts], dtype=float)  # 节点 x
+    ys = np.array([p[1] for p in pts], dtype=float)  # 节点 y（当地地表高程）
+    # —— 频域口径与 _fd_input_spectrum 完全一致（容差/补零/截断）——
+    rec = np.loadtxt(acc_path)  # [time, acceleration]
+    acc0 = np.asarray(rec[:, 1], dtype=float)
+    dt0 = float(rec[1, 0] - rec[0, 0])
+    strat = _build_stratigraphy(site, geom, ymin=0.0, surface_geometry=surface_geometry)
+    damp_terms = _band_damping_terms(strat, damping)
+    mat_b = _compute_material_params(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)
+    p0 = math.sin(math.radians(float(angle_deg))) / mat_b['cs']  # 水平慢度（Snell 守恒）
+    Nfft = _next_pow2(len(acc0) * 4)  # 补零 4 倍防卷绕
+    A0 = np.fft.rfft(acc0, n=Nfft)  # 输入加速度单边谱
+    freqs0 = np.fft.rfftfreq(Nfft, dt0)
+    mask0 = np.abs(A0) > 1e-7 * float(np.max(np.abs(A0)))  # 谱幅值掩码（同 fd 引擎 tol）
+    mask0[0] = False  # 排除直流分量
+    idx0 = np.nonzero(mask0)[0]
+    om0 = 2.0 * math.pi * freqs0[idx0]  # 被求解频点圆频率
+    tail = float(tail_seconds or 0.0)
+    Nout = min(Nfft, len(acc0) + int(round(tail / dt0))) if tail > 0 else len(acc0)  # FE 分析窗
+    nfreq = len(freqs0)
+    # 背景柱=左柱(H_upper)只解一次并作为坡顶平台局部柱缓存种子；坡面逐高程一根局部柱
+    sol_bg = _fd_solve_column(_build_column(strat, geom.H_upper, p0, 0.0), p0, om0, damp_terms)
+    local_cache = {round(float(geom.H_upper), 4): sol_bg}
+    n_node = len(pts)
+    bg_mat = np.zeros((n_node, Nout), dtype=float)  # 背景场时程（行=节点）
+    lo_mat = np.zeros((n_node, Nout), dtype=float)  # 局部一维场时程
+    for k in range(n_node):
+        shift = np.exp(-1j * om0 * p0 * xs[k])  # 水平传播相位（原点=左边界 x=0）
+        spec = np.zeros(nfreq, dtype=complex)  # a(ω)=u_unit×A（位移两次积分与 −ω² 相消）
+        spec[idx0] = _fd_eval_column(sol_bg, om0, p0, ys[k])['ux'] * A0[idx0] * shift
+        bg_mat[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+        key = round(float(ys[k]), 4)
+        sol_lo = local_cache.get(key)
+        if sol_lo is None:
+            sol_lo = _fd_solve_column(_build_column(strat, float(ys[k]), p0, 0.0), p0, om0, damp_terms)
+            local_cache[key] = sol_lo
+        spec = np.zeros(nfreq, dtype=complex)
+        spec[idx0] = _fd_eval_column(sol_lo, om0, p0, ys[k])['ux'] * A0[idx0] * shift
+        lo_mat[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+    record_name = os.path.splitext(os.path.basename(acc_path))[0]  # 与 ODB 记录名一致
+    time_col = np.arange(Nout, dtype=float) * dt0
+    header = 'node_label,x,y,' + ','.join(['t=%.8g' % t for t in time_col])  # 列名=时间（与 surface_acc 一致）
+    fmt = ['%d', '%.10g', '%.10g'] + ['%.10g'] * Nout  # 列1整数标签，其余浮点
+    labels = np.array([p[2] for p in pts], dtype=int)
+    for fname, mat in (('freefield_background_%s.csv' % record_name, bg_mat),
+                       ('freefield_local_1d_%s.csv' % record_name, lo_mat)):
+        np.savetxt(os.path.join(out_dir, fname), np.column_stack([labels, xs, ys, mat]),
+                   fmt=fmt, delimiter=',', header=header, comments='')
+    if logger:
+        log_step(logger, '地表自由场 CSV: %d 节点 × %d 样本(%.2fs) -> background/local_1d 2 文件',
+                 n_node, Nout, Nout * dt0)
+
+
+def _extract_surface_acc_csv_from_odb(odb_path, record_name, out_dir, step_name=None, logger=None):
+    """作业完成后从 ODB 提取地表节点原始 xy 坐标与 x/y 向加速度时程，写出 2 个 CSV。
+
+    提取口径与 Postprocess_All_surface_v2.extract_surface_acc 完全一致：实例级
+    TOP_SURFACE 节点集、节点按 x 升序、地震步逐帧 bulkDataBlocks 批量读取（values 兜底）。
+    输出（写入 out_dir，<record> 为输入波记录名）：
+      surface_acc_x_<record>.csv  水平加速度 A1（行=节点按 x 升序，列=node_label/x/y/加速度时程）；
+      surface_acc_y_<record>.csv  竖向加速度 A2（布局同上）。
+    时程列名=地震步 frameValue（自 0 起的步内时间，与输入波/自由场 CSV 时间轴一致，可逐样本对拍）。
+    ODB 缺失或无 TOP_SURFACE 时记日志并返回 False（不抛异常，不影响其余作业提取）。
+    """
+    from odbAccess import openOdb  # Abaqus ODB 访问（仅函数内导入，普通 Python 不触发）
+    step_name = step_name or DEFAULT_STEP_NAME  # 优先地震步名，缺失时兜底最后一步
+    odb_path = str(odb_path)
+    if not os.path.isfile(odb_path):
+        if logger:
+            log_step(logger, 'ODB 提取跳过: 文件不存在(作业未完成或失败): %s', odb_path)
+        return False
+    odb = openOdb(odb_path, readOnly=True)
+    try:
+        nset = None
+        for iname in odb.rootAssembly.instances.keys():  # 实例级节点集定位（同后处理口径）
+            inst = odb.rootAssembly.instances[iname]
+            try:
+                if 'TOP_SURFACE' in inst.nodeSets.keys():
+                    nset = inst.nodeSets['TOP_SURFACE']
+                    break
+            except Exception:
+                pass
+        if nset is None:
+            if logger:
+                log_step(logger, 'ODB 提取跳过: 未找到 TOP_SURFACE 节点集: %s', odb_path)
+            return False
+        nodes = list(nset.nodes)
+        labels = np.array([int(n.label) for n in nodes], dtype=int)
+        xs = np.array([float(n.coordinates[0]) for n in nodes], dtype=float)
+        ys = np.array([float(n.coordinates[1]) for n in nodes], dtype=float)
+        order = np.argsort(xs)  # 按 x 升序（与自由场 CSV/后处理提取口径一致）
+        labels, xs, ys = labels[order], xs[order], ys[order]
+        step_names = [str(k) for k in odb.steps.keys()]
+        step = odb.steps[step_name] if step_name in step_names else odb.steps[step_names[-1]]
+        times, rows_x, rows_y = [], [], []
+        for frame in step.frames:  # 逐帧提取（帧数=增量步数）
+            fo = frame.fieldOutputs['A'].getSubset(region=nset)
+            try:  # bulkDataBlocks 批量接口（快）
+                data = np.concatenate([np.asarray(b.data, dtype=float) for b in fo.bulkDataBlocks])
+                labs = np.concatenate([np.asarray(b.nodeLabels, dtype=int) for b in fo.bulkDataBlocks])
+            except Exception:  # 逐值接口兜底（慢但稳）
+                data = np.array([[v.data[0], v.data[1]] for v in fo.values], dtype=float)
+                labs = np.array([v.nodeLabel for v in fo.values], dtype=int)
+            pos = dict(zip([int(L) for L in labs], range(len(labs))))  # 标签→行号（逐帧重建，防顺序漂移）
+            idx = np.array([pos[int(L)] for L in labels])
+            times.append(float(frame.frameValue))
+            rows_x.append(data[idx, 0])  # A1 水平
+            rows_y.append(data[idx, 1])  # A2 竖向
+        if not times:
+            if logger:
+                log_step(logger, 'ODB 提取跳过: 分析步无输出帧: %s', odb_path)
+            return False
+        ax_mat = np.array(rows_x, dtype=float)  # 帧×节点
+        ay_mat = np.array(rows_y, dtype=float)
+        time_col = np.array(times, dtype=float)
+        header = 'node_label,x,y,' + ','.join(['t=%.8g' % t for t in time_col])  # 列名=步内时间
+        fmt = ['%d', '%.10g', '%.10g'] + ['%.10g'] * len(time_col)  # 列1整数标签，其余浮点
+        for fname, mat in (('surface_acc_x_%s.csv' % record_name, ax_mat),
+                           ('surface_acc_y_%s.csv' % record_name, ay_mat)):
+            np.savetxt(os.path.join(out_dir, fname),
+                       np.column_stack([labels, xs, ys, mat.T]),  # 转置为行=节点、列=时程
+                       fmt=fmt, delimiter=',', header=header, comments='')
+        if logger:
+            log_step(logger, 'ODB 地表加速度 CSV: %d 节点 × %d 帧(%.2fs) -> acc_x/acc_y 2 文件 [%s]',
+                     len(labels), len(time_col), float(time_col[-1]), os.path.basename(odb_path))
+        return True
+    finally:
+        odb.close()
 
 
 # ==========================================================
@@ -2395,236 +2556,6 @@ def _load_case_config(material_cfg, geometry_cfg, damping_cfg, logger,
             time_cfg_out, run_cfg_out)
 
 
-def _meta_f(value):  # 把数值安全转为内置 float（兼容 numpy 标量）
-    """将 numpy/字符串等数值规范化为内置 float；None 原样返回，不可转换返回 None。"""
-    if value is None:  # 空值
-        return None  # 原样返回
-    try:  # 尝试转换
-        return float(value)
-    except (TypeError, ValueError):  # 不可转换
-        return None
-
-
-def _meta_material(name, cs, vv, density, thickness=None):
-    """返回 {name, cs, vv, density, thickness}；thickness=None 表示半空间或由几何决定。"""
-    return {'name': str(name), 'cs': _meta_f(cs), 'vv': _meta_f(vv),  # 层名与波速、泊松比
-            'density': _meta_f(density), 'thickness': _meta_f(thickness)}  # 密度与厚度
-
-
-def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算结果打包为元数据块（v9：含逐层共振频率）
-    """返回阻尼元数据 dict（含逐层 cs/xi/f_layer/alpha/beta），供 case_meta.json 记录与下游核对。
-
-    site    : Site 对象（基岩 + 从上到下有限层）；damping：解析后的阻尼配置（含 fc）；
-    geom    : Geometry 对象（v9：perband 模式据此推算各有限层共振基频 f_layer，None 则不记录 f_layer）。
-    damping=None 或 enable=False 时返回 {'enable': False}。逐层顺序：基岩在前，再各有限层（从上到下）。
-    """
-    if not (damping and damping.get('enable')):  # 未启用阻尼
-        return {'enable': False}  # 仅记录关闭状态
-    fc = damping.get('fc')  # 解析后的主频
-    per_layer = []
-    mats = [(site.bedrock, True)] + [(L, False) for L in site.layers]  # 基岩在前 + 各有限层（从上到下）
-    for mat, is_bedrock in mats:
-        xi = _damping_ratio_from_cfg(mat.cs, is_bedrock, damping, str(mat.name))  # 该层阻尼比
-        f_layer = None if (is_bedrock or geom is None) else _material_resonance_freq(mat, site, geom)  # v9：有限层共振基频（与建材同口径）
-        a_ray, b_ray = _rayleigh_coeffs(xi, damping, fc, f_layer)  # 该层瑞利系数（perband 时随 f_layer 重锚定）
-        per_layer.append({'name': str(mat.name), 'cs': _meta_f(mat.cs),  # 层名与波速
-                          'xi': _meta_f(xi),  # 阻尼比
-                          'f_layer': _meta_f(f_layer),  # v9：该层一维共振基频（perband QA 锚点）
-                          'alpha': _meta_f(a_ray), 'beta': _meta_f(b_ray)})  # 瑞利系数
-    return {'enable': True, 'method': damping.get('method'), 'fc': _meta_f(fc),  # 总体配置
-            'anchor': damping.get('anchor', 'input'), 'f_site': _meta_f(damping.get('f_site')),  # v8：锚定方式与场地基频
-            'harmonics_cover': _meta_f(damping.get('harmonics_cover')),  # v9：perband 拟合上限覆盖的共振谐波次数
-            'constant_xi': _meta_f(damping.get('constant_xi')),  # 有限土层统一阻尼比
-            'bedrock_xi': _meta_f(damping.get('bedrock_xi')),  # 基岩阻尼比
-            'f1_factor': _meta_f(damping.get('f1_factor')), 'f2_factor': _meta_f(damping.get('f2_factor')),  # 双频拟合边界
-            'layers': per_layer}  # 逐层阻尼明细（基岩在前）
-
-
-def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None,
-                     sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
-                     validation_geometry='slope', rect_cfg=None):  # 写出统一工况元数据（含验证几何模式）
-    """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
-    作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、人工边界、自由场配置及同侧一维场地放大基准等参数，
-    供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
-    返回：
-        同侧一维自由场场地放大基准(ff_theory)字典（计算成功时），否则返回 None。
-        为兼容既有后处理，字典中的 taf_h/taf_v 键名保持不变；其物理含义为
-        相对于基岩半空间露头运动的 AF_1D，而非已经剔除场地效应的纯地形 TAF。
-    """
-    try:  # 元数据写出不应影响建模主流程
-        bedrock = _meta_material(site.bedrock.name, site.bedrock.cs, site.bedrock.vv,  # 基岩材料字典
-                                 site.bedrock.density, site.bedrock.thickness)  # 密度与厚度
-        layers = [_meta_material(L.name, L.cs, L.vv, L.density, L.thickness) for L in site.layers]  # 各有限层（从上到下）
-        geometry = {'i': geom.i, 'total_L': geom.total_L, 'left_flat': geom.left_flat,  # 几何输入项
-                    'H_minus_h': geom.H_minus_h, 'h_over_H': geom.h_over_H,  # 斜坡高度差与深度比
-                    'bedrock_thickness': geom.bedrock_thickness, 'H': geom.H, 'h': geom.h,  # 基岩厚度与覆盖厚度
-                    'w_slope': geom.w_slope,  # 坡面水平长度
-                    'x_crest': geom.left_flat, 'x_toe': geom.left_flat + geom.w_slope}  # v7：坡顶/坡脚 x（绘图 #1/#2 直接读取）
-        geometry = {k: _meta_f(v) for k, v in geometry.items()}  # 几何统一转 float
-        n_finite = len(layers)  # 有限层数（不含基岩）
-        has_bedrock = site.bedrock is not None  # 是否存在基岩半空间
-        n_total = n_finite + (1 if has_bedrock else 0)  # 总介质层数（含基岩）
-        model_type = 'single' if n_total <= 1 else ('double' if n_total == 2 else 'multilayer')  # 模型类型判定
-        Hmh = geometry.get('H_minus_h')  # 斜坡高度差 H-h
-        slope_height = Hmh if Hmh is not None else geometry.get('h')  # 斜坡特征高度（a0 归一化用，单层退化用 h）
-        vs_bedrock = bedrock['cs'] if has_bedrock else None  # 基岩剪切波速 Vr
-        vs_surface = layers[0]['cs'] if layers else vs_bedrock  # 最顶有限层 Vs1（无有限层退化为基岩）
-        vs_cover = layers[-1]['cs'] if layers else vs_surface  # 最底覆盖层 Vs2（a0 归一化 + Vr/Vs2 抗阻比，对齐论文 VR/Vs 口径）
-        vs_min = min([L['cs'] for L in layers]) if layers else vs_bedrock  # 最软有限层波速（仅作诊断记录：含软表层时即 Vs1）
-        vr_over_vs2 = (vs_bedrock / vs_cover) if (vs_bedrock and vs_cover) else None  # Vr/Vs2 抗阻比
-        vs1_over_vs2 = (vs_surface / vs_cover) if (vs_surface and vs_cover) else None  # Vs1/Vs2 软硬比
-        a0_base = (2.0 * slope_height / vs_cover) if (slope_height and vs_cover) else None  # a0 = fc(Hz) × a0_base，按上覆层 Vs2 归一化（与论文 a0=2fc(H−h)/Vs2 一致；上一版误改为 Vs1 已撤回）
-        fc_meta = (damping or {}).get('fc')  # 解析后主频（阻尼关闭/未估计时可能为 None）
-        a0_val = (fc_meta * a0_base) if (fc_meta and a0_base) else None  # v7：无量纲频率 a0 = fc × a0_base
-        derived = {  # 派生量集中区（公式单一真相源）
-            'n_finite_layers': n_finite,  # 有限层数（不含基岩）
-            'n_layers_total': n_total,  # 总层数（含基岩）
-            'vs_bedrock': _meta_f(vs_bedrock),  # 基岩 Vr
-            'vs_surface': _meta_f(vs_surface),  # 表层 Vs1
-            'vs_cover': _meta_f(vs_cover),
-            'vs_min': _meta_f(vs_min),  # v9.1：最软有限层波速（a0 归一化用）
-            'vr_over_vs2': _meta_f(vr_over_vs2),  # Vr/Vs2
-            'vs1_over_vs2': _meta_f(vs1_over_vs2),  # Vs1/Vs2
-            'slope_height': _meta_f(slope_height),  # a0 归一化用斜坡特征高度
-            'a0_base': _meta_f(a0_base),  # a0 换算基数（v9.1：按最软层 vs_min）
-            'a0': _meta_f(a0_val),  # v7：无量纲频率 a0（与论文工况对位用）
-        }
-        R_meta, R_mode_meta, R_L_meta, R_H_meta = _resolve_boundary_R(geom)  # 记录实际采用的R及其几何来源
-        out_dir = os.path.abspath(os.getcwd())  # 当前工况文件夹（建模运行目录）
-        meta = {
-            'schema_version': 1,  # schema 版本号
-            'model_type': model_type,  # 模型类型 single/double/multilayer
-            'model_script': str(script_name),  # 建模脚本文件名
-            'incident_angle': _meta_f(material_cfg['angle']),  # SV 入射角 θs（度）
-            'surface_geometry': str(sgeom),  # v7：表层几何模式 horizontal/terrain
-            'validation_geometry': str(validation_geometry),  # 验证几何模式 slope/flat
-            'rect': (dict(rect_cfg) if rect_cfg else {'enable': False}),  # 矩形空间标记（enable/width/height，非矩形仅记 enable=False）
-            'mesh_size': _meta_f(mesh_size),  # 网格尺寸（m）
-            'geometry': geometry,  # 几何参数（含派生 H/h/w_slope）
-            'bedrock': bedrock,  # 基岩材料字典
-            'layers': layers,
-            'derived': derived,  # 派生量
-            'damping': _damping_meta(site, damping, geom),  # 材料阻尼块（逐层 xi/f_layer/alpha/beta，可复现；v9 传 geom 算共振频率）
-            'boundary': {  # 粘弹性人工边界公式参数（与 boundary_cfg 同步，便于结果追溯）
-                'R': _meta_f(R_meta),
-                'R_mode': R_mode_meta,
-                'R_input': _meta_f(boundary_cfg.get('R')),
-                'R_geometry_L': _meta_f(R_L_meta),
-                'R_geometry_H': _meta_f(R_H_meta),
-                'alpha_N': _meta_f(boundary_cfg.get('alpha_N')),
-                'alpha_T': _meta_f(boundary_cfg.get('alpha_T')),
-                'beta_N': _meta_f(boundary_cfg.get('beta_N')),
-                'beta_T': _meta_f(boundary_cfg.get('beta_T')),
-                'dashpot_scale': _meta_f(boundary_cfg.get('dashpot_scale')),
-                'spring_scale': _meta_f(boundary_cfg.get('spring_scale')),
-                'dashpot_normal_scale': _meta_f(boundary_cfg.get('dashpot_normal_scale', boundary_cfg.get('dashpot_scale', 1.0))),
-                'dashpot_tangential_scale': _meta_f(boundary_cfg.get('dashpot_tangential_scale', boundary_cfg.get('dashpot_scale', 1.0))),
-                'spring_normal_scale': _meta_f(boundary_cfg.get('spring_normal_scale', boundary_cfg.get('spring_scale', 1.0))),
-                'spring_tangential_scale': _meta_f(boundary_cfg.get('spring_tangential_scale', boundary_cfg.get('spring_scale', 1.0))),
-            },
-            'eql': (eql_info if eql_info else {'enable': False}),  # v2 土体非线性 EQL 结果(各非线性层 γ_eff/G_Gmax/Vs0→Vs/ξ)
-            'record': None,  # 输入波记录名（以各 CSV 文件为准，留空）
-            'extra': {},  # 附加自定义键值
-            'folder': os.path.basename(out_dir.rstrip('/\\')),  # 工况文件夹名（来源标识）
-        }
-        # ── v6：AF 解析分母（基岩半空间自由地表运动，论文式(5) 口径） ─────────────
-        ang_deg = float(material_cfg['angle'])  # SV 入射角（度）
-        alpha_r = math.radians(ang_deg if abs(ang_deg) > 1e-12 else 1e-10)  # 入射角弧度（零角用极小值）
-        mat_b = _compute_material_params(site.bedrock.cs, site.bedrock.vv, site.bedrock.density)  # 基岩派生参数
-        fs = _compute_free_surface_sv_coeff(alpha_r, mat_b['cp'], mat_b['cs'])  # 基岩自由面 SV 反射/转换系数
-        factor_h = (1.0 - fs['A1']) * math.cos(alpha_r) + fs['A2'] * math.sin(fs['beta'])  # 水平分量放大系数（0°时=2）
-        factor_v = -((1.0 + fs['A1']) * math.sin(alpha_r) + fs['A2'] * math.cos(fs['beta']))  # 竖向分量系数（0°时=0）
-        meta['ff_normalization'] = {  # AF/TAF 归一化说明（Postprocess_All_surface_v2.py 读取）
-            'method': 'bedrock_halfspace_free_surface',  # 分母口径：基岩半空间自由地表运动
-            'A1': _meta_f(fs['A1']), 'A2': _meta_f(fs['A2']),  # 自由面 SV->SV 反射 / SV->P 转换系数
-            'beta_deg': _meta_f(math.degrees(fs['beta'])),  # 自由面 P 波角（度）
-            'factor_h': _meta_f(factor_h),  # PGA_ff_h = factor_h × max|输入加速度|
-            'factor_v': _meta_f(factor_v),  # 竖向自由场系数（仅记录；论文式(5) 统一除以水平分母）
-            'af_h_definition': 'AF_h=PGA_h/(factor_h*PGA_in)',  # 总放大：成层场地效应+地形效应
-            'taf_h_definition': 'TAF_h=AF_h/AF_h_1D_same_side=PGA_h/PGA_h_1D_same_side',  # 纯地形放大
-            'note': 'ff_theory.left/right.taf_h/taf_v are legacy keys storing same-side AF_1D references',
-        }
-        meta['freefield'] = {  # 自由场信息（追溯用）
-            'include_damping': bool(damping and damping.get('enable')),  # 自由场恒与介质阻尼一致
-            'initial_state_mode': 'incremental',  # 自由场初态口径（固定：t=0 起算增量场）
-            'phase_origin_x': 0.0,  # 水平相位原点（固定：左边界 x=0）
-        }
-        # ── v7：同侧一维场地放大基准 ff_theory（自动 QA 锚点） ──────────────────────
-        # 用 fd 引擎对左(上平台 H_upper)/右(下平台 H_lower)边界柱计算地表加速度时程，
-        # 按 AF_1D = PGA_1D / (factor_h × PGA_in) 得一维基准；兼容字段名仍为 taf_h/taf_v。
-        # FE 远场 AF 应与之一致(±5%)，由 Postprocess_All_surface_v2.py 自动核对。
-        ff_theory = None  # 同侧一维场地放大基准块初始化
-        if acc_path and os.path.isfile(acc_path):  # 提供了输入记录时才计算
-            try:  # 一维基准计算失败不影响元数据主体
-                rec = np.loadtxt(acc_path)
-                acc0 = rec[:, 1]  # 加速度列
-                dt0 = float(rec[1, 0] - rec[0, 0])  # 时间步长
-                strat_t = _build_stratigraphy(site, geom, ymin=0.0, surface_geometry=sgeom)  # 与建模同口径分层
-                damp_terms = _band_damping_terms(strat_t, damping)  # 各带瑞利系数（与 FE 介质一致）
-                p0 = math.sin(alpha_r) / mat_b['cs']  # 水平慢度（基岩入射角，Snell 守恒）
-                Nfft = _next_pow2(len(acc0) * 4)  # FFT 长度（补零 4 倍防卷绕）
-                A0 = np.fft.rfft(acc0, n=Nfft)  # 加速度单边谱
-                freqs0 = np.fft.rfftfreq(Nfft, dt0)  # 频率轴
-                mask0 = np.abs(A0) > 1e-7 * float(np.max(np.abs(A0)))  # 谱幅值掩码（同 fd 引擎 tol）
-                mask0[0] = False  # 排除直流分量
-                idx0 = np.nonzero(mask0)[0]  # 被求解频点索引
-                om0 = 2.0 * math.pi * freqs0[idx0]  # 对应圆频率
-                denom0 = factor_h * float(np.max(np.abs(acc0)))  # 解析分母 = factor_h × PGA_in
-                ff_theory = {'fc_used': _meta_f((damping or {}).get('fc')),  # 瑞利拟合主频
-                             'damped': bool(damping and damping.get('enable')),  # 理论值是否含阻尼
-                             'quantity': 'AF_1D relative to bedrock outcrop motion',  # 一维场地放大基准
-                             'legacy_keys': 'taf_h/taf_v retained for compatibility',  # 旧字段名不改
-                             'note': 'fd 一维柱 AF_1D；FE 远场 AF 应与之一致(±5%)'}
-                reference_series = {}  # 保存左右一维参考完整时程，供复频响和真实波闭环使用
-                for tag, ys in (('left', geom.H_upper), ('right', geom.H_lower)):  # 左(上平台)/右(下平台)两柱
-                    col_t = _build_column(strat_t, ys, p0, 0.0)
-                    sol_t = _fd_solve_column(col_t, p0, om0, damp_terms)  # 频域求解（单位入射）
-                    fld = _fd_eval_column(sol_t, om0, p0, ys)  # 地表场量谱（单位入射）
-                    spec_t = np.zeros(len(freqs0), dtype=complex)  # x 向加速度全频谱容器
-                    spec_t[idx0] = fld['ux'] * A0[idx0]  # a(ω) = u_unit × A（位移两次积分与 −ω² 相消）
-                    ax0 = np.fft.irfft(spec_t, n=Nfft)  # x 向加速度时程
-                    spec_t = np.zeros(len(freqs0), dtype=complex)  # y 向加速度全频谱容器
-                    spec_t[idx0] = fld['uy'] * A0[idx0]  # y 向加速度谱
-                    ay0 = np.fft.irfft(spec_t, n=Nfft)  # y 向加速度时程
-                    reference_series[tag] = ax0  # 水平完整时程用于复数一维参考
-                    ff_theory[tag] = {'taf_h': _meta_f(float(np.max(np.abs(ax0))) / denom0),  # 兼容键：该柱水平 AF_1D
-                                      'taf_v': _meta_f(float(np.max(np.abs(ay0))) / denom0),  # 兼容键：该柱竖向 AF_1D
-                                      'surface_y': _meta_f(ys),  # 该柱地表高程
-                                      'layers': [seg['name'] for seg in col_t]}  # 该柱层组成（自检用）
-                record_name = os.path.splitext(os.path.basename(acc_path))[0]  # 与ODB记录名保持一致
-                reference_path = os.path.join(out_dir, 'freefield_reference_%s.npz' % record_name)
-                rock_acc = np.zeros(Nfft, dtype=float)  # 基岩半空间露头水平参考
-                rock_acc[:len(acc0)] = factor_h * np.asarray(acc0, dtype=float)
-                np.savez_compressed(
-                    reference_path,
-                    time=np.arange(Nfft, dtype=float) * dt0,
-                    rock_acc_h=rock_acc,
-                    one_d_left_acc_h=reference_series['left'],
-                    one_d_right_acc_h=reference_series['right'],
-                    record=np.asarray(record_name),
-                )
-                ff_theory['reference_file'] = os.path.basename(reference_path)  # 下游自动发现入口
-            except Exception as _fe:  # 一维基准计算异常
-                if logger:
-                    log_step(logger, 'ff_theory 计算失败(不影响建模): %s', str(_fe))
-                ff_theory = None  # 置空
-        meta['ff_theory'] = ff_theory  # v7：同侧一维场地放大基准块（可能为 None）
-        meta['selfcheck'] = selfcheck  # v8：fd 引擎自检误差（halfspace_err/single_layer_err）
-        text = json.dumps(meta, ensure_ascii=False, indent=2, default=_meta_f)  # 序列化为字符串（保留中文，default 兜底 numpy 标量）
-        if isinstance(text, bytes):  # Py2 下 ensure_ascii=False 可能返回 bytes
-            text = text.decode('utf-8')  # 解码为 unicode 以匹配 io.open 文本写入
-        path = os.path.join(out_dir, 'case_meta.json')  # 目标路径
-        with io.open(path, 'w', encoding='utf-8') as f:  # 以 UTF-8 文本模式打开（Py2 内置 open 不支持 encoding 关键字）
-            f.write(text)  # 写出序列化文本
-        if logger:
-            log_step(logger, 'case_meta.json 已写出: %s', path)
-        return ff_theory  # v7：返回同侧一维基准供主流程日志打印
-    except Exception as _e:  # 捕获任何写出异常
-        if logger:
-            log_step(logger, 'case_meta.json 写出失败(不影响建模): %s', str(_e))
-        return None  # v7：失败时无一维基准可返回
-
-
 # ==========================================================
 #  土体非线性：等效线性(EQL / SHAKE 式) —— v1：1D 应变相容 → 喂 2D
 # ==========================================================
@@ -2922,7 +2853,7 @@ def rayleigh_coeffs(xi, f1, f2):
 def _frame_T1_estimate():
     """框架固定基础基本周期 T1（s）：有注入实测值(tssi_cfg['T_fixed'])则用之，否则按 0.1N 经验估算。
 
-    供 P0#4 瑞利阻尼 modal 锚定与 P0#6 tssi_meta 的 T_fixed 共用，保证两处口径一致。
+    供 P0#4 瑞利阻尼 modal 锚定与固定基础建模的 T1 估算共用，保证两处口径一致。
     默认 5 层 → 0.1×5=0.5s（与 v1 硬编码 0.5 一致）。
     """
     T_inj = tssi_cfg.get('T_fixed')          # 注入的实测/指定周期
@@ -3356,26 +3287,6 @@ def add_frame_rebar(model_name, logger):
              beam_bars[0][0] * 1.0e6, n_eff_beam, rc['beam']['bar_diameter'] * 1000)
 
 
-def write_tssi_meta(logger):
-    """写 tssi_meta.json：框架参数(供 SSI 后处理 Postprocess_SSI_response 读取)。"""
-    meta = {'n_story': int(frame_cfg['n_story']), 'n_bay': int(frame_cfg['n_bay']),
-            'story_height': float(frame_cfg['story_height']), 'floor_mass': float(frame_cfg['floor_mass']),
-            'inst_frame': 'Frame-1',
-            'scene': str(tssi_cfg.get('scene', 'ssi')),  # 三胞胎场景标记(ssi/freefield/fixed)
-            'T_fixed_step1': _frame_T1_estimate(),  # P0#6：固定基础 T1(周期延长基准)，注入实测优先否则0.1N，去硬编码0.5
-            'crest_offset_B': float(tssi_cfg.get('crest_offset_B', 0.0)),  # P0#2：距坡肩距离 M/B(step4 扫描)
-            'gravity': str(tssi_cfg.get('gravity', 'off')),  # P0#1：重力级别(off/structure/full)
-            'nlgeom': bool(tssi_cfg.get('nlgeom', False)),  # P1#10：几何非线性(P-Δ)
-            'foundation_type': str(foundation_cfg.get('type', 'tie')),  # P1#7：tie/footing
-            'foundation_contact': bool(foundation_cfg.get('contact', False)),  # P1#8：基础底是否硬接触
-            'nonlinear': bool(tssi_cfg.get('nonlinear', True)),  # step3: True=CDP混凝土+钢筋纤维截面
-            'concrete_fc_mpa': frame_material_cfg.get('fc_mpa'), 'concrete_ft_mpa': frame_material_cfg.get('ft_mpa'),
-            'rebar_ratio_column': rebar_cfg['column']['ratio'], 'rebar_ratio_beam': rebar_cfg['beam']['ratio']}
-    with open('tssi_meta.json', 'w') as fh:
-        json.dump(meta, fh, indent=2, ensure_ascii=False)
-    log_step(logger, u'tssi_meta.json 已写(框架参数, 供 SSI 后处理)')
-
-
 # ==========================================================
 #  三胞胎去耦场景（scene='freefield'/'fixed'/'ssi'）
 # ==========================================================
@@ -3783,28 +3694,11 @@ def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终�
     return mesh_used
 
 
-def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping,
-                               surface_geometry, acc_info, selfcheck, eql_meta,
-                               validation_geometry='slope', rect_cfg=None):  # 写出工况元数据
-    """写出 case_meta.json，并输出同侧一维场地放大基准 QA 摘要。"""
-    first_rec = acc_info[0][0] if acc_info else None
-    ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
-                                 damping=damping, sgeom=surface_geometry, acc_path=first_rec,
-                                 selfcheck=selfcheck, eql_info=eql_meta,
-                                 validation_geometry=validation_geometry, rect_cfg=rect_cfg)
-    if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
-        log_step(logger, '同侧一维场地放大基准(兼容键 taf_h/taf_v): 左(上平台) AF_h=%.3f AF_v=%.3f | 右(下平台) AF_h=%.3f AF_v=%.3f (FE 远场 AF 应与之一致±5%%)',
-                 ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],
-                 ff_theory['right']['taf_h'], ff_theory['right']['taf_v'])
-    return ff_theory
-
-
 def _apply_scene_mode(scene, tssi_cfg, logger):  # 校验并应用 TSSI 场景开关
     """校验 scene/enable 组合；enable=False 时禁止一切 tssi 流程。
 
     enable 是总开关：True=进入三胞胎流程（scene 选 ssi 全耦合/freefield 纯坡地提坡顶运动/
-    fixed 固定基础单体）；False=纯场地模型，scene 值仅记录不生效，不建框架、不建
-    CREST_REF、不写 tssi_meta。
+    fixed 固定基础单体）；False=纯场地模型，scene 值仅记录不生效，不建框架、不建 CREST_REF。
     """
     if scene not in ('ssi', 'freefield', 'fixed'):
         raise ValueError("tssi_cfg['scene'] 仅支持 'ssi'/'freefield'/'fixed'，当前: %s" % scene)
@@ -3827,49 +3721,24 @@ def _submit_models(model_names, logger, progress_interval_seconds=360.0):  # 批
                    progress_interval_seconds=progress_interval_seconds)
 
 
-def _write_geometry_validation_audit(model_name, part_name, inst_name, geom,
-                                     validation_geometry, logger):  # 写出几何集合审计
-    """在 Abaqus 建模完成后核查外形包络、顶面平整度和边界节点集。"""
+def _validate_geometry_sets(model_name, part_name, validation_geometry, logger):
+    """在 Abaqus 建模完成后核查顶面平整度和边界节点集，异常即中止建模。"""
     model = mdb.models[model_name]
     part = model.parts[part_name]
     nodes = list(part.nodes)
     if not nodes:
-        raise ValueError('几何审计失败：零件没有节点')
-    coords = [(float(node.coordinates[0]), float(node.coordinates[1])) for node in nodes]
+        raise ValueError('几何校验失败：零件没有节点')
     top_nodes = list(part.sets['TOP_SURFACE'].nodes)
     if not top_nodes:
-        raise ValueError('几何审计失败：TOP_SURFACE 为空')
+        raise ValueError('几何校验失败：TOP_SURFACE 为空')
     top_y = [float(node.coordinates[1]) for node in top_nodes]
-    boundary_counts = {}
     for set_name in ('Left_boundary', 'Right_boundary', 'Bottom_boundary', 'TOP_SURFACE'):
         if set_name not in part.sets:
-            raise ValueError('几何审计失败：缺少节点集 %s' % set_name)
-        boundary_counts[set_name] = len(part.sets[set_name].nodes)
-    audit = {
-        'schema_version': 1,
-        'validation_geometry': str(validation_geometry),
-        'model_name': str(model_name),
-        'part_name': str(part_name),
-        'instance_name': str(inst_name),
-        'node_count': len(nodes),
-        'element_count': len(part.elements),
-        'bbox': {'xmin': min(x for x, _y in coords), 'xmax': max(x for x, _y in coords),
-                 'ymin': min(y for _x, y in coords), 'ymax': max(y for _x, y in coords)},
-        'top_surface': {'node_count': len(top_nodes), 'ymin': min(top_y), 'ymax': max(top_y),
-                        'y_range': max(top_y) - min(top_y)},
-        'boundary_node_counts': boundary_counts,
-        'expected_layer_interfaces_y': [float(y) for y in geom.layer_interfaces],
-    }
-    if validation_geometry == 'flat' and audit['top_surface']['y_range'] > 1.0e-5:
-        raise ValueError('平场顶面不平整：y_range=%.6e' % audit['top_surface']['y_range'])
-    text = json.dumps(audit, ensure_ascii=False, indent=2, default=_meta_f)
-    if isinstance(text, bytes):
-        text = text.decode('utf-8')
-    with io.open(os.path.join(os.getcwd(), 'geometry_validation.json'), 'w', encoding='utf-8') as handle:
-        handle.write(text)
-    log_step(logger, '几何审计完成: geometry_validation.json, mode=%s, nodes=%d, elems=%d, TOP_SURFACE=%d',
+            raise ValueError('几何校验失败：缺少节点集 %s' % set_name)
+    if validation_geometry == 'flat' and (max(top_y) - min(top_y)) > 1.0e-5:
+        raise ValueError('平场顶面不平整：y_range=%.6e' % (max(top_y) - min(top_y)))
+    log_step(logger, '几何校验通过: mode=%s, nodes=%d, elems=%d, TOP_SURFACE=%d',
              validation_geometry, len(nodes), len(part.elements), len(top_nodes))
-    return audit
 
 
 def _add_validation_point_sets(model_name, inst_name, points, mesh_size, logger, tolerance=None):
@@ -3918,12 +3787,6 @@ def _add_validation_point_sets(model_name, inst_name, points, mesh_size, logger,
         })
     all_nodes = instance.nodes.sequenceFromLabels(tuple(sorted(used_labels)))
     assembly.Set(name='VALIDATION_UNDERGROUND', nodes=all_nodes)
-    text = json.dumps({'schema_version': 1, 'points': mapped}, ensure_ascii=False,
-                      indent=2, sort_keys=True)
-    if isinstance(text, bytes):
-        text = text.decode('utf-8')
-    with io.open(os.path.join(os.getcwd(), 'validation_point_map.json'), 'w', encoding='utf-8') as handle:
-        handle.write(text)
     log_step(logger, '%s 地下检查点已创建: 数量=%d, 最大映射距离=%.6f m',
              model_name, len(mapped), max(item['distance'] for item in mapped))
     return mapped
@@ -3989,28 +3852,14 @@ def main():
         damping, fc_resolved = _resolve_material_damping(site, geom_for_model, damping_cfg, acc_info, sgeom, logger)  # 解析材料阻尼
 
         # ── 土体非线性：等效线性(EQL) 在建 FE 前更新 site/damping ──
-        site, _eql_meta = _run_eql_if_enabled(site, geom_for_model, acc_info, damping, logger)  # EQL 失败时自动回退线性
+        site, _ = _run_eql_if_enabled(site, geom_for_model, acc_info, damping, logger)  # EQL 失败时自动回退线性
 
         # ── 项②：网格自适应 ─────────────────────────────────────────────────────
         mesh_used = _resolve_mesh_used(site, mesh_size, fc_resolved, _mesh_cfg, logger)  # 频率判据下的实际网格尺寸
         # ── 网格自适应结束 ──────────────────────────────────────────────────────
 
         log_step(logger, '====== 阶段: fd 引擎建模前自检(解析对拍) ======')
-        selfcheck = _fd_engine_selfcheck(logger)  # v8：fd 引擎建模前自检（解析对拍，失败即中止，毫秒级）
-
-        log_step(logger, '====== 阶段: 写出工况元数据 case_meta.json ======')
-
-        _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping,
-                                   sgeom, acc_info, selfcheck, _eql_meta,
-                                   validation_geometry=validation_geometry,
-                                   rect_cfg=({'enable': True,
-                                              'width': geometry_cfg['rect_width'],
-                                              'height': geometry_cfg['rect_height']} if rect_enabled else None))  # 写 case_meta 并输出理论 QA（矩形标记随 meta 固化）
-
-        reference_only_env = str(os.environ.get('ABQ_REFERENCE_ONLY', '')).strip().lower()  # 已有工况补生一维参考
-        if bool(_run_cfg.get('reference_only', False)) or reference_only_env in ('1', 'true', 'yes', 'on'):
-            log_step(logger, 'reference_only：一维完整参考已生成，不创建或提交有限元模型')
-            return
+        _fd_engine_selfcheck(logger)  # v8：fd 引擎建模前自检（解析对拍，失败即中止，毫秒级）
 
         log_step(logger, '运行控制: 几何=%s（TAF 分母用解析自由场）', validation_geometry)
 
@@ -4021,7 +3870,6 @@ def main():
         # ── scene='fixed'：固定基础框架单体，不建土体 ─────────────────────────
         if scene == 'fixed':
             log_step(logger, '====== 阶段: fixed 场景——固定基础框架单体(不建土体/VAB) ======')
-            write_tssi_meta(logger)  # 写 tssi_meta（含 scene='fixed'）
             model_names = build_fixed_model(logger)  # 建模 + 钢筋注入
 
             _submit_models(model_names, logger,
@@ -4050,15 +3898,22 @@ def main():
             base_model, part_name, inst_name = create_model(
                 site=site, geom=geom_for_model, mesh_size=mesh_used, cae_name=cae_name, logger=logger, damping=damping,
                 surface_geometry=sgeom, elem_name=_mesh_cfg.get('elem', 'CPE4'), mesh_cfg=_mesh_cfg, fc=fc_resolved)
-        _write_geometry_validation_audit(base_model, part_name, inst_name, geom_for_model,
-                                         validation_geometry, logger)  # 建模后立即审计外形和节点集
+        _validate_geometry_sets(base_model, part_name, validation_geometry, logger)  # 建模后立即校验外形和节点集
         _add_validation_point_sets(base_model, inst_name, _run_cfg.get('validation_points'),
                                    mesh_used, logger,
                                    _run_cfg.get('validation_point_tolerance'))  # 可选验证点仅在工况显式配置时创建
 
+        log_step(logger, '====== 阶段: 地表逐节点自由场时程 CSV ======')
+        try:  # CSV 输出失败不影响建模
+            for _rec in acc_info:  # 逐波输出（多波工况每波一组，背景场/局部一维场/节点表）
+                _write_freefield_surface_csv(mdb.models[base_model], part_name, geom_for_model, site, damping, sgeom,
+                                             _rec[0], float(_time_cfg.get('tail_seconds', 0.0) or 0.0),
+                                             material_cfg['angle'], os.getcwd(), logger)
+        except Exception as _fe:  # 退化输入等异常仅记录
+            log_step(logger, '地表自由场 CSV 输出失败(不影响建模): %s', str(_fe))
+
         if tssi_cfg.get('enable'):  # ssi 场景: 在坡地基础模型上追加坡顶框架(Tie 耦合); build_models 会复制到各波
             add_frame_on_crest(base_model, geom_for_model, part_name, inst_name, logger)
-            write_tssi_meta(logger)
 
         if tssi_cfg.get('enable') and scene == 'freefield':  # freefield 三胞胎: 补建 CREST_REF 参考点（enable=False 时禁止）
             _add_crest_ref_for_freefield(base_model, geom_for_model, inst_name, logger)
@@ -4095,6 +3950,16 @@ def main():
         if bool(_run_cfg.get('submit_jobs', True)):
             _submit_models(model_names, logger,
                            float(_run_cfg.get('job_progress_interval_seconds', 360.0)))  # 统一提交所有待运行模型
+            if model_names:  # 作业已全部完成，立即从各 ODB 提取地表加速度 CSV
+                log_step(logger, '====== 阶段: ODB 地表加速度提取 CSV ======')
+                for _mi, _mn in enumerate(model_names):
+                    _odb_path = os.path.join(os.getcwd(), 'job-%s.odb' % _mn)  # 作业名=job-模型名
+                    _rec = (os.path.splitext(os.path.basename(acc_info[_mi][0]))[0]
+                            if _mi < len(acc_info) else _mn)  # 记录名（与自由场 CSV 命名对齐，兜底=模型名）
+                    try:
+                        _extract_surface_acc_csv_from_odb(_odb_path, _rec, os.getcwd(), logger)
+                    except Exception as _oe:  # 单个 ODB 提取失败不影响其余
+                        log_step(logger, 'ODB 提取失败(不影响后续): %s: %s', _odb_path, str(_oe))
         else:
             log_step(logger, 'submit_jobs=False：仅保留建模与几何审计，不提交 Abaqus 求解')
 
