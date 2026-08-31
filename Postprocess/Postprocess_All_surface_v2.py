@@ -1,39 +1,4 @@
 # -*- coding: utf-8 -*-
-"""坡地模型地表响应统一后处理 v2（PGA + AF/TAF + 复频响/FSAF + 5% PSA/RSAF + 三段重采样）。
-
-v2 变更（相对 v1）：新增研究计划 §4.0 第②步"两步对齐"的重采样——把逐节点曲线与 H(f,s) 曲面
-按三段（坡顶平台A/坡面B/坡脚平台C）插值到统一 s 子网格（N_A=120/N_B=60/N_C=80，段A 近坡顶棱加密），
-输出固定长度 N_A+N_B+N_C 的对齐矩阵给 POD/ML；AR_max 仍在重采样前的原始曲线上精确提取，
-并把其所在段号与归一坐标回写 surface_summary.json。
-
-遍历当前工况目录所有 job-*.odb，从 TOP_SURFACE 节点集全时程场输出提取地表加速度，逐波输出：
-  1. PGA：每个地表节点水平(A1)/竖向(A2)/合成(R)加速度峰值。
-  2. 放大系数（口径与 case_meta 完全一致）：
-       AF_h  = PGA_h / (factor_h × PGA_in)      —— 相对基岩入射的总放大（含场地+地形）
-       TAF_h = AF_h / taf_h(同侧一维理论台阶)   —— 纯地形放大，远场应趋于 1
-       AF_v  = PGA_v / (factor_h × PGA_in)      —— 寄生竖向放大（统一水平分母，B&P2005 口径）
-       TAF_v = AF_v / taf_v(同侧)               —— 仅斜入射且 taf_v>TAFV_GUARD 时计算，否则 NaN
-       VTR   = PGA_v / PGA_h_ff(同侧)            —— 竖向地形转换系数，0° 入射仍有意义
-       UTAF_* = PGA_* / PGA_R_ff(同侧)           —— 合成自由场统一分母下的水平/竖向/合成响应
-       DUTAF_v = (PGA_v - PGA_v_ff) / PGA_R_ff   —— 地形额外诱发的竖向响应增量
-       V/H   = PGA_v / PGA_h                    —— 同点竖横比
-     同侧规则：x ≤ x_toe（坡顶平台+坡面）用 left 柱，x > x_toe（坡脚平台）用 right 柱。
-  3. 复频响与傅里叶谱放大：规范 NPZ 保存复数 H、相位所需信息和显式 valid_mask；
-     FSAF=|H| 只作为确定性派生视图；真实一维参考齐全时另算 FSAF_1D。
-     同侧端点分母另记 station_ratio，禁止误称匹配均质坡 H_topo；run_cfg.frf_cfg.fmax_hz 控制输出频带。
-  4. 反应谱：计算 5% 阻尼弹性伪加速度谱 PSA；只有配置了同一记录的真实 rock/1D 参考时才计算
-     RSAF_rock、RSAF_1D 和 URSAF_z，缺参考或分母过小时写 NaN+valid_mask，不以 epsilon 造峰。
-  5. 数据状态：只记录 ODB 提取、数组生成和文件写出是否完成；研究质量评价由独立脚本执行。
-
-输入：job-*.odb + case_meta.json + 输入波 txt（路径优先取 case_config.json 的 run_cfg.wave_files，
-      按文件名主干与记录名匹配；缺省回退工况目录下同名 .txt）。
-输出：surface_results.npz                                  （单工况唯一数值包：逐节点响应、传函、s 网格、元数据与汇总）
-      figs/surface_response_<record>.{png,pdf,svg}         （三段分轴出版级图，横轴为 §4.0 三段归一坐标 s）
-      figs/surface_response_raw_s_<record>.{png,pdf,svg}   （原始逐节点数据仅做 x→s 换算的对照图）
-      （CSV/JSON 仅在运行期间作为重采样和绘图临时文件，打包完成后自动删除）
-运行：abaqus python Postprocess_All_surface_v2.py   （在含 job-*.odb 与 case_meta.json 的工况目录内）
-约定：Abaqus 自带 Python 2.7 + numpy；纯数值函数不依赖 odbAccess，可在普通 Python 下单测。
-"""
 
 from __future__ import print_function
 

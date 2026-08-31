@@ -25,7 +25,7 @@ import threading  # 导入线程锁，避免并发工况终端输出互相穿插
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))  # 设置默认的模型根目录，各工况文件夹建在此
 FOLDER_PREFIX = "case-"  # 各工况文件夹的命名统一前缀
-DELETE_FILE_TYPES = [".odb", ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留
+DELETE_FILE_TYPES = [ ".inp", ".msg", ".prt", ".dat", ".sta", ".sim", ".jnl", ".com", ".rpy", ".rec"]  # 数据提取成功后删除的过程文件；CAE按当前存储策略保留".odb"
 REQUIRED_RESULT_FILES = ["surface_results.npz", "surface_results.xlsx"]  # 清理前必须同时存在且非空的规范数据产物
 POSTPROCESS_STATUS_FILENAME = "postprocess_status.json"  # 后处理必需QA状态；不依赖可能吞退出码的Abaqus批处理包装器
 MAX_WORKERS = 4  # 单机最多同时运行4个建模/求解工况，已由G1r正式批次验证

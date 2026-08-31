@@ -55,6 +55,9 @@ geometry_cfg = {
     'toe_window': 3.0,                  # 坡脚观测窗（hs 倍数，计划书 C_max）
     'side_clearance': 0.1,              # 侧向边界净空（hs 倍数，观测窗外留给 VAB 的距离）
     'base_depth': 2.0,                  # 坡脚面以下模型深度（hs 倍数，恒定不随地层变；土层扣完剩余全归基岩）
+    'rect_enable': False,               #! 矩形空间开关：True=建矩形(平场)模型替代坡地，走平场建模路径
+    'rect_width': 1800,                 # 矩形宽度(m)，rect_enable=True 时必填（替代窗口派生的 total_L）
+    'rect_height': 600,                 # 矩形高度(m)=矩形地表高程(底边 y=0)，rect_enable=True 时必填（须容纳全部土层）
 }
 
 # 作业参数配置
@@ -149,8 +152,8 @@ eql_cfg = {
 
 # TSSI 总开关配置
 tssi_cfg = {
-    'enable': False,                     # True=在坡顶追加框架(Tie耦合); False=退化为 v3 纯坡地模型
-    'scene': 'ssi',                      #! 三胞胎场景 'ssi'=全耦合(默认) / 'freefield'=纯坡地提取坡顶运动 / 'fixed'=固定基础框架单体
+    'enable': False,                     #! 总开关：False=纯场地模型，禁止一切 tssi 流程（无框架/无CREST_REF/无tssi_meta）；True=进入三胞胎流程
+    'scene': 'ssi',                      #! 三胞胎场景（仅 enable=True 时生效）'ssi'=全耦合(默认) / 'freefield'=纯坡地提取坡顶运动 / 'fixed'=固定基础框架单体
     'fixed_input': None,                 #! fixed 场景基底输入加速度 .txt 路径(绝对/相对工况目录); None=自动查找 crest_motion_*.txt
     'history_freq': 1,                   # 框架历史输出(U1/A1等)采样频率：每隔该增量步记录一次
     'nonlinear': True,                   # True=梁柱用CDP混凝土+钢筋(非线性纤维截面); False=退回纯弹性(step2 行为)
@@ -608,17 +611,41 @@ def _resolve_geometry_cfg(gcfg, logger=None):  # 无量纲几何设计 → 引�
         slope_height 坡高 hs (m，唯一绝对尺度)；slope_angle 坡角(度)；
         crest_window/toe_window 坡顶/坡脚观测窗；side_clearance 侧向边界净空；
         base_depth 坡脚面以下模型深度（恒定，不随地层配置变）。
+        rect_enable=True 时改走矩形模式：rect_width/rect_height 显式给定外形，
+        坡高/坡角/观测窗配置全部旁路（不参与外形，仅保留在配置中）。
     logger : 日志器（None 则不打印换算结果）
 
     返回
     ----
     dict：引擎几何键 {total_L, left_flat, H_minus_h, i, H_lower}，
-    其中 H_lower=base_depth·hs 为坡脚地表高程（模型底边 y=0）。
+    其中 H_lower=base_depth·hs 为坡脚地表高程（模型底边 y=0）；
+    矩形模式下 H_minus_h=0、total_L=rect_width、H_lower=rect_height，
+    并附 rect_enable/rect_width/rect_height 透传键（非矩形模式 rect_enable=False）。
 
     换算公式：left_flat=(crest_window+side_clearance)·hs；w_slope=hs/tan(i)；
     right_flat=(toe_window+side_clearance)·hs；total_L=三段之和。
     几何只定外形，地层划分（各土层厚度、基岩顶面）全部由 material_cfg['layers'] 决定。
     """
+    rect_enable = bool(gcfg.get('rect_enable', False))  # 矩形空间开关
+    if rect_enable:  # 矩形模式：显式宽高直接成为引擎几何，窗口派生全部旁路
+        rect_width = gcfg.get('rect_width')  # 矩形宽度(m)
+        rect_height = gcfg.get('rect_height')  # 矩形高度(m)=地表高程
+        if rect_width is None or rect_height is None:
+            raise ValueError("rect_enable=True 时必须显式给定 rect_width 与 rect_height (m)，"
+                             "当前: %r/%r" % (rect_width, rect_height))  # 宽高缺失
+        w = float(rect_width)
+        h = float(rect_height)
+        if not (w > 0.0) or not (h > 0.0):
+            raise ValueError('rect_width/rect_height 必须>0，当前: %r/%r' % (rect_width, rect_height))  # 尺寸非法
+        resolved = {'H_minus_h': 0.0,  # 矩形顶面平坦：无坡高差
+                    'i': float(gcfg.get('slope_angle', 45.0)),  # 坡角仅记录（H_minus_h=0 时不影响外形）
+                    'left_flat': w,  # 整域视为上平台（CREST_REF 定位截断与地表函数退化用）
+                    'total_L': w,  # 模型总长 = 矩形宽度
+                    'H_lower': h,  # 矩形地表高程 = 矩形高度（底边 y=0）
+                    'rect_enable': True, 'rect_width': w, 'rect_height': h}  # 矩形标记透传
+        if logger is not None:  # 打印矩形外形，供日志核对
+            log_step(logger, '矩形空间模式: 宽=%.1f m × 高=%.1f m（坡高/坡角/观测窗/净空配置不参与外形）', w, h)
+        return resolved
     hs = float(gcfg['slope_height'])  # 坡高（唯一绝对尺度）
     i_deg = float(gcfg['slope_angle'])  # 坡角（度）
     crest_win = float(gcfg['crest_window'])  # 坡顶观测窗倍数
@@ -642,7 +669,8 @@ def _resolve_geometry_cfg(gcfg, logger=None):  # 无量纲几何设计 → 引�
                 'i': i_deg,  # 引擎键：坡角
                 'left_flat': left_flat,  # 引擎键：上平台长度
                 'total_L': total_L,  # 引擎键：模型总长
-                'H_lower': base * hs}  # 引擎键：坡脚地表高程（=坡脚面以下模型深度）
+                'H_lower': base * hs,  # 引擎键：坡脚地表高程（=坡脚面以下模型深度）
+                'rect_enable': False}  # 矩形标记透传（默认坡地模式）
     if logger is not None:  # 打印换算结果，供日志核对
         log_step(logger, '几何换算(hs=%.1f m): left_flat=%.1f(%.2fh) + w_slope=%.1f(%.2fh) + right_flat=%.1f(%.2fh) = total_L=%.1f(%.2fh); 坡脚面以下深度=%.1f(%.2fh)',
                  hs, left_flat, left_flat / hs, w_slope, w_slope / hs,
@@ -2279,7 +2307,11 @@ def build_site(material_cfg, geometry_cfg):
     hs = float(geometry_cfg['H_minus_h'])  # 坡高
     H_upper = float(geometry_cfg['H_lower']) + hs  # 坡顶地表高程
     bedrock_top = H_upper - sum(soil_thicknesses)  # 基岩顶面高程
-    if bedrock_top < 2.0 * hs - 1e-6:
+    if bool(geometry_cfg.get('rect_enable', False)):  # 矩形模式：显式高度只需容纳全部土层（无坡高净空概念）
+        if bedrock_top < -1.0e-6:
+            raise ValueError('矩形高度(%.2f m)小于土层总厚(%.2f m)，基岩顶面高程为负: %.2f' %
+                             (H_upper, sum(soil_thicknesses), bedrock_top))  # 抛出高度不足错误
+    elif bedrock_top < 2.0 * hs - 1e-6:
         raise ValueError('土层总厚(%.2f)过大: 基岩顶面高程 %.2f < 底部净空要求 2h=%.2f（需 Σt ≤ base_depth·h − h）' %
                          (sum(soil_thicknesses), bedrock_top, 2.0 * hs))  # 抛出净空错误
     site = Site(bedrock=bedrock, layers=layers, bedrock_thickness=bedrock_top)
@@ -2410,7 +2442,7 @@ def _damping_meta(site, damping, geom=None):  # 把阻尼配置与逐层换算�
 
 def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, damping=None,
                      sgeom='horizontal', acc_path=None, selfcheck=None, eql_info=None,
-                     validation_geometry='slope'):  # 写出统一工况元数据（含验证几何模式）
+                     validation_geometry='slope', rect_cfg=None):  # 写出统一工况元数据（含验证几何模式）
     """写出工况元数据 case_meta.json，固化当前建模与配置的全部参数。
     作为工况元数据的单一真相源，记录所有材料、几何、解析阻尼、人工边界、自由场配置及同侧一维场地放大基准等参数，
     供下游分析与后处理脚本直接读取。失败仅告警，不影响建模主流程。
@@ -2466,6 +2498,7 @@ def _write_case_meta(material_cfg, geom, site, mesh_size, script_name, logger, d
             'incident_angle': _meta_f(material_cfg['angle']),  # SV 入射角 θs（度）
             'surface_geometry': str(sgeom),  # v7：表层几何模式 horizontal/terrain
             'validation_geometry': str(validation_geometry),  # 验证几何模式 slope/flat
+            'rect': (dict(rect_cfg) if rect_cfg else {'enable': False}),  # 矩形空间标记（enable/width/height，非矩形仅记 enable=False）
             'mesh_size': _meta_f(mesh_size),  # 网格尺寸（m）
             'geometry': geometry,  # 几何参数（含派生 H/h/w_slope）
             'bedrock': bedrock,  # 基岩材料字典
@@ -3752,13 +3785,13 @@ def _resolve_mesh_used(site, mesh_size, fc, mesh_cfg, logger):  # 解析最终�
 
 def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damping,
                                surface_geometry, acc_info, selfcheck, eql_meta,
-                               validation_geometry='slope'):  # 写出工况元数据
+                               validation_geometry='slope', rect_cfg=None):  # 写出工况元数据
     """写出 case_meta.json，并输出同侧一维场地放大基准 QA 摘要。"""
     first_rec = acc_info[0][0] if acc_info else None
     ff_theory = _write_case_meta(material_cfg, geom, site, mesh_used, _script_name(), logger,
                                  damping=damping, sgeom=surface_geometry, acc_path=first_rec,
                                  selfcheck=selfcheck, eql_info=eql_meta,
-                                 validation_geometry=validation_geometry)
+                                 validation_geometry=validation_geometry, rect_cfg=rect_cfg)
     if ff_theory and ff_theory.get('left') and ff_theory.get('right'):
         log_step(logger, '同侧一维场地放大基准(兼容键 taf_h/taf_v): 左(上平台) AF_h=%.3f AF_v=%.3f | 右(下平台) AF_h=%.3f AF_v=%.3f (FE 远场 AF 应与之一致±5%%)',
                  ff_theory['left']['taf_h'], ff_theory['left']['taf_v'],
@@ -3766,17 +3799,21 @@ def _write_meta_and_log_theory(material_cfg, geom, site, mesh_used, logger, damp
     return ff_theory
 
 
-def _apply_scene_mode(scene, logger):  # 校验并应用 TSSI 场景开关
-    """校验 scene，并按 freefield/ssi 语义同步 tssi_cfg['enable']。"""
+def _apply_scene_mode(scene, tssi_cfg, logger):  # 校验并应用 TSSI 场景开关
+    """校验 scene/enable 组合；enable=False 时禁止一切 tssi 流程。
+
+    enable 是总开关：True=进入三胞胎流程（scene 选 ssi 全耦合/freefield 纯坡地提坡顶运动/
+    fixed 固定基础单体）；False=纯场地模型，scene 值仅记录不生效，不建框架、不建
+    CREST_REF、不写 tssi_meta。
+    """
     if scene not in ('ssi', 'freefield', 'fixed'):
         raise ValueError("tssi_cfg['scene'] 仅支持 'ssi'/'freefield'/'fixed'，当前: %s" % scene)
-    log_step(logger, '三胞胎场景: scene=%s', scene)
-    if scene == 'freefield':
-        tssi_cfg['enable'] = False
-        log_step(logger, '[freefield] 已强制 tssi_cfg.enable=False（纯坡地模型）')
-    elif scene == 'ssi':
-        tssi_cfg['enable'] = True
-        log_step(logger, '[ssi] 已强制 tssi_cfg.enable=True（全耦合模型）')
+    if not tssi_cfg.get('enable'):  # 总开关关闭：禁止一切 tssi 流程
+        if scene == 'fixed':
+            raise ValueError("scene='fixed' 是框架单体场景，须 tssi_cfg.enable=True；当前 enable=False")
+        log_step(logger, 'tssi 总开关 enable=False: 纯场地模型，禁止一切 tssi 流程（scene=%s 仅记录，不生效）', scene)
+        return
+    log_step(logger, '三胞胎场景: scene=%s (enable=True)', scene)
 
 
 def _submit_models(model_names, logger, progress_interval_seconds=360.0):  # 批量提交作业
@@ -3932,10 +3969,14 @@ def main():
         validation_geometry = str(_run_cfg.get('validation_geometry', 'slope')).lower()  # 读取验证几何模式
         if validation_geometry not in ('slope', 'flat'):
             raise ValueError("run_cfg['validation_geometry'] 仅支持 'slope' 或 'flat'，当前: %s" % validation_geometry)
-        scene_cfg = str(tssi_cfg.get('scene', 'ssi')).lower()  # 读取场景配置，平场只允许 freefield
+        rect_enabled = bool(geometry_cfg.get('rect_enable', False))  # 矩形空间开关（geometry_cfg 注入，宽高已换算进引擎键）
+        if rect_enabled and validation_geometry != 'flat':  # 矩形顶面平坦，必然走平场建模路径
+            log_step(logger, 'rect_enable=True: 矩形空间即平场外形，建模路径由 %s 切换为 flat', validation_geometry)
+            validation_geometry = 'flat'
+        scene_cfg = str(tssi_cfg.get('scene', 'ssi')).lower()  # 读取场景配置（仅日志展示；平场已强制 enable=False，scene 不生效）
         if validation_geometry == 'flat':
-            if scene_cfg != 'freefield' or tssi_cfg.get('enable'):
-                raise ValueError("validation_geometry='flat' 必须配合 tssi_cfg.scene='freefield' 且 enable=False")
+            if tssi_cfg.get('enable'):
+                raise ValueError("validation_geometry='flat' 必须配合 tssi_cfg.enable=False（平场无坡肩，禁止一切 tssi 流程）")
             if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element':
                 raise ValueError("validation_geometry='flat' 暂不支持 eql_cfg.mode='2d_element'")
             geom_for_model = make_flat_validation_geometry(geom)  # 显式平坦外形
@@ -3961,7 +4002,10 @@ def main():
 
         _write_meta_and_log_theory(material_cfg, geom_for_model, site, mesh_used, logger, damping,
                                    sgeom, acc_info, selfcheck, _eql_meta,
-                                   validation_geometry=validation_geometry)  # 写 case_meta 并输出理论 QA
+                                   validation_geometry=validation_geometry,
+                                   rect_cfg=({'enable': True,
+                                              'width': geometry_cfg['rect_width'],
+                                              'height': geometry_cfg['rect_height']} if rect_enabled else None))  # 写 case_meta 并输出理论 QA（矩形标记随 meta 固化）
 
         reference_only_env = str(os.environ.get('ABQ_REFERENCE_ONLY', '')).strip().lower()  # 已有工况补生一维参考
         if bool(_run_cfg.get('reference_only', False)) or reference_only_env in ('1', 'true', 'yes', 'on'):
@@ -3971,8 +4015,8 @@ def main():
         log_step(logger, '运行控制: 几何=%s（TAF 分母用解析自由场）', validation_geometry)
 
         # ── 三胞胎场景调度 ────────────────────────────────────────────────────
-        scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'
-        _apply_scene_mode(scene, logger)  # 校验场景并同步 tssi_cfg.enable
+        scene = str(tssi_cfg.get('scene', 'ssi'))  # 三胞胎场景：'ssi'(默认)/'freefield'/'fixed'（仅 enable=True 时生效）
+        _apply_scene_mode(scene, tssi_cfg, logger)  # 校验场景组合；enable=False 时禁止一切 tssi 流程
 
         # ── scene='fixed'：固定基础框架单体，不建土体 ─────────────────────────
         if scene == 'fixed':
@@ -3987,7 +4031,10 @@ def main():
             return  # fixed 场景提前返回，不走坡地建模流程
 
         # ── 坡地/平场基础建模流程（平场只用于显式验证） ────────────────────────
-        if validation_geometry == 'flat':
+        if rect_enabled:  # 矩形模型以显式宽高命名，与坡派生平场区分
+            cae_name = 'rect_w{}_h{}_a{}_L{}.cae'.format(int(geometry_cfg['rect_width']), int(geometry_cfg['rect_height']),
+                                                         int(material_cfg['angle']), n_total_layers)
+        elif validation_geometry == 'flat':
             cae_name = 'flat_h{}_i{}_a{}_L{}.cae'.format(int(geom.H_minus_h), int(geom.i),
                                                          int(material_cfg['angle']), n_total_layers)
         else:
@@ -4013,7 +4060,7 @@ def main():
             add_frame_on_crest(base_model, geom_for_model, part_name, inst_name, logger)
             write_tssi_meta(logger)
 
-        if scene == 'freefield':  # freefield 场景: 补建 CREST_REF 参考点（不建框架但需提取坡顶运动）
+        if tssi_cfg.get('enable') and scene == 'freefield':  # freefield 三胞胎: 补建 CREST_REF 参考点（enable=False 时禁止）
             _add_crest_ref_for_freefield(base_model, geom_for_model, inst_name, logger)
 
         if eql_cfg.get('enable') and eql_cfg.get('mode') == '2d_element' and site.layers and acc_info:  # ② 逐单元 2D EQL(自管迭代提交)
@@ -4041,7 +4088,7 @@ def main():
                 add_footing_contact(_mn, inst_name, logger)  # P1#8：footing+contact 时建基础-土硬接触(步已建后)
                 add_frame_rebar(_mn, logger)  # step3：keyword注入梁柱钢筋，须最后调用(其后不再对模型做图形化修改)
 
-        if scene == 'freefield' and model_names:  # freefield 场景: 各波模型追加 CREST_REF 历史输出
+        if tssi_cfg.get('enable') and scene == 'freefield' and model_names:  # freefield 三胞胎: 各波模型追加 CREST_REF 历史输出
             for _mn in model_names:
                 _add_freefield_crest_outputs(_mn, inst_name, logger)
 
