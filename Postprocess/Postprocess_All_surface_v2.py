@@ -1,34 +1,4 @@
 # -*- coding: utf-8 -*-
-"""地表响应后处理：读取建模脚本输出的 4 类地表 CSV，计算逐节点指标并出图。
-
-输入（当前工况目录，<record>=输入波记录名；均为节点行格式 node_label,x,y,t=...,t=...）:
-  surface_acc_x_<record>.csv          FE 水平加速度时程（建模脚本作业完成后从 ODB 提取）
-  surface_acc_y_<record>.csv          FE 竖向加速度时程
-  freefield_local_1d_<record>.csv     局部一维场（节点当地竖向土柱的解析预测，水平分量）
-  freefield_background_<record>.csv   背景场（三人工边界统一注入的左柱平场解，水平分量）
-
-输出（figs/<图名>/ 子文件夹，一图一夹）:
-  surface_response_<record>.png/.pdf/.svg  三段分轴多面板指标剖面大图
-  surface_response_<record>.csv            该图全部面板的源数据表
-
-指标口径（分母全部来自 CSV 自由场，不依赖 case_meta）:
-  PGA_h/v/R  FE 逐节点水平/竖向/合成峰值
-  PGA_1d     局部一维场峰值（坡面节点体现当地柱高变化的空间印记）
-  PGA_bg     背景场峰值（模型实际收到的输入场，坡面/坡脚节点为左柱内部点取值）
-  AF_h/v     = PGA/PGA_bg     相对背景输入场的总放大（场地+地形）
-  TAF_h      = PGA_h/PGA_1d   相对当地一维预测的放大（纯地形效应）
-  TAF_v      恒 NaN（无竖向一维自由场输出，面板文字注记）
-  VTR        = PGA_v/PGA_1d   竖向响应/一维水平预测
-  UTAF_R     = PGA_R/PGA_1d   合成响应统一系数
-  V_over_H   = PGA_v/PGA_h    竖横峰值比
-
-横轴为三段归一化 s 坐标（上平台 A / 坡面 B / 下平台 C，坡高归一）；坡顶/坡脚棱由
-节点 y 高程反推（上平台=ymax 最右节点、下平台=ymin 最左节点）。平场/矩形模型
-（y 全等）无三段结构，退化为 x 物理坐标单段轴。观测窗取 case_config.json 的
-geometry_cfg.crest_window/toe_window（hs 倍数，缺省不截断）。
-
-运行环境：普通 Python 3 + numpy + matplotlib（无需 Abaqus）。
-"""
 
 from __future__ import print_function
 
@@ -46,19 +16,24 @@ import numpy as np
 
 DEFAULT_SCRIPT_NAME = 'Postprocess_All_surface_v2.py'  # __file__ 缺失时的兜底文件名
 
-# 指标面板顺序（与源数据 CSV 列一致；颜色沿用 Okabe-Ito 色盲安全配色）
+# 指标子图清单（每指标独立子文件夹成图；颜色沿用 Okabe-Ito 色盲安全配色）
+# PGA=FE 峰值；Rin=÷注入场(background，模型实际收到的输入场)；R2D1D=÷当地一维场(local_1d，
+# 二维/一维响应比)；TAF=÷左侧上平台平场(rect，规范/文献口径的地形放大系数，与论文 G_h 基准一致)
 PANEL_SPECS = [
-    ('PGA_h', 'blue'), ('PGA_v', 'vermillion'), ('PGA_R', 'black'),
-    ('PGA_1d', 'skyblue'), ('PGA_bg', 'orange'),
-    ('AF_h', 'blue'), ('AF_v', 'vermillion'),
-    ('TAF_h', 'blue'), ('TAF_v', 'vermillion'),
-    ('VTR', 'purple'), ('UTAF_R', 'green'), ('V_over_H', 'black'),
+    ('PGA_h', 'blue'), ('PGA_v', 'vermillion'),
+    ('Rin_h', 'skyblue'), ('Rin_v', 'orange'),
+    ('R2D1D_h', 'blue'), ('R2D1D_v', 'vermillion'),
+    ('TAF_h', 'green'), ('TAF_v', 'purple'),
 ]
 SAFE_DENOM_EPS = 1e-30  # 分母安全阈值：低于此值视为无效分母，比值置 NaN
 FLAT_Y_TOL = 1e-6  # 节点高程极差低于该值判为平场（无三段结构）
 PLOT_SMOOTH_WINDOW = 11  # 成图用分段移动平均窗口（只影响曲线显示，不改变源数据）
 FIG_FORMATS = ('png', 'pdf', 'svg')  # 每图导出格式（栅格+矢量，论文投稿口径）
 FIG_ROOT_DIR = 'figs'  # 图与源数据子文件夹的根目录
+GH_PROFILE_FREQUENCIES = (1.0, 3.0, 5.0, 7.0, 9.0)  # 图8式固定频率剖面的频率（Hz）
+GH_REF_MASK_REL = 1e-3  # 参考谱幅值低于该值×逐节点谱峰值的频点视为无激励，置 NaN 断线
+GH_LINE_COLORS = ('#0072B2', '#E69F00', '#009E73', '#D55E00', '#CC79A7')  # 论文图8频率配色
+GH_LINE_STYLES = ('-', '--', '-.', ':', (0, (5, 1.5)))  # 论文图8频率线型
 
 
 def _script_path():  # 安全获取当前脚本绝对路径（execfile 环境可能不定义 __file__）
@@ -155,17 +130,22 @@ def read_surface_csv(path):
 
 
 def discover_records(logger=None):
-    """扫描工况目录内的 surface_acc_x_*.csv，并按记录名查找配套的另外 3 个 CSV。
+    """扫描工况目录内的 surface_acc_x_*.csv，并按记录名查找配套的另外 7 个 CSV。
 
-    返回 [(record, paths)]，paths 含存在的文件键 fe_x/fe_y/local/bg（缺失键即缺文件）。
+    返回 [(record, paths)]，paths 含存在的文件键 fe_x/fe_y/bg_x/bg_y/local_x/local_y/
+    rect_x/rect_y（缺失键即缺文件，对应指标置 NaN）。
     """
     records = []
     for path in sorted(glob.glob('surface_acc_x_*.csv')):
         record = os.path.basename(path)[len('surface_acc_x_'):-len('.csv')]
         paths = {'fe_x': path}
         for key, pattern in (('fe_y', 'surface_acc_y_%s.csv'),
-                             ('local', 'freefield_local_1d_%s.csv'),
-                             ('bg', 'freefield_background_%s.csv')):
+                             ('bg_x', 'freefield_background_x_%s.csv'),
+                             ('bg_y', 'freefield_background_y_%s.csv'),
+                             ('local_x', 'freefield_local_1d_x_%s.csv'),
+                             ('local_y', 'freefield_local_1d_y_%s.csv'),
+                             ('rect_x', 'freefield_rect_x_%s.csv'),
+                             ('rect_y', 'freefield_rect_y_%s.csv')):
             candidate = pattern % record
             if os.path.isfile(candidate):
                 paths[key] = candidate
@@ -248,31 +228,38 @@ def _safe_ratio(num, den):
     return out
 
 
-def compute_metrics(a_h, a_v, a_1d, a_bg):
-    """由 FE 双分量与两类自由场时程计算逐节点指标（口径见模块 docstring）。
+def compute_metrics(a_h, a_v, refs):
+    """由 FE 双分量与三组自由场参考时程计算逐节点指标。
 
-    a_h/a_v/a_1d/a_bg 均为 节点×时刻 矩阵（列数可不同，峰值独立计算）；
-    a_v/a_1d/a_bg 可为 None（对应指标全 NaN）。返回字段→数组 的 dict。
+    a_h/a_v 为 FE 水平/竖向 节点×时刻 矩阵（a_v 可为 None → 竖向指标全 NaN）；
+    refs 为 {'bg_x','bg_y','local_x','local_y','rect_x','rect_y'} → 参考矩阵或 None
+    （缺文件时对应比值全 NaN）。指标口径（分母均为该组逐节点峰值 max|·|）：
+      PGA_h/PGA_v      FE 峰值；
+      Rin_h/Rin_v      FE ÷ 注入场（背景场=三人工边界实际注入的左柱解在节点高程处，
+                       即模型收到的输入场，属验证量）；
+      R2D1D_h/R2D1D_v  FE ÷ 当地一维场（一维场地分析预测，二维/一维响应比）；
+      TAF_h/TAF_v      FE ÷ 矩形平场（左侧上平台高程 H_upper 平场解地表响应，
+                       规范/文献口径的地形放大系数，与论文 G_h 幅值基准一致）。
+    分母无效（NaN 或 ≤SAFE_DENOM_EPS，如垂直入射下竖向参考恒 0）时比值置 NaN。
     """
     n_node = a_h.shape[0]
-    empty = lambda: np.full(n_node, np.nan, dtype=float)  # noqa: E731 缺失参考的占位
-    a_v = a_v if a_v is not None else np.full((n_node, 1), np.nan)
-    a_1d = a_1d if a_1d is not None else np.full((n_node, 1), np.nan)
-    a_bg = a_bg if a_bg is not None else np.full((n_node, 1), np.nan)
     pga_h = _peak(a_h)
-    pga_v = _peak(a_v)
-    pga_r = _peak(np.sqrt(a_h * a_h + a_v * a_v))  # 逐时刻合成峰值
-    pga_1d = _peak(a_1d)
-    pga_bg = _peak(a_bg)
+    pga_v = _peak(a_v) if a_v is not None else np.full(n_node, np.nan)
+
+    def _den(key):
+        mat = refs.get(key)
+        if mat is None:
+            return np.full(n_node, np.nan)
+        return _peak(mat)
+
+    pbg_h, pbg_v = _den('bg_x'), _den('bg_y')
+    p1d_h, p1d_v = _den('local_x'), _den('local_y')
+    prt_h, prt_v = _den('rect_x'), _den('rect_y')
     return {
-        'PGA_h': pga_h, 'PGA_v': pga_v, 'PGA_R': pga_r,
-        'PGA_1d': pga_1d, 'PGA_bg': pga_bg,
-        'AF_h': _safe_ratio(pga_h, pga_bg), 'AF_v': _safe_ratio(pga_v, pga_bg),
-        'TAF_h': _safe_ratio(pga_h, pga_1d),
-        'TAF_v': empty(),  # 无竖向一维自由场输出，恒不定义
-        'VTR': _safe_ratio(pga_v, pga_1d),
-        'UTAF_R': _safe_ratio(pga_r, pga_1d),
-        'V_over_H': _safe_ratio(pga_v, pga_h),
+        'PGA_h': pga_h, 'PGA_v': pga_v,
+        'Rin_h': _safe_ratio(pga_h, pbg_h), 'Rin_v': _safe_ratio(pga_v, pbg_v),
+        'R2D1D_h': _safe_ratio(pga_h, p1d_h), 'R2D1D_v': _safe_ratio(pga_v, p1d_v),
+        'TAF_h': _safe_ratio(pga_h, prt_h), 'TAF_v': _safe_ratio(pga_v, prt_v),
     }
 
 
@@ -390,20 +377,6 @@ def _field_has_finite_value(data, field):
     return False
 
 
-def _grayscale_preview_local(png_path):
-    """用 Pillow 把 PNG 转灰度另存 *_grayscale.png（色盲自检）；无 Pillow 时跳过。"""
-    try:
-        from PIL import Image
-    except ImportError:
-        return None
-    try:
-        gray_path = png_path[:-4] + '_grayscale.png'
-        Image.open(png_path).convert('L').save(gray_path)
-        return gray_path
-    except Exception:
-        return None
-
-
 # ==========================================================
 #  图与源数据输出
 # ==========================================================
@@ -413,111 +386,95 @@ def _panel_labels(use_cn):
     """返回中/英面板纵轴标签、段标题、横轴标签与总标题模板。"""
     if use_cn:
         labels = {'PGA_h': u'水平向 PGA (m/s²)', 'PGA_v': u'垂直向 PGA (m/s²)',
-                  'PGA_R': u'合成 PGA (m/s²)',
-                  'PGA_1d': u'一维预测 PGA (m/s²)', 'PGA_bg': u'背景场 PGA (m/s²)',
-                  'AF_h': u'水平向 AF', 'AF_v': u'垂直向 AF',
-                  'TAF_h': u'水平向 TAF', 'TAF_v': u'垂直向 TAF',
-                  'VTR': u'竖向转换系数 VTR', 'UTAF_R': u'统一合成 UTAF',
-                  'V_over_H': u'竖横比 V/H'}
+                  'Rin_h': u'水平向 Rin（÷注入场）', 'Rin_v': u'垂直向 Rin（÷注入场）',
+                  'R2D1D_h': u'水平向 R2D1D（÷一维场）', 'R2D1D_v': u'垂直向 R2D1D（÷一维场）',
+                  'TAF_h': u'水平向 TAF（÷平场）', 'TAF_v': u'垂直向 TAF（÷平场）'}
         seg_titles = (u'坡顶平台', u'坡面', u'坡脚平台')
         return labels, seg_titles, u'归一化坐标 s', u'记录: %s'
     labels = {'PGA_h': u'Horizontal PGA (m/s²)', 'PGA_v': u'Vertical PGA (m/s²)',
-              'PGA_R': u'Resultant PGA (m/s²)',
-              'PGA_1d': u'1-D prediction PGA (m/s²)', 'PGA_bg': u'Background PGA (m/s²)',
-              'AF_h': u'Horizontal AF', 'AF_v': u'Vertical AF',
-              'TAF_h': u'Horizontal TAF', 'TAF_v': u'Vertical TAF',
-              'VTR': u'Vertical conversion ratio', 'UTAF_R': u'Unified resultant TAF',
-              'V_over_H': u'Vertical-to-horizontal ratio'}
+              'Rin_h': u'Horizontal Rin (/ injected field)', 'Rin_v': u'Vertical Rin (/ injected field)',
+              'R2D1D_h': u'Horizontal R2D1D (/ 1-D field)', 'R2D1D_v': u'Vertical R2D1D (/ 1-D field)',
+              'TAF_h': u'Horizontal TAF (/ flat field)', 'TAF_v': u'Vertical TAF (/ flat field)'}
     return labels, (u'Crest plateau', u'Slope', u'Toe plateau'), \
         u'Normalized coordinate s', u'Record: %s'
 
 
-def write_fig_data_csv(path, rows):
-    """把逐节点源数据（node_label,x,y,s + 全部指标）写为该图的配套 CSV。"""
-    fields = ['node_label', 'x', 'y', 's'] + [f for f, _c in PANEL_SPECS]
+def write_fig_data_csv(path, rows, fields):
+    """把逐节点源数据（node_label,x,y,s + 指定指标列）写为图文件夹级 CSV。
+
+    fields 为该图包含的指标名列表（单图调用时为单元素列表），行仅含当前图
+    绘制范围内的节点。
+    """
+    cols = ['node_label', 'x', 'y', 's'] + list(fields)
     with io.open(path, 'w', encoding='utf-8', newline='') as fh:
-        fh.write(','.join(fields) + '\n')
+        fh.write(','.join(cols) + '\n')
         for r in rows:
             vals = [str(int(r['node_label']))]
-            for f in fields[1:]:
+            for f in cols[1:]:
                 v = r.get(f, float('nan'))
                 vals.append('%.10g' % v if (v is not None and np.isfinite(v)) else 'nan')
             fh.write(','.join(vals) + '\n')
 
 
-def plot_record(fig_dir, fig_name, record, rows, s_all, flat_mode,
-                a_max, c_max, use_cn, logger=None):
-    """按三段分轴布局绘制单记录的多面板指标剖面大图，并多格式导出。
+def plot_metric_panel(fig_dir, fig_name, field, color, record, rows, s_all,
+                      flat_mode, a_max, c_max, use_cn, logger=None):
+    """绘制单个指标的三段分轴剖面图并多格式导出（每个子图独立成图独立文件夹）。
 
     flat_mode=True（平场/矩形模型）时横轴退化为 x 物理坐标，无拐点线与段标题。
+    图文件夹内的 <fig_name>.csv 仅含当前图绘制范围内（观测窗内）节点的该指标
+    原始值——平滑只作用于曲线显示，CSV 不做平滑。
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
 
     labels, seg_titles, xlabel, sup_fmt = _panel_labels(use_cn)
     if flat_mode:
         xlabel = u'坐标 x (m)'  # 平场无三段结构，直接物理坐标
-    draw_specs = [(f, CB_PALETTE[c]) for f, c in PANEL_SPECS
-                  if f in rows[0] and (_field_has_finite_value(rows, f) or f == 'TAF_v')]
-    if not draw_specs:
-        if logger:
-            log_step(logger, '[plot] 记录 %s 无可绘制字段，跳过作图', record)
-        return
-    n_cols = 2
-    n_rows = int(math.ceil(float(len(draw_specs)) / float(n_cols)))
 
-    fig = plt.figure(figsize=(6.3, max(8.2, 2.55 * n_rows + 0.7)))
-    outer = gridspec.GridSpec(n_rows, n_cols, left=0.10, right=0.985, top=0.94,
-                              bottom=0.055, hspace=0.52, wspace=0.26)
-
-    for panel_idx, (field, color) in enumerate(draw_specs):
-        ax = fig.add_subplot(outer[panel_idx // n_cols, panel_idx % n_cols])
-        style_axes_local(ax)
-        panel_lbl = '(%s)' % chr(ord('a') + panel_idx)  # 学术子图编号
-        values = np.array([r.get(field, float('nan')) for r in rows], dtype=float)
-        if not flat_mode:  # 坡地：A/B/C 各段独立平滑，坡肩/坡脚不跨段抹平
-            segments = np.where(s_all <= 0.0, 'A', np.where(s_all < 1.0, 'B', 'C'))
-            for seg in ('A', 'B', 'C'):
-                mask = segments == seg
-                values[mask] = smooth_curve_local(values[mask])
-            shown = (s_all >= -a_max - 1e-9) & (s_all <= 1.0 + c_max + 1e-9)
-        else:
-            values = smooth_curve_local(values)  # 平场整体平滑
-            shown = np.ones(len(s_all), dtype=bool)
-        y_view = np.where(shown, values, np.nan)
-        finite = np.isfinite(y_view)
-        if np.any(finite):
-            order = np.argsort(s_all)
-            ax.plot(s_all[order], y_view[order], color=color, linestyle='-',
-                    linewidth=1.2, zorder=3)
-        else:
-            note = (u'无竖向一维自由场输出，TAF_v 不适用' if field == 'TAF_v'
-                    else u'无有效数据')
-            ax.text(0.5, 0.5, note, transform=ax.transAxes, ha='center',
-                    va='center', fontsize=7)
-        if not flat_mode:
-            ax.set_xlim(-a_max, 1.0 + c_max)  # 横轴严格采用观测窗实际范围
-            tick_start = int(math.ceil(-a_max))
-            tick_end = int(math.floor(1.0 + c_max))
-            ax.set_xticks([float(t) for t in range(tick_start, tick_end + 1)])
-            ax.axvline(0.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
-            ax.axvline(1.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
-            for xc, title in zip(((-a_max) / 2.0, 0.5, 1.0 + c_max / 2.0), seg_titles):
-                ax.text(xc, 1.035, title, transform=ax.get_xaxis_transform(),
-                        ha='center', va='bottom', fontsize=7, clip_on=False)
-        else:
-            ax.set_xlim(float(np.min(s_all)), float(np.max(s_all)))
-        lo, hi = ((float(np.nanmin(y_view)), float(np.nanmax(y_view)))
-                  if np.any(finite) else (0.0, 1.0))
-        pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))
-        ax.set_ylim(lo - pad, hi + pad)
-        ax.set_ylabel(labels[field])
-        ax.set_xlabel(xlabel, labelpad=6)
-        ax.text(-0.16, 1.10, panel_lbl, transform=ax.transAxes, ha='left',
-                va='bottom', fontsize=8, fontname='Times New Roman',
-                fontweight='bold', clip_on=False)
+    fig, ax = plt.subplots(figsize=(6.3, 3.2))
+    style_axes_local(ax)
+    values = np.array([r.get(field, float('nan')) for r in rows], dtype=float)
+    if not flat_mode:  # 坡地：A/B/C 各段独立平滑，坡肩/坡脚不跨段抹平
+        segments = np.where(s_all <= 0.0, 'A', np.where(s_all < 1.0, 'B', 'C'))
+        for seg in ('A', 'B', 'C'):
+            mask = segments == seg
+            values[mask] = smooth_curve_local(values[mask])
+        shown = (s_all >= -a_max - 1e-9) & (s_all <= 1.0 + c_max + 1e-9)
+    else:
+        values = smooth_curve_local(values)  # 平场整体平滑
+        shown = np.ones(len(s_all), dtype=bool)
+    # 图文件夹 CSV 仅写当前图绘制范围内的节点（rows 里的原始值，未平滑）
+    write_fig_data_csv(os.path.join(fig_dir, fig_name + '.csv'),
+                       [r for r, keep in zip(rows, shown) if keep], fields=[field])
+    y_view = np.where(shown, values, np.nan)
+    finite = np.isfinite(y_view)
+    if np.any(finite):
+        order = np.argsort(s_all)
+        ax.plot(s_all[order], y_view[order], color=color, linestyle='-',
+                linewidth=1.2, zorder=3)
+    else:
+        note = u'无有效数据'
+        ax.text(0.5, 0.5, note, transform=ax.transAxes, ha='center',
+                va='center', fontsize=7)
+    if not flat_mode:
+        ax.set_xlim(-a_max, 1.0 + c_max)  # 横轴严格采用观测窗实际范围
+        tick_start = int(math.ceil(-a_max))
+        tick_end = int(math.floor(1.0 + c_max))
+        ax.set_xticks([float(t) for t in range(tick_start, tick_end + 1)])
+        ax.axvline(0.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
+        ax.axvline(1.0, color='#222222', linestyle='--', linewidth=1.15, zorder=10)
+        for xc, title in zip(((-a_max) / 2.0, 0.5, 1.0 + c_max / 2.0), seg_titles):
+            ax.text(xc, 1.035, title, transform=ax.get_xaxis_transform(),
+                    ha='center', va='bottom', fontsize=7, clip_on=False)
+    else:
+        ax.set_xlim(float(np.min(s_all)), float(np.max(s_all)))
+    lo, hi = ((float(np.nanmin(y_view)), float(np.nanmax(y_view)))
+              if np.any(finite) else (0.0, 1.0))
+    pad = 0.06 * ((hi - lo) if hi > lo else max(abs(hi), 1.0))
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_ylabel(labels[field])
+    ax.set_xlabel(xlabel, labelpad=6)
 
     fig.suptitle(sup_fmt % record, fontsize=9, fontweight='bold', y=0.97)
     fig_path = os.path.join(fig_dir, fig_name)
@@ -531,10 +488,126 @@ def plot_record(fig_dir, fig_name, record, rows, s_all, flat_mode,
             if logger:
                 log_step(logger, '[plot] 导出 %s 格式失败: %s', fmt, str(e2))
     plt.close(fig)
-    gray = _grayscale_preview_local(fig_path + '.png')
     if logger:
-        log_step(logger, '[plot] 成功生成三段分轴图表: %s.{%s}%s',
-                 fig_path, ','.join(FIG_FORMATS), (' + 灰度预览' if gray else ''))
+        log_step(logger, '[plot] 成功生成指标剖面图: %s.{%s}',
+                 fig_path, ','.join(FIG_FORMATS))
+
+
+def compute_gh_profiles(a_fe, a_ref, times, target_freqs):
+    """对 FE 与参考场时程做同口径 FFT，求 |G(f,s)| 在目标频率处的空间剖面。
+
+    幅值口径 |G|=|FFT(FE)|/|FFT(参考)|，参考取 freefield_rect_x（左侧上平台平场解，
+    与 TAF 分母一致；水平传播相位只影响相位不影响幅值，无需显式扣除）。参考谱幅值
+    低于 GH_REF_MASK_REL×逐节点谱峰值的频点视为无激励置 NaN（曲线断线），直流分量
+    剔除。返回 节点×目标频率 幅值矩阵（目标频率在有效频带外或无激励处为 NaN）；
+    时长不足或时间轴无效时返回 None。
+    """
+    n_node = a_fe.shape[0]
+    n_t = min(a_fe.shape[1], a_ref.shape[1])
+    if len(times) < 2 or n_t < 8:
+        return None
+    dt = float(times[1] - times[0])
+    if dt <= 0.0:
+        return None
+    nfft = 1 << int(np.ceil(np.log2(n_t * 2)))  # 2 倍补零的 2 幂长度，细化频点
+    spec_fe = np.fft.rfft(a_fe[:, :n_t], n=nfft, axis=1)
+    spec_ref = np.fft.rfft(a_ref[:, :n_t], n=nfft, axis=1)
+    freqs = np.fft.rfftfreq(nfft, d=dt)
+    amp_ref = np.abs(spec_ref)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gh = np.abs(spec_fe) / amp_ref  # 谱幅值比
+    ref_peak = np.max(amp_ref, axis=1)  # 逐节点参考谱峰值
+    gh[:, 0] = np.nan  # 剔除直流分量
+    gh[amp_ref < GH_REF_MASK_REL * ref_peak[:, None]] = np.nan  # 无激励频点断线
+    out = np.full((n_node, len(target_freqs)), np.nan, dtype=float)
+    for k in range(n_node):
+        ok = np.isfinite(gh[k])
+        if np.count_nonzero(ok) < 2:
+            continue
+        fk, gk = freqs[ok], gh[k][ok]
+        for j, fq in enumerate(target_freqs):
+            if fk[0] <= fq <= fk[-1]:
+                out[k, j] = float(np.interp(fq, fk, gk))
+    return out
+
+
+def plot_gh_profiles(fig_root, record, freqs, gh, node_labels, xs, ys, s_all,
+                     flat_mode, use_cn, logger=None):
+    """绘制图8式固定频率地表空间幅值剖面（仅幅值，不含相位）并多格式导出。
+
+    论文图8口径：横轴为全地表归一化坐标 s（平场模式退化为 x 物理坐标），灰带=坡面
+    s∈[0,1]，虚线=坡顶/坡脚，五条频率曲线沿用论文配色与线型；曲线做轻量空间平滑
+    （窗口 3，仅显示用，源数据不变）。纵轴标签用纯文本不用 mathtext（本样式为
+    衬线+STIX 数学字体，中文与 $...$ 混排会缺字形成方框）。同时导出源数据 CSV
+    （仅含实际绘制的频率列，NaN 记 'nan'）。
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    _, _seg_titles, xlabel, sup_fmt = _panel_labels(use_cn)
+    ylabel = u'幅值 |G_h|' if use_cn else u'Amplitude |G_h|'
+    if flat_mode:
+        xlabel = u'坐标 x (m)'
+    has_data = [j for j in range(len(freqs)) if np.any(np.isfinite(gh[:, j]))]
+    if not has_data:
+        if logger:
+            log_step(logger, '[plot] 记录 %s 固定频率幅值剖面无有效数据，跳过', record)
+        return
+    sub_dir = os.path.join(fig_root, 'Gh_profiles')  # 图8式剖面独立子文件夹
+    if not os.path.isdir(sub_dir):
+        os.makedirs(sub_dir)
+    fig_name = 'Gh_profiles'
+    fig, ax = plt.subplots(figsize=(6.3, 3.4))
+    style_axes_local(ax)
+    curve_max = 0.0
+    for j in has_data:
+        values = smooth_curve_local(gh[:, j].astype(float), window=3)
+        if np.any(np.isfinite(values)):
+            curve_max = max(curve_max, float(np.nanmax(values)))
+        ax.plot(s_all, values, color=GH_LINE_COLORS[j % len(GH_LINE_COLORS)],
+                linestyle=GH_LINE_STYLES[j % len(GH_LINE_STYLES)], linewidth=1.3,
+                zorder=3, label='%g Hz' % freqs[j])
+    x_lo, x_hi = float(np.min(s_all)), float(np.max(s_all))
+    ax.set_xlim(x_lo, x_hi)
+    if not flat_mode:  # 坡地：灰带坡面+坡顶坡脚虚线+分区标注（论文图8样式）
+        ax.axvspan(0.0, 1.0, color='#D9D9D9', alpha=0.28, zorder=0)
+        ax.axvline(0.0, color='#555555', linestyle='--', linewidth=0.8)
+        ax.axvline(1.0, color='#555555', linestyle='--', linewidth=0.8)
+        seg_names = (u'上平台', u'坡面', u'下平台') if use_cn else \
+            (u'Upper plateau', u'Slope', u'Lower plateau')
+        for xc, title in zip((x_lo / 2.0, 0.5, (1.0 + x_hi) / 2.0), seg_names):
+            ax.text(xc, 1.035, title, transform=ax.get_xaxis_transform(),
+                    ha='center', va='bottom', fontsize=7, clip_on=False)
+    ax.set_ylim(0.0, max(curve_max, 1e-12) * 1.08)  # 幅值非负，从 0 起轴（论文图8口径）
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel, labelpad=6)
+    ax.legend(loc='upper right', fontsize=7, frameon=False)
+    fig.suptitle(sup_fmt % record, fontsize=9, fontweight='bold', y=0.97)
+    fig_path = os.path.join(sub_dir, fig_name)
+    for fmt in FIG_FORMATS:
+        try:
+            old_err = np.seterr(all='ignore')
+            fig.savefig('%s.%s' % (fig_path, fmt), dpi=300, bbox_inches='tight',
+                        pad_inches=0.05)
+            np.seterr(**old_err)
+        except Exception as e2:
+            if logger:
+                log_step(logger, '[plot] 导出 %s 格式失败: %s', fmt, str(e2))
+    plt.close(fig)
+    # CSV 仅含当前图实际绘制的频率列（无数据频率不出现在图内也不进 CSV）
+    cols = ['node_label', 'x', 'y', 's'] + ['G_%gHz' % freqs[j] for j in has_data]
+    with io.open(os.path.join(sub_dir, fig_name + '.csv'), 'w', encoding='utf-8',
+                 newline='') as fh:
+        fh.write(','.join(cols) + '\n')
+        for k in range(len(xs)):
+            vals = ['%.10g' % v if np.isfinite(v) else 'nan'
+                    for v in gh[k, has_data]]
+            fh.write('%d,%.10g,%.10g,%.10g,%s\n' % (
+                int(node_labels[k]), xs[k], ys[k], s_all[k], ','.join(vals)))
+    if logger:
+        log_step(logger, '[plot] 成功生成固定频率幅值剖面: %s.{%s}',
+                 fig_path, ','.join(FIG_FORMATS))
 
 
 # ==========================================================
@@ -543,7 +616,11 @@ def plot_record(fig_dir, fig_name, record, rows, s_all, flat_mode,
 
 
 def process_one_record(record, paths, case_cfg, use_cn, logger=None):
-    """处理单条记录：读 4 个 CSV → 对齐节点 → 指标 → 图 + 源数据子文件夹。"""
+    """处理单条记录：读 FE 2 个 + 自由场 6 个 CSV → 对齐节点 → 指标 → 出图。
+
+    输出结构 figs/<记录>/：每个指标一个子文件夹（<指标>/<指标>.{png,pdf,svg,csv}，
+    CSV 仅含该图绘制范围内的节点数据），另加 Gh_profiles 固定频率幅值剖面。
+    """
     fe_x = read_surface_csv(paths['fe_x'])
     labels, xs, ys = fe_x['labels'], fe_x['xs'], fe_x['ys']
     a_h = fe_x['acc']
@@ -554,10 +631,10 @@ def process_one_record(record, paths, case_cfg, use_cn, logger=None):
         return _align_by_label(labels, read_surface_csv(paths[key]))
 
     a_v = _optional('fe_y')
-    a_1d = _optional('local')
-    a_bg = _optional('bg')
+    refs = {key: _optional(key) for key in
+            ('bg_x', 'bg_y', 'local_x', 'local_y', 'rect_x', 'rect_y')}
 
-    metrics = compute_metrics(a_h, a_v, a_1d, a_bg)
+    metrics = compute_metrics(a_h, a_v, refs)
     geom = infer_slope_geometry(xs, ys)
     flat_mode = geom is None
     if flat_mode:
@@ -586,22 +663,40 @@ def process_one_record(record, paths, case_cfg, use_cn, logger=None):
             row[field] = float(arr[k])
         rows.append(row)
 
-    fig_name = 'surface_response_%s' % record
-    fig_dir = os.path.join(FIG_ROOT_DIR, fig_name)  # 一图一夹：图与源数据同目录
-    if not os.path.isdir(fig_dir):
-        os.makedirs(fig_dir)
-    write_fig_data_csv(os.path.join(fig_dir, fig_name + '.csv'), rows)
-    plot_record(fig_dir, fig_name, record, rows, s_all, flat_mode,
-                a_max, c_max, use_cn, logger)
+    fig_root = os.path.join(FIG_ROOT_DIR, record)  # 记录级目录：各指标子图文件夹
+    if not os.path.isdir(fig_root):
+        os.makedirs(fig_root)
+    for field, color_name in PANEL_SPECS:
+        if not _field_has_finite_value(rows, field):
+            if logger:  # 缺配套 CSV 或垂直入射下竖向一维场恒 0 等情形，指标全 NaN，跳过该子图
+                log_step(logger, '[plot] 记录 %s 指标 %s 无有效数据，跳过该子图',
+                         record, field)
+            continue
+        sub_dir = os.path.join(fig_root, field)  # 每个子图单独一个子文件夹
+        if not os.path.isdir(sub_dir):
+            os.makedirs(sub_dir)
+        plot_metric_panel(sub_dir, field, field, CB_PALETTE[color_name], record,
+                          rows, s_all, flat_mode, a_max, c_max, use_cn, logger)
+
+    # 图8式固定频率地表空间幅值剖面（仅幅值；分母与 TAF 同基准=左侧上平台平场解）
+    if refs.get('rect_x') is not None:
+        gh = compute_gh_profiles(a_h, refs['rect_x'], fe_x['times'],
+                                 GH_PROFILE_FREQUENCIES)
+        if gh is not None:
+            plot_gh_profiles(fig_root, record, GH_PROFILE_FREQUENCIES, gh,
+                             labels, xs, ys, s_all, flat_mode, use_cn, logger)
+    elif logger:
+        log_step(logger, '[plot] 记录 %s 缺 freefield_rect_x，跳过固定频率幅值剖面',
+                 record)
 
     taf_arr = metrics['TAF_h']
     ar_idx = int(np.nanargmax(taf_arr)) if np.any(~np.isnan(taf_arr)) else None
     dur = float(fe_x['times'][-1] - fe_x['times'][0]) if len(fe_x['times']) > 1 else 0.0
     if logger:
-        log_step(logger, '%s: 节点=%d 时长=%.2fs TAF_h_max=%s@x=%s (源数据与图见 %s/)',
+        log_step(logger, '%s: 节点=%d 时长=%.2fs TAF_h_max=%s@x=%s (输出见 %s/)',
                  record, len(xs), dur,
                  ('%.3f' % taf_arr[ar_idx]) if ar_idx is not None else 'N/A',
-                 ('%.2f' % xs[ar_idx]) if ar_idx is not None else 'N/A', fig_dir)
+                 ('%.2f' % xs[ar_idx]) if ar_idx is not None else 'N/A', fig_root)
     return {'record': record, 'n_nodes': len(xs), 'duration': dur,
             'TAF_h_max': (float(taf_arr[ar_idx]) if ar_idx is not None else None),
             'TAF_h_max_x': (float(xs[ar_idx]) if ar_idx is not None else None),
@@ -609,7 +704,7 @@ def process_one_record(record, paths, case_cfg, use_cn, logger=None):
 
 
 def main():
-    """后处理脚本控制流：发现记录 → 逐记录出图与源数据 → 汇总。"""
+    """后处理脚本控制流：发现记录 → 逐记录出图（每图独立文件夹含源数据 CSV）。"""
     logger = log_step()
     log_step(logger, '脚本开始执行 (%s)', _script_name())
     case_cfg = _load_json('case_config.json') or {}
@@ -642,7 +737,7 @@ def main():
             log_step(logger, '错误: 记录 %s 处理失败: %s', record, str(e))
             log_step(logger, '错误堆栈:\n%s', traceback.format_exc())
             failed.append(record)
-    log_step(logger, '完成: %d/%d 条记录出图（图与源数据在 %s/<图名>/）',
+    log_step(logger, '完成: %d/%d 条记录出图（%s/<记录>/<指标>/ 各含图 3 格式+源数据 CSV）',
              len(summaries), len(records), FIG_ROOT_DIR)
     if failed and not summaries:
         sys.exit(1)  # 全部失败才判失败；部分成功时保留产出并如实记录

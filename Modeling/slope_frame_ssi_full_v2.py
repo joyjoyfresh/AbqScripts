@@ -83,7 +83,7 @@ damping_cfg = {
 
 # 网格自适应配置
 mesh_cfg = {
-    'size': 4.0,                        # 基准/全局网格尺寸（m）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
+    'size': geometry_cfg['slope_height'] / 50,  # 基准/全局网格尺寸（m）=默认坡高/50（默认 hs=200 时即 4.0；仅随模块默认几何，工况坡高不联动）。auto=True 时作为上限(mesh_used=min(size,Δl_max))；auto=False 时强制采用
     'auto': True,                       #! True=自动按最软层/最高频率计算 Δl_max（不超过 size）；False=强制使用 size
     'elems_per_wavelength': 10,         # 每波长最少单元数（论文取 10，即 Δl≤cs_min/(10·fmax)）
     'fmax_factor': 2.5,                 # fmax = fmax_factor*fc（Ricker 子波有效频带上限估计，覆盖 2~3σ 宽度）
@@ -1122,15 +1122,21 @@ def _fd_engine_selfcheck(logger=None):  # fd 引擎建模前内置自检（验�
 
 def _write_freefield_surface_csv(model, part_name, geom, site, damping, surface_geometry,
                                  acc_path, tail_seconds, angle_deg, out_dir, logger=None):
-    """输出地表节点集(TOP_SURFACE)逐节点自由场水平加速度时程 CSV（v10）。
+    """输出地表节点集(TOP_SURFACE)逐节点自由场水平/竖向加速度时程 CSV（v10）。
 
     站点=实际网格地表节点 (x,y)，解析解直接在节点坐标求值，无任何插值。
-    两个文件（写入 out_dir，<record> 为输入波记录名）：
-      freefield_background_<record>.csv  背景场——三人工边界统一注入的左柱(H_upper)
+    六个文件（写入 out_dir，<record> 为输入波记录名，文件名 _x/_y 为水平/竖向分量；
+    三组行序同为按 x 升序、node_label/x 一致，可逐行对齐对比）：
+      freefield_background_x/y_<record>.csv  背景场——三人工边界统一注入的左柱(H_upper)
         平场解在节点高程处的取值（坡面/坡脚节点为左柱内部点），即模型实际收到的输入场；
-      freefield_local_1d_<record>.csv    局部一维场——节点当地竖向土柱（按当地地表高程
-        裁剪分层）的地表响应，即一维场地分析在该站的预测（坡面为名义基准）。
-    口径：两量均含水平传播相位 e^{-iωpx}（原点=左边界 x=0，与边界等效力相位约定一致）；
+      freefield_local_1d_x/y_<record>.csv    局部一维场——节点当地竖向土柱（按当地地表高程
+        裁剪分层）的地表响应，即一维场地分析在该站的预测（坡面为名义基准）；
+        竖向分量来自斜入射 P-SV 波系（垂直入射 p=0 时恒为 0）。
+      freefield_rect_x/y_<record>.csv        矩形平场——以左平台高程 H_upper 为地表的矩形
+        自由场表面时程：站点 x 沿用实际表面节点（y 统一记 H_upper），场量=左柱解在地表
+        H_upper 处的取值（各节点仅差水平相位），即假想无坡平场模型的地表响应（坡地模式下
+        供平场/坡地对比；矩形空间模式下与 background 组一致）。
+    口径：各分量均含水平传播相位 e^{-iωpx}（原点=左边界 x=0，与边界等效力相位约定一致）；
     相位参考在柱底 y=0（输入波注入处），故地表响应含自柱底的单程走时延迟，时间轴与 FE 分析
     步/ODB 一致（输入波自底边界出发、延迟到达地表），可逐样本对拍；时间窗=输入持时+tail_seconds；
     频域容差 1e-7、补零 4 倍与 fd 引擎完全同口径。
@@ -1175,32 +1181,51 @@ def _write_freefield_surface_csv(model, part_name, geom, site, damping, surface_
     sol_bg = _fd_solve_column(_build_column(strat, geom.H_upper, p0, 0.0), p0, om0, damp_terms)
     local_cache = {round(float(geom.H_upper), 4): sol_bg}
     n_node = len(pts)
-    bg_mat = np.zeros((n_node, Nout), dtype=float)  # 背景场时程（行=节点）
-    lo_mat = np.zeros((n_node, Nout), dtype=float)  # 局部一维场时程
+    bg_mat = np.zeros((n_node, Nout), dtype=float)  # 背景场水平时程（行=节点）
+    bg_mat_v = np.zeros((n_node, Nout), dtype=float)  # 背景场竖向时程
+    lo_mat = np.zeros((n_node, Nout), dtype=float)  # 局部一维场水平时程
+    lo_mat_v = np.zeros((n_node, Nout), dtype=float)  # 局部一维场竖向时程
+    rt_mat = np.zeros((n_node, Nout), dtype=float)  # 矩形平场水平时程
+    rt_mat_v = np.zeros((n_node, Nout), dtype=float)  # 矩形平场竖向时程
+    fields_surf = _fd_eval_column(sol_bg, om0, p0, float(geom.H_upper))  # 矩形平场地表场量（全节点同值，仅相位不同）
+    spec = np.zeros(nfreq, dtype=complex)  # a(ω)=u_unit×A（位移两次积分与 −ω² 相消）；复用缓冲，仅 idx0 位被覆写
     for k in range(n_node):
         shift = np.exp(-1j * om0 * p0 * xs[k])  # 水平传播相位（原点=左边界 x=0）
-        spec = np.zeros(nfreq, dtype=complex)  # a(ω)=u_unit×A（位移两次积分与 −ω² 相消）
-        spec[idx0] = _fd_eval_column(sol_bg, om0, p0, ys[k])['ux'] * A0[idx0] * shift
+        fields_bg = _fd_eval_column(sol_bg, om0, p0, ys[k])  # 一次求值同时取 ux/uy，不重复解谱
+        spec[idx0] = fields_bg['ux'] * A0[idx0] * shift
         bg_mat[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+        spec[idx0] = fields_bg['uy'] * A0[idx0] * shift
+        bg_mat_v[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
         key = round(float(ys[k]), 4)
         sol_lo = local_cache.get(key)
         if sol_lo is None:
             sol_lo = _fd_solve_column(_build_column(strat, float(ys[k]), p0, 0.0), p0, om0, damp_terms)
             local_cache[key] = sol_lo
-        spec = np.zeros(nfreq, dtype=complex)
-        spec[idx0] = _fd_eval_column(sol_lo, om0, p0, ys[k])['ux'] * A0[idx0] * shift
+        fields_lo = _fd_eval_column(sol_lo, om0, p0, ys[k])
+        spec[idx0] = fields_lo['ux'] * A0[idx0] * shift
         lo_mat[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+        spec[idx0] = fields_lo['uy'] * A0[idx0] * shift
+        lo_mat_v[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+        spec[idx0] = fields_surf['ux'] * A0[idx0] * shift
+        rt_mat[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
+        spec[idx0] = fields_surf['uy'] * A0[idx0] * shift
+        rt_mat_v[k] = np.fft.irfft(spec, n=Nfft)[:Nout]
     record_name = os.path.splitext(os.path.basename(acc_path))[0]  # 与 ODB 记录名一致
     time_col = np.arange(Nout, dtype=float) * dt0
     header = 'node_label,x,y,' + ','.join(['t=%.8g' % t for t in time_col])  # 列名=时间（与 surface_acc 一致）
     fmt = ['%d', '%.10g', '%.10g'] + ['%.10g'] * Nout  # 列1整数标签，其余浮点
     labels = np.array([p[2] for p in pts], dtype=int)
-    for fname, mat in (('freefield_background_%s.csv' % record_name, bg_mat),
-                       ('freefield_local_1d_%s.csv' % record_name, lo_mat)):
-        np.savetxt(os.path.join(out_dir, fname), np.column_stack([labels, xs, ys, mat]),
+    ys_rect = np.full(n_node, float(geom.H_upper))  # 矩形平场组 y 统一记 H_upper（站点 x 沿用实际节点）
+    for fname, mat, y_col in (('freefield_background_x_%s.csv' % record_name, bg_mat, ys),
+                              ('freefield_background_y_%s.csv' % record_name, bg_mat_v, ys),
+                              ('freefield_local_1d_x_%s.csv' % record_name, lo_mat, ys),
+                              ('freefield_local_1d_y_%s.csv' % record_name, lo_mat_v, ys),
+                              ('freefield_rect_x_%s.csv' % record_name, rt_mat, ys_rect),
+                              ('freefield_rect_y_%s.csv' % record_name, rt_mat_v, ys_rect)):
+        np.savetxt(os.path.join(out_dir, fname), np.column_stack([labels, xs, y_col, mat]),
                    fmt=fmt, delimiter=',', header=header, comments='')
     if logger:
-        log_step(logger, '地表自由场 CSV: %d 节点 × %d 样本(%.2fs) -> background/local_1d 2 文件',
+        log_step(logger, '地表自由场 CSV: %d 节点 × %d 样本(%.2fs) -> background/local_1d/rect × x/y 6 文件',
                  n_node, Nout, Nout * dt0)
 
 
