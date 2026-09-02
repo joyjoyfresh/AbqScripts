@@ -479,14 +479,11 @@ def build_word_document(md_path, template_path, output_path):
         if child.tag.endswith(('p', 'tbl')):
             body_elem.remove(child)
             
-    # 设置页眉文字
-    header_text = "【作者一】，等：成层坡地地震动放大效应的幅值—相位联合表征、代理预测与真实地震动重构"
+    # 清空所有页眉
     for s in doc.sections:
-        for p in s.header.paragraphs:
-            p.text = header_text
-            p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            for r in p.runs:
-                set_run_font(r, font_name_ascii='Times New Roman', font_name_eastasia='宋体', size_pt=9.0)
+        for h in [s.header, s.first_page_header, s.even_page_header]:
+            for p in h.paragraphs:
+                p.text = ""
                 
     # 分离文头部分与正文部分
     front_blocks = []
