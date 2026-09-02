@@ -15,25 +15,9 @@ venv/
 *.swo
 
 .workbuddy/
-.origin_runtime/
 批量转换工具/
 .qoder/
 .agents/
-
-# 测试目录全部不进版本库
 test/
-
-# 正式工作目录下的所有文件不进版本库
-Run/*
-!Run/Auto_ch*/
-Run/Auto_ch*/*
-!Run/Auto_ch*/*.py
-!Run/Auto_ch*/*.json
-!Run/Auto_ch*/cross_solver/
-Run/Auto_ch*/cross_solver/*
-!Run/Auto_ch*/cross_solver/*.py
-!Run/Auto_ch*/cross_solver/*.json
-!Run/Auto_ch*/evaluation/
-Run/Auto_ch*/evaluation/*
-!Run/Auto_ch*/evaluation/*.py
-Run/Auto_ch*/**/__pycache__/
+Run/
+Archive/
